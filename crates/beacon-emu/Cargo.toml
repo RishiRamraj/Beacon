@@ -1,0 +1,10 @@
+[package]
+name = "beacon-emu"
+description = "Safe wrapper over the bsnes-jg emulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bsnes-sys.workspace = true

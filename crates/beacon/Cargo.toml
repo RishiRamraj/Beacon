@@ -1,0 +1,10 @@
+[package]
+name = "beacon"
+description = "An accessible SNES emulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+beacon-emu.workspace = true
