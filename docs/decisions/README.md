@@ -16,3 +16,6 @@ narrative source; these records are the per-decision index.
 | [0009](0009-gplv3.md) | Licence is GPLv3 | Accepted |
 | [0010](0010-defer-emulator-hook-patch.md) | Defer the bsnes-jg hook patch until a feature demands it | Accepted (deferred implementation) |
 | [0011](0011-community-driven-iteration.md) | Iterate with the blind-player community rather than planning around them | Accepted |
+| [0012](0012-determinism-and-replay.md) | Determinism and golden-file replay testing | Accepted |
+| [0013](0013-delivery-and-packaging.md) | Delivery and packaging | Accepted |
+| [0014](0014-everything-configurable-at-runtime.md) | Every setting is configurable, at runtime, without a text editor | Accepted |

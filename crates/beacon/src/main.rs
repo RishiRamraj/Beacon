@@ -118,7 +118,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..frames {
         let n = emu.frame_count();
         let tapping_start = n > 120 && (n / 20) % 2 == 0;
-        emu.set_buttons(0, if tapping_start { beacon_emu::button::START } else { 0 });
+        emu.set_buttons(
+            0,
+            if tapping_start {
+                beacon_emu::button::START
+            } else {
+                0
+            },
+        );
 
         let n = emu.run_frame();
 
@@ -132,6 +139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.module,
                     module_name(s.module),
                 );
+                if s.module == 0x07 || s.module == 0x09 {
+                    println!("             position ({}, {})", s.x, s.y);
+                }
             }
             if prev.as_ref().map(|p| p.health) != Some(s.health) && s.max_health > 0 {
                 println!(

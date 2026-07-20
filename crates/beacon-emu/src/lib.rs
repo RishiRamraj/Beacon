@@ -222,8 +222,8 @@ impl Emulator {
         let bytes = std::fs::read(rom_path)?;
         let rom = strip_copier_header(&bytes);
 
-        let loc = CString::new(rom_path.to_string_lossy().as_bytes())
-            .map_err(|_| Error::InvalidPath)?;
+        let loc =
+            CString::new(rom_path.to_string_lossy().as_bytes()).map_err(|_| Error::InvalidPath)?;
 
         let mut buffers = Box::new(Buffers {
             video: vec![0u32; VIDEO_MAX_WIDTH * VIDEO_MAX_HEIGHT],
