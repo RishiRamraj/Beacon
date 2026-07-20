@@ -9,9 +9,10 @@ visually impaired players get spoken and spatial information about what is
 happening on screen. Game specific knowledge lives in plugins, so instrumenting
 a new game does not mean modifying the emulator.
 
-**Status: phase 0.** The emulator core is embedded and running, and the frame
-hook works. There is no UI, no speech, and no plugin runtime yet. It is not
-playable.
+**Status: playable, early.** The emulator runs games with video, audio, keyboard
+and gamepad input, and speaks what it detects through your screen reader. There
+is no plugin runtime yet, so game knowledge is currently built in, and only
+A Link to the Past is instrumented.
 
 ## What makes it different
 
@@ -46,21 +47,58 @@ git submodule update --init
 Beacon ships no game data. **Bring your own ROM.**
 
 ```sh
-./target/release/beacon "/path/to/your.sfc" 3600
+./target/release/beacon "/path/to/your.sfc"
 ```
 
-The phase 0 harness boots the ROM, taps Start to walk the title screen, and
-reports state transitions it detects by diffing work RAM between frames:
+On Linux, speech goes through speech-dispatcher, so you get the voice and rate
+you have already configured. If it is not running, Beacon says so and plays on.
 
+### Controls
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| arrows | d-pad | enter | start |
+| z x a s | B A Y X | right shift | select |
+| q w | L R | | |
+| c | scan | e | where am I |
+| h | status | v | cycle verbosity |
+| r | repeat last | esc | quit |
+
+A gamepad works too, and both are live at once. The left stick doubles as a
+d-pad, which some players find easier than the hat.
+
+### Other modes
+
+```sh
+beacon rom.sfc --headless 3600   # no window, for benchmarking and replay tests
+beacon rom.sfc --json --quiet    # line delimited JSON events on stdout
+beacon rom.sfc --rate 80         # override speech rate for this run
 ```
-loaded A Link to the Past (USA).sfc
-  region NTSC  work RAM 128 KiB
-frame    81  module 0xff -> 0x00  intro
-frame   961  module 0x00 -> 0x01  file select
-frame  1041  module 0x01 -> 0x04  name file
 
-ran 3600 frames in 18.66s  =  193 fps  (3.2x realtime)
-savestate: 295810 bytes
+`--json` emits an event per line, so a screen reader, a custom voice pipeline,
+or any other tool can subscribe:
+
+```json
+{"type":"speak","text":"file select","priority":"Navigation","interrupt":false}
+```
+
+**stdout carries only the event stream.** Diagnostics and emulator logs go to
+stderr, so piping stdout into a parser is safe.
+
+## Settings
+
+Everything is configurable, and nothing needs configuring to start. Settings
+live in `beacon/settings.toml` in your config directory and can also be changed
+while playing, because telling someone to edit a file to fix speech they cannot
+follow is circular.
+
+```toml
+[speech]
+rate = 60          # -100 slowest, 100 fastest
+
+[arbiter]
+verbosity = 2      # 0 critical only, 3 everything
+max_per_frame = 2
 ```
 
 ## Layout

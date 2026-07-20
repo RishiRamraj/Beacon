@@ -18,6 +18,7 @@
 
 #include "shim.h"
 
+#include <cstdio>
 #include <map>
 #include <sstream>
 #include <string>
@@ -66,6 +67,13 @@ bool open_stream(void *, std::string name, std::stringstream &ss) {
 /* Invoked from inside Bsnes::load(). Cartridge::load() clears its game state
    and then calls this, so the ROM has to be handed over here rather than
    beforehand: anything set earlier is wiped before it is read. */
+/* bsnes-jg logs to whatever the host provides. Route it to stderr: stdout
+   carries the JSON event stream, and a stray log line there would break any
+   consumer parsing it. */
+void log_message(void *, int, std::string &msg) {
+  std::fputs(msg.c_str(), stderr);
+}
+
 bool rom_load(void *, unsigned id) {
   if (id != Bsnes::GameType::SuperFamicom) {
     return false;
@@ -255,6 +263,7 @@ void beacon_bsnes_install_callbacks(void) {
   Bsnes::setOpenFileCallback(nullptr, open_file);
   Bsnes::setOpenStreamCallback(nullptr, open_stream);
   Bsnes::setRomLoadCallback(nullptr, rom_load);
+  Bsnes::setLogCallback(nullptr, log_message);
   BEACON_CATCH_VOID
 }
 

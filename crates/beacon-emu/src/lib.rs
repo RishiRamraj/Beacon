@@ -115,7 +115,8 @@ pub const VIDEO_MAX_WIDTH: usize = 512;
 pub const VIDEO_MAX_HEIGHT: usize = 496;
 /// Audio samples per frame, sized for PAL's lower frame rate so NTSC also fits.
 const AUDIO_MAX_SPF: usize = (48_000 / 50) * 2;
-const AUDIO_SAMPLE_RATE: f64 = 48_000.0;
+/// Sample rate the emulator is asked to produce.
+pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
 
 /// Dimensions of the most recently emitted video frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -136,6 +137,8 @@ struct Buffers {
     audio: Vec<f32>,
     frame_info: FrameInfo,
     audio_samples: u64,
+    /// Samples produced since the host last drained them. Interleaved stereo.
+    audio_out: Vec<f32>,
     /// Held buttons per controller port, polled by the emulator each latch.
     buttons: [u16; 2],
 }
@@ -156,9 +159,16 @@ unsafe extern "C" fn on_video(ptr: *const std::ffi::c_void, w: u32, h: u32, pitc
 /// # Safety
 /// As [`on_video`], for the audio spec.
 unsafe extern "C" fn on_audio(ptr: *const std::ffi::c_void, samples: usize) {
-    if let Some(b) = (ptr as *mut Buffers).as_mut() {
-        b.audio_samples += samples as u64;
-    }
+    let Some(b) = (ptr as *mut Buffers).as_mut() else {
+        return;
+    };
+    b.audio_samples += samples as u64;
+
+    // The emulator wrote `samples` floats into the buffer it was given. Copy
+    // them out before the next frame overwrites them; the host drains
+    // `audio_out` once per frame.
+    let n = samples.min(b.audio.len());
+    b.audio_out.extend_from_slice(&b.audio[..n]);
 }
 
 /// SNES controller buttons, as the bit positions bsnes-jg expects.
@@ -230,6 +240,7 @@ impl Emulator {
             audio: vec![0f32; AUDIO_MAX_SPF],
             frame_info: FrameInfo::default(),
             audio_samples: 0,
+            audio_out: Vec::with_capacity(AUDIO_MAX_SPF * 4),
             buttons: [0; 2],
         });
         let ctx = (&mut *buffers) as *mut Buffers as *mut std::ffi::c_void;
@@ -255,7 +266,7 @@ impl Emulator {
                 cb: Some(on_video),
             });
             sys::beacon_bsnes_set_audio_spec(sys::AudioSpec {
-                freq: AUDIO_SAMPLE_RATE,
+                freq: AUDIO_SAMPLE_RATE as f64,
                 spf: AUDIO_MAX_SPF as u32,
                 rsqual: 0,
                 buf: buffers.audio.as_mut_ptr(),
@@ -297,6 +308,15 @@ impl Emulator {
     /// Audio samples emitted since power-on.
     pub fn audio_samples(&self) -> u64 {
         self.buffers.audio_samples
+    }
+
+    /// Moves buffered audio into `into` and clears the internal buffer.
+    ///
+    /// Interleaved stereo at [`AUDIO_SAMPLE_RATE`]. Call once per frame: if it
+    /// is not drained the buffer grows without bound.
+    pub fn drain_audio(&mut self, into: &mut Vec<f32>) {
+        into.extend_from_slice(&self.buffers.audio_out);
+        self.buffers.audio_out.clear();
     }
 
     /// Sets the buttons held on a controller port, as a mask of [`button`]
