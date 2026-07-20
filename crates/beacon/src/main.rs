@@ -1,173 +1,207 @@
-//! Beacon - phase 0 harness.
-//!
-//! This is not the emulator yet. It loads a ROM, runs frames, and reads work
-//! RAM between them, which is the one property the whole design rests on: the
-//! instrumentation runs in-process against real memory rather than sampling an
-//! emulator over a socket.
-//!
-//! The ALttP readings below are a throwaway plugin standing in for the real
-//! plugin runtime. They exist to prove the frame hook, not to be kept.
+//! Beacon: a SNES emulator with accessibility as a first class feature.
+
+mod alttp;
+mod app;
+mod audio;
+mod input;
 
 use std::path::PathBuf;
-use std::time::Instant;
 
+use beacon_config::Settings;
 use beacon_emu::Emulator;
+use beacon_output::sink::{Fanout, JsonSink, SpeechSink};
+use beacon_output::{Arbiter, Config};
 
-/// SNES bank $7E is the first 64 KiB of work RAM, bank $7F the second.
-/// Converts an A-bus address such as `$7EF36D` into a work RAM offset.
-fn wram_offset(addr: u32) -> Option<usize> {
-    match addr >> 16 {
-        0x7E => Some((addr & 0xFFFF) as usize),
-        0x7F => Some(0x10000 + (addr & 0xFFFF) as usize),
-        _ => None,
-    }
-}
+fn usage() -> ! {
+    eprintln!(
+        "\
+Beacon - an accessible SNES emulator
 
-fn u8_at(ram: &[u8], addr: u32) -> Option<u8> {
-    ram.get(wram_offset(addr)?).copied()
-}
+usage: beacon <rom.sfc> [options]
 
-fn u16_at(ram: &[u8], addr: u32) -> Option<u16> {
-    let o = wram_offset(addr)?;
-    let lo = *ram.get(o)? as u16;
-    let hi = *ram.get(o + 1)? as u16;
-    Some(lo | (hi << 8))
-}
+options:
+  --headless <frames>   run without a window, for testing and benchmarking
+  --json                emit line delimited JSON events on stdout
+  --quiet               no speech, useful with --json
+  --rate <-100..100>    speech rate; overrides the saved setting
 
-/// A Link to the Past state, read straight out of work RAM.
-struct Alttp {
-    module: u8,
-    health: u8,
-    max_health: u8,
-    x: u16,
-    y: u16,
-}
+controls:
+  arrows                d-pad            enter    start
+  z x a s               B A Y X          rshift   select
+  q w                   L R
 
-impl Alttp {
-    fn read(ram: &[u8]) -> Option<Self> {
-        Some(Alttp {
-            module: u8_at(ram, 0x7E0010)?,
-            health: u8_at(ram, 0x7EF36D)?,
-            max_health: u8_at(ram, 0x7EF36C)?,
-            x: u16_at(ram, 0x7E0022)?,
-            y: u16_at(ram, 0x7E0020)?,
-        })
-    }
+  c   scan              e   where am I
+  h   status            v   cycle verbosity
+  r   repeat last       esc quit
 
-    /// Health is stored in eighths of a heart.
-    fn hearts(&self) -> f32 {
-        self.health as f32 / 8.0
-    }
-
-    fn max_hearts(&self) -> f32 {
-        self.max_health as f32 / 8.0
-    }
-}
-
-/// ALttP's main module, the closest thing the game has to a top-level state.
-fn module_name(m: u8) -> &'static str {
-    match m {
-        0x00 => "intro",
-        0x01 => "file select",
-        0x02 => "copy file",
-        0x03 => "erase file",
-        0x04 => "name file",
-        0x05 => "loading game",
-        0x06 => "pre-dungeon",
-        0x07 => "dungeon",
-        0x08 => "pre-overworld",
-        0x09 => "overworld",
-        0x0e => "text / menu",
-        0x12 => "death",
-        0x14 => "attract mode",
-        0x19 => "triforce room",
-        _ => "?",
-    }
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args_os().skip(1);
-    let rom: PathBuf = match args.next() {
-        Some(p) => PathBuf::from(p),
-        None => {
-            eprintln!("usage: beacon <rom.sfc> [frames]");
-            std::process::exit(2);
-        }
-    };
-    let frames: u64 = args
-        .next()
-        .and_then(|s| s.to_str().and_then(|s| s.parse().ok()))
-        .unwrap_or(600);
-
-    let mut emu = Emulator::load(&rom)?;
-    let ram = emu.main_ram()?;
-    println!(
-        "loaded {}\n  region {}  work RAM {} KiB",
-        rom.display(),
-        emu.region(),
-        ram.len() / 1024
+Settings live at {}, and every value can also be changed while playing.",
+        Settings::default_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "the user config directory".into())
     );
+    std::process::exit(2)
+}
 
-    // Advance frames, reading state between each one.
-    //
-    // Start is tapped periodically to walk the title screen through to the
-    // file select, so the readings below show a game that is actually running
-    // rather than a boot screen. Real input arrives with the host.
-    let start = Instant::now();
-    let mut prev: Option<Alttp> = None;
-    for _ in 0..frames {
-        let n = emu.frame_count();
-        let tapping_start = n > 120 && (n / 20) % 2 == 0;
-        emu.set_buttons(
-            0,
-            if tapping_start {
-                beacon_emu::button::START
-            } else {
-                0
-            },
-        );
+struct Args {
+    rom: PathBuf,
+    headless: Option<u64>,
+    json: bool,
+    quiet: bool,
+    rate: Option<i8>,
+}
 
-        let n = emu.run_frame();
+fn parse_args() -> Args {
+    let mut rom = None;
+    let mut args = Args {
+        rom: PathBuf::new(),
+        headless: None,
+        json: false,
+        quiet: false,
+        rate: None,
+    };
 
-        // Frame-to-frame diffing, which is what the real event detector does:
-        // compare this frame's state to the last and report what changed.
-        if let Some(s) = Alttp::read(emu.main_ram()?) {
-            if prev.as_ref().map(|p: &Alttp| p.module) != Some(s.module) {
-                println!(
-                    "frame {n:>5}  module {:#04x} -> {:#04x}  {}",
-                    prev.as_ref().map(|p| p.module).unwrap_or(0),
-                    s.module,
-                    module_name(s.module),
-                );
-                if s.module == 0x07 || s.module == 0x09 {
-                    println!("             position ({}, {})", s.x, s.y);
-                }
-            }
-            if prev.as_ref().map(|p| p.health) != Some(s.health) && s.max_health > 0 {
-                println!(
-                    "frame {n:>5}  health {:.1}/{:.1} hearts",
-                    s.hearts(),
-                    s.max_hearts()
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--headless" => {
+                args.headless = Some(
+                    it.next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(|| usage()),
                 );
             }
-            prev = Some(s);
+            "--json" => args.json = true,
+            "--quiet" => args.quiet = true,
+            "--rate" => {
+                args.rate = Some(
+                    it.next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                );
+            }
+            "-h" | "--help" => usage(),
+            other if other.starts_with('-') => usage(),
+            other => rom = Some(PathBuf::from(other)),
         }
     }
-    let elapsed = start.elapsed();
 
-    // Emulation speed relative to the SNES's ~60.098 Hz NTSC refresh. This is
-    // the number that decides whether accuracy is affordable on a given
-    // machine, so phase 0 measures it rather than assuming.
+    args.rom = rom.unwrap_or_else(|| usage());
+    args
+}
+
+/// Builds the speech sinks, tolerating the absence of any of them.
+///
+/// A missing screen reader must never prevent the emulator from starting. It
+/// degrades what Beacon can tell you; it does not stop you playing.
+fn build_speech(settings: &Settings, args: &Args) -> Fanout {
+    let mut fanout = Fanout::new();
+
+    if args.json || settings.speech.json_events {
+        fanout.push(Box::new(JsonSink::new(std::io::stdout())));
+    }
+
+    if args.quiet || !settings.speech.enabled {
+        return fanout;
+    }
+
+    #[cfg(unix)]
+    {
+        use beacon_output::sink::SpeechDispatcherSink;
+        match SpeechDispatcherSink::connect() {
+            Ok(mut sink) => {
+                let rate = args.rate.unwrap_or(settings.speech.rate);
+                if let Err(e) = sink.set_rate(rate) {
+                    eprintln!("could not set speech rate: {e}");
+                }
+                if !settings.speech.module.is_empty() {
+                    if let Err(e) = sink.set_module(&settings.speech.module) {
+                        eprintln!("could not set speech module: {e}");
+                    }
+                }
+                fanout.push(Box::new(sink));
+            }
+            Err(e) => eprintln!("speech unavailable: {e}\n  (is speech-dispatcher running?)"),
+        }
+    }
+
+    fanout
+}
+
+/// Runs without a window. Used for benchmarking and for replay testing, both of
+/// which want the frame loop without the presentation.
+fn run_headless(
+    mut emu: Emulator,
+    mut arbiter: Arbiter,
+    mut speech: Fanout,
+    frames: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+
+    let mut game = alttp::Alttp::new();
+    let mut audio = Vec::new();
+    let start = Instant::now();
+
+    for n in 0..frames {
+        // Tap start so the game walks out of the title screen unattended.
+        let buttons = if n > 120 && (n / 20) % 2 == 0 {
+            beacon_emu::button::START
+        } else {
+            0
+        };
+        emu.set_buttons(0, buttons);
+        emu.run_frame();
+
+        audio.clear();
+        emu.drain_audio(&mut audio);
+
+        let intents = game.on_frame(emu.main_ram()?);
+        if !intents.is_empty() {
+            // Time from the frame counter, not the clock, so a replay of the
+            // same inputs arbitrates identically.
+            let now = std::time::Duration::from_secs_f64(n as f64 / 60.098);
+            for utterance in arbiter.resolve(intents, now) {
+                // Human readable progress goes to stderr; stdout is reserved
+                // for the JSON event stream so it stays machine parseable.
+                eprintln!("frame {n:>6}  {}", utterance.text);
+                let _ = speech.speak(&utterance);
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
     let fps = frames as f64 / elapsed.as_secs_f64();
-    println!(
-        "\nran {frames} frames in {:.2}s  =  {fps:.0} fps  ({:.1}x realtime)",
+    eprintln!(
+        "\n{frames} frames in {:.2}s = {fps:.0} fps ({:.1}x realtime)",
         elapsed.as_secs_f64(),
         fps / 60.098
     );
+    Ok(())
+}
 
-    // Savestates are what make replay-based regression testing possible later.
-    let state = emu.save_state()?;
-    println!("savestate: {} bytes", state.len());
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = parse_args();
 
+    let settings = match Settings::default_path() {
+        Some(path) => Settings::load(&path).unwrap_or_else(|e| {
+            eprintln!("{e}; using defaults");
+            Settings::default()
+        }),
+        None => Settings::default(),
+    };
+
+    let emu = Emulator::load(&args.rom)?;
+    let arbiter = Arbiter::new(Config::from(&settings.arbiter));
+    let speech = build_speech(&settings, &args);
+
+    if let Some(frames) = args.headless {
+        return run_headless(emu, arbiter, speech, frames);
+    }
+
+    let audio = audio::Audio::new(beacon_emu::AUDIO_SAMPLE_RATE)?;
+    let mut app = app::App::new(emu, audio, arbiter, speech, settings);
+
+    let event_loop = winit::event_loop::EventLoop::new()?;
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    event_loop.run_app(&mut app)?;
     Ok(())
 }

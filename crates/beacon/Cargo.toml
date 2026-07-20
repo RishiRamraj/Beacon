@@ -8,3 +8,9 @@ repository.workspace = true
 
 [dependencies]
 beacon-emu.workspace = true
+beacon-output.workspace = true
+beacon-config.workspace = true
+winit = "0.30"
+softbuffer = "0.4"
+cpal = "0.18"
+gilrs = "0.11"
