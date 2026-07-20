@@ -1,0 +1,11 @@
+[package]
+name = "bsnes-sys"
+description = "Raw FFI bindings to the bsnes-jg emulator library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "bsnes"
+
+[build-dependencies]
+cc = "1"

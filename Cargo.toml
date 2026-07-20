@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/bsnes-sys", "crates/beacon-emu", "crates/beacon"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/RishiRamraj/Beacon"
+rust-version = "1.85"
+
+[workspace.dependencies]
+bsnes-sys = { path = "crates/bsnes-sys" }
+beacon-emu = { path = "crates/beacon-emu" }
