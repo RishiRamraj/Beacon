@@ -10,9 +10,10 @@ happening on screen. Game specific knowledge lives in plugins, so instrumenting
 a new game does not mean modifying the emulator.
 
 **Status: playable, early.** The emulator runs games with video, audio, keyboard
-and gamepad input, and speaks what it detects through your screen reader. There
-is no plugin runtime yet, so game knowledge is currently built in, and only
-A Link to the Past is instrumented.
+and gamepad input, and speaks what it detects through your screen reader. Game
+knowledge lives in plugins — a TOML manifest plus a Lua script — selected
+automatically by hashing the ROM. A Link to the Past ships built-in; other games
+are drop-in (see [Plugins](#plugins)).
 
 ## What makes it different
 
@@ -55,17 +56,34 @@ you have already configured. If it is not running, Beacon says so and plays on.
 
 ### Controls
 
-| Key | Action | Key | Action |
-|---|---|---|---|
-| arrows | d-pad | enter | start |
-| z x a s | B A Y X | right shift | select |
-| q w | L R | | |
-| c | scan | e | where am I |
-| h | status | v | cycle verbosity |
-| r | repeat last | esc | quit |
+Game controls are fixed; everything else is an **action** and every action is
+rebindable, from the keyboard or a controller.
 
-A gamepad works too, and both are live at once. The left stick doubles as a
-d-pad, which some players find easier than the hat.
+| Game (fixed) | | Actions (default keys, rebindable) | |
+|---|---|---|---|
+| arrows | d-pad | c / e / h | scan / where am I / status |
+| z x a s | B A Y X | t / g | save state / load state |
+| q w | L R | n / b | next / previous save slot |
+| enter | start | p / f | pause / frame advance |
+| right shift | select | v / r | cycle verbosity / repeat last |
+| | | k | open input configuration |
+| | | esc | quit |
+
+A gamepad works too, and both are live at once; the left stick doubles as a
+d-pad. Actions are reachable from the pad's spare buttons — by default the left
+stick button opens the input configuration, so a controller-only player can
+rebind everything without a keyboard.
+
+**Rebinding.** Press the input-configuration key (`k`, or the left stick button).
+The game pauses; use up/down to choose an action — each is spoken with its current
+binding — then press the key or button to assign it, delete to clear, escape to
+finish. Everything is announced, so it works without sight, and changes are saved
+immediately.
+
+**Savestates.** Ten slots per game, kept under your config directory and keyed by
+ROM so games never collide. Save and load act on the active slot; next/previous
+move between slots, announced as you go. Frame advance and pause are there for
+debugging a plugin — stepping one frame at a time to watch memory change.
 
 ### Other modes
 
@@ -101,14 +119,49 @@ verbosity = 2      # 0 critical only, 3 everything
 max_per_frame = 2
 ```
 
+## Plugins
+
+A plugin is the accessibility knowledge for one game. It is two files in a
+directory:
+
+- a **TOML manifest** — the game's name, the ROM SHA-1s it matches, and named
+  memory watches;
+- a **Lua script** — reads memory each frame and *proposes* what to say. It never
+  speaks directly; the host decides what actually survives, so behaviour stays
+  consistent across games.
+
+Beacon identifies your ROM by its headerless SHA-1 and loads the matching plugin
+with no configuration. The A Link to the Past plugin is compiled in. To add your
+own, drop a directory into `plugins/` beside the executable:
+
+```
+plugins/
+  mygame/
+    mygame.toml
+    mygame.lua
+```
+
+A drop-in that matches the same ROM as a built-in overrides it, so you can
+iterate without rebuilding.
+
+**[docs/plugins.md](docs/plugins.md) is the plugin authoring guide** — the full
+manifest format and the complete Lua host API (`mem.u8/u16/u24/slice`, `say`,
+`on_command`, `log`, `watch`), with semantics and defaults. The reference plugin,
+[`plugins/alttp/`](plugins/alttp/), is the worked example to read alongside it.
+
 ## Layout
 
 | Path | Purpose |
 |---|---|
 | `crates/bsnes-sys` | Raw FFI and the C ABI shim over bsnes-jg's C++ API |
 | `crates/beacon-emu` | Safe emulator wrapper: frame loop, memory, savestates, input |
+| `crates/beacon-output` | Event arbitration and the speech / JSON sinks |
+| `crates/beacon-config` | User settings, typed and string-keyed for runtime changes |
+| `crates/beacon-plugin` | Plugin runtime: manifest loader, ROM matching, Lua host API |
 | `crates/beacon` | The host binary |
+| `plugins/alttp` | The A Link to the Past reference plugin (TOML + Lua) |
 | `vendor/bsnes-jg` | Emulator core, as a submodule pinned to a release tag |
+| `docs/plugins.md` | Plugin authoring guide: manifest format and Lua host API |
 | `docs/design.md` | Full design document |
 | `docs/decisions/` | Architecture decision records |
 

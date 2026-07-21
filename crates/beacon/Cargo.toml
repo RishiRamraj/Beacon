@@ -10,6 +10,7 @@ repository.workspace = true
 beacon-emu.workspace = true
 beacon-output.workspace = true
 beacon-config.workspace = true
+beacon-plugin.workspace = true
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"

@@ -1,16 +1,18 @@
 //! Beacon: a SNES emulator with accessibility as a first class feature.
 
-mod alttp;
+mod action;
 mod app;
 mod audio;
 mod input;
+mod state;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use beacon_config::Settings;
 use beacon_emu::Emulator;
 use beacon_output::sink::{Fanout, JsonSink, SpeechSink};
 use beacon_output::{Arbiter, Config};
+use beacon_plugin::{LuaPlugin, NullPlugin, Plugin, Registry};
 
 fn usage() -> ! {
     eprintln!(
@@ -25,16 +27,20 @@ options:
   --quiet               no speech, useful with --json
   --rate <-100..100>    speech rate; overrides the saved setting
 
-controls:
+game controls (fixed):
   arrows                d-pad            enter    start
   z x a s               B A Y X          rshift   select
   q w                   L R
 
-  c   scan              e   where am I
-  h   status            v   cycle verbosity
-  r   repeat last       esc quit
+action keys (default, all rebindable):
+  c   scan              e   where am I      h   status
+  t   save state        g   load state      n/b next/prev slot
+  p   pause             f   frame advance   v   cycle verbosity
+  r   repeat last       k   input config    esc quit
 
-Settings live at {}, and every value can also be changed while playing.",
+Press the input-config key (k, or the left stick button on a pad) to rebind
+anything, including from a controller alone. Settings live at {}, and every
+value can also be changed while playing.",
         Settings::default_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "the user config directory".into())
@@ -127,17 +133,80 @@ fn build_speech(settings: &Settings, args: &Args) -> Fanout {
     fanout
 }
 
+/// Directories searched for drop-in plugins, in addition to the built-ins.
+///
+/// A `plugins/` directory beside the executable is the shipped layout; one in
+/// the working directory is the convenience during development. Both are
+/// optional: a missing directory is not an error.
+fn plugin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.join("plugins"));
+        }
+    }
+    dirs.push(PathBuf::from("plugins"));
+    dirs
+}
+
+/// The headerless SHA-1 of a ROM, used both to select a plugin and to key its
+/// savestates. `None` if the file cannot be read.
+fn rom_id(rom_path: &Path) -> Option<String> {
+    match std::fs::read(rom_path) {
+        Ok(bytes) => Some(beacon_plugin::rom_sha1(beacon_emu::strip_copier_header(
+            &bytes,
+        ))),
+        Err(e) => {
+            eprintln!("could not read ROM: {e}");
+            None
+        }
+    }
+}
+
+/// Picks the plugin matching a ROM hash, falling back to no instrumentation.
+///
+/// The user never chooses: identification is by headerless SHA-1. A ROM with no
+/// matching plugin still plays, just silently, and a plugin that fails to load
+/// is reported rather than fatal.
+fn select_plugin(sha1: Option<&str>) -> Box<dyn Plugin> {
+    let Some(sha1) = sha1 else {
+        return Box::new(NullPlugin);
+    };
+
+    let mut registry = Registry::builtin();
+    for dir in plugin_dirs() {
+        registry.load_dir(&dir);
+    }
+
+    match registry.select(sha1) {
+        Some(spec) => match LuaPlugin::load(spec) {
+            Ok(plugin) => {
+                eprintln!("plugin: {}", plugin.name());
+                Box::new(plugin)
+            }
+            Err(e) => {
+                eprintln!("plugin failed to load, running without instrumentation: {e}");
+                Box::new(NullPlugin)
+            }
+        },
+        None => {
+            eprintln!("no plugin matches this ROM (sha1 {sha1}); running without instrumentation");
+            Box::new(NullPlugin)
+        }
+    }
+}
+
 /// Runs without a window. Used for benchmarking and for replay testing, both of
 /// which want the frame loop without the presentation.
 fn run_headless(
     mut emu: Emulator,
     mut arbiter: Arbiter,
     mut speech: Fanout,
+    mut plugin: Box<dyn Plugin>,
     frames: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Instant;
 
-    let mut game = alttp::Alttp::new();
     let mut audio = Vec::new();
     let start = Instant::now();
 
@@ -154,7 +223,7 @@ fn run_headless(
         audio.clear();
         emu.drain_audio(&mut audio);
 
-        let intents = game.on_frame(emu.main_ram()?);
+        let intents = plugin.on_frame(emu.main_ram()?, n);
         if !intents.is_empty() {
             // Time from the frame counter, not the clock, so a replay of the
             // same inputs arbitrates identically.
@@ -192,13 +261,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let emu = Emulator::load(&args.rom)?;
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
     let speech = build_speech(&settings, &args);
+    let rom_id = rom_id(&args.rom);
+    let plugin = select_plugin(rom_id.as_deref());
 
     if let Some(frames) = args.headless {
-        return run_headless(emu, arbiter, speech, frames);
+        return run_headless(emu, arbiter, speech, plugin, frames);
     }
 
     let audio = audio::Audio::new(beacon_emu::AUDIO_SAMPLE_RATE)?;
-    let mut app = app::App::new(emu, audio, arbiter, speech, settings);
+    let mut app = app::App::new(
+        emu,
+        audio,
+        arbiter,
+        speech,
+        plugin,
+        settings,
+        rom_id.as_deref().unwrap_or("unknown"),
+    );
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

@@ -1,0 +1,18 @@
+[package]
+name = "beacon-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+beacon-output = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
+# Lua 5.4, compiled from source into the binary (vendored): no runtime
+# dependency and no DLL, which keeps the single-file delivery promise.
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+# A dependency-free SHA-1. The only use is ROM identification, so the smaller
+# implementation is preferable to pulling in the RustCrypto digest stack.
+sha1_smol = "1.0"
