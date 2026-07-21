@@ -272,14 +272,17 @@ with his coordinates.](images/alttp-map.png)
 
 `beacon yourgame.sfc --mcp` runs headless and serves the Model Context Protocol on
 stdio, so an agent can help you develop a plugin: step frames, read memory by
-address, run your commands, and read back everything spoken — all reproducibly. See
-[ADR 0018](decisions/0018-mcp-debug-server.md) for the tool set.
+address, run your commands, and read back everything spoken — all reproducibly.
 
-## On the horizon
+The tight edit-run loop is there too. Drop your plugin in a `plugins/` directory
+(not the built-in), and:
 
-The tightest plugin-development loop — reloading your Lua from disk without a restart
-(`reload_plugin`) and probing with a snippet (`eval_lua`) over the MCP server — is
-designed but not yet built ([ADR 0018](decisions/0018-mcp-debug-server.md)).
+- **`reload_plugin`** re-reads it from disk and rebuilds it, so you edit the Lua or
+  manifest, reload, and see the effect — no restart, and the game keeps its position.
+- **`eval_lua`** runs a snippet in your plugin's environment against the current
+  frame, e.g. `return mem.u8(watch.health.addr)`, for probing while you work.
+
+See [ADR 0018](decisions/0018-mcp-debug-server.md) for the full tool set.
 
 ---
 

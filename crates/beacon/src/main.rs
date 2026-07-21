@@ -16,7 +16,7 @@ use beacon_config::Settings;
 use beacon_emu::Emulator;
 use beacon_output::sink::{Fanout, JsonSink, SpeechSink};
 use beacon_output::{Arbiter, Config};
-use beacon_plugin::{LuaPlugin, NullPlugin, Plugin, Registry};
+use beacon_plugin::{LuaPlugin, NullPlugin, Plugin, PluginSpec, Registry};
 
 fn usage() -> ! {
     eprintln!(
@@ -179,9 +179,9 @@ fn rom_id(rom_path: &Path) -> Option<String> {
 /// The user never chooses: identification is by headerless SHA-1. A ROM with no
 /// matching plugin still plays, just silently, and a plugin that fails to load
 /// is reported rather than fatal.
-fn select_plugin(sha1: Option<&str>) -> Box<dyn Plugin> {
+fn select_plugin(sha1: Option<&str>) -> (Box<dyn Plugin>, Option<PluginSpec>) {
     let Some(sha1) = sha1 else {
-        return Box::new(NullPlugin);
+        return (Box::new(NullPlugin), None);
     };
 
     let mut registry = Registry::builtin();
@@ -193,16 +193,17 @@ fn select_plugin(sha1: Option<&str>) -> Box<dyn Plugin> {
         Some(spec) => match LuaPlugin::load(spec) {
             Ok(plugin) => {
                 eprintln!("plugin: {}", plugin.name());
-                Box::new(plugin)
+                // Keep the spec so the session can reload the plugin later.
+                (Box::new(plugin), Some(spec.clone()))
             }
             Err(e) => {
                 eprintln!("plugin failed to load, running without instrumentation: {e}");
-                Box::new(NullPlugin)
+                (Box::new(NullPlugin), None)
             }
         },
         None => {
             eprintln!("no plugin matches this ROM (sha1 {sha1}); running without instrumentation");
-            Box::new(NullPlugin)
+            (Box::new(NullPlugin), None)
         }
     }
 }
@@ -273,7 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
     let speech = build_speech(&settings, &args);
     let rom_id = rom_id(&args.rom);
-    let plugin = select_plugin(rom_id.as_deref());
+    let (plugin, reload_spec) = select_plugin(rom_id.as_deref());
 
     if let Some(frames) = args.headless {
         return run_headless(emu, arbiter, speech, plugin, frames);
@@ -286,6 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         arbiter,
         speech,
         plugin,
+        reload_spec,
         settings,
         rom_id.as_deref().unwrap_or("unknown"),
     );

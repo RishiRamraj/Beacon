@@ -40,10 +40,18 @@ agent, with no display.
   single-threaded, as it must be.
 - **Tools implemented:** `get_state`, `recent_speech`, `read_memory`, `step`, `pause`,
   `resume`, `set_buttons`, `run_command`, `save_state`, `load_state`, `set_slot`,
-  `list_actions`, `get_bindings`, `bind`, `unbind`, `get_setting`, `set_setting`, and the
+  `list_actions`, `get_bindings`, `bind`, `unbind`, `get_setting`, `set_setting`, the
   configuration walk (`open_config`, `config_navigate`, `config_bind`, `config_clear`,
-  `config_close`). Tools that speak return what was spoken, so the agent perceives exactly what
-  the player would hear — including driving the configuration modal entirely headless.
+  `config_close`), `get_map` (the plugin's map as a PNG, [ADR 0017](0017-plugin-debug-drawing.md)),
+  and the plugin-dev loop `reload_plugin` and `eval_lua`. Tools that speak return what was
+  spoken, so the agent perceives exactly what the player would hear — including driving the
+  configuration modal entirely headless.
+- **The plugin-dev loop.** `reload_plugin` re-reads a drop-in plugin from disk and rebuilds it,
+  so an author edits the Lua, reloads, and sees the effect without restarting or losing the
+  game's position (the plugin's own state resets, re-deriving from the next frame). `eval_lua`
+  runs a snippet in the plugin's environment against the current frame, for probing memory and
+  state. Both reuse the plugin runtime; a built-in plugin has no disk source, so reloading it
+  just re-instantiates.
 - **Determinism preserved.** Every tool acts on state the agent set up (buttons held, frames
   stepped, slot loaded), so a finding is reproducible and can become a golden-file test.
 
@@ -58,13 +66,9 @@ agent, with no display.
 
 ## Deferred
 
-- **`reload_plugin` and `eval_lua`.** The tightest debugging loop — re-read the Lua from disk,
-  probe with a snippet — is not built yet. It wants the plugin runtime to expose reload/eval,
-  which is additive.
-- **The map-mode image** ([ADR 0017](0017-plugin-debug-drawing.md)) as a readable resource. It
-  lands with map mode itself.
 - **A socket transport** for attaching to an already-running windowed session. Not needed for
-  the headless-agent use case; revisit if driving a live GUI session is wanted.
+  the headless-agent use case; revisit if driving a live GUI session is wanted. This is the last
+  open item under debug mode — the tool surface itself is complete.
 
 ## Alternatives considered
 

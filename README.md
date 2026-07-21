@@ -121,9 +121,9 @@ configure key by key.
 The tools are self-describing (`tools/list`); highlights: `get_state`,
 `read_memory`, `step`, `set_buttons`, `run_command`, `save_state` / `load_state`,
 `list_actions`, `bind` / `unbind`, `set_setting`, `get_map` (the plugin's map as a
-PNG the agent can see), and the configuration walk (`open_config`,
-`config_navigate`, `config_bind`, `config_close`). See
-[ADR 0018](docs/decisions/0018-mcp-debug-server.md).
+PNG the agent can see), the configuration walk (`open_config`, `config_navigate`,
+`config_bind`, `config_close`), and the plugin-dev loop `reload_plugin` /
+`eval_lua`. See [ADR 0018](docs/decisions/0018-mcp-debug-server.md).
 
 `scripts/mcp_smoke.py <rom>` drives the server end to end — a savestate
 round-trip, stepping, commands, settings, and binding — as a quick check that
