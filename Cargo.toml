@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bsnes-sys", "crates/beacon-emu", "crates/beacon-output", "crates/beacon-config", "crates/beacon-plugin", "crates/beacon"]
+members = ["crates/bsnes-sys", "crates/beacon-emu", "crates/beacon-output", "crates/beacon-config", "crates/beacon-plugin", "crates/beacon-mcp", "crates/beacon"]
 
 [workspace.package]
 version = "0.0.1"
@@ -15,5 +15,7 @@ beacon-emu = { path = "crates/beacon-emu" }
 beacon-output = { path = "crates/beacon-output" }
 beacon-config = { path = "crates/beacon-config" }
 beacon-plugin = { path = "crates/beacon-plugin" }
+beacon-mcp = { path = "crates/beacon-mcp" }
 serde = "1"
+serde_json = "1"
 toml = "0.9"

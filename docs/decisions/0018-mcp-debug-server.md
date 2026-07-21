@@ -1,78 +1,78 @@
-# ADR 0018: A debug-mode MCP server so an agent can help debug plugins
+# ADR 0018: An MCP server so an agent can drive the whole experience
 
-- **Status:** Proposed (design only; not yet implemented)
-- **Date:** 2026-07-20
+- **Status:** Accepted (implemented)
+- **Date:** 2026-07-20 (revised 2026-07-21)
 
 ## Context
 
-Writing a plugin is reverse engineering: find the address that holds health, work out what a
-module number means, confirm an event fires when it should. That loop is slow by hand — run,
-watch, guess an address, edit, run again.
+This began as a debugging aid: writing a plugin is reverse engineering — find the address
+that holds health, work out what a module number means, confirm an event fires — and that
+loop is slow by hand. An agent that could reach into a running Beacon (read memory, step a
+frame, watch what the plugin emitted) would speed it up enormously.
 
-An AI agent could drive much of it, if it could reach into a running Beacon: read memory at an
-address, step a frame and see what changed, watch what the plugin emitted, try a Lua snippet,
-reload the plugin. The **Model Context Protocol** is the standard way to expose exactly that —
-a typed set of tools and resources an agent connects to.
+In building it the scope grew, deliberately. The same interface that lets an agent *debug* a
+plugin lets an agent *operate Beacon* — press buttons, run commands, save and load, rebind
+keys, walk the input configuration, and read back what was spoken. For the target audience
+that is the larger prize: **an end user can hand their entire setup and play to an agent.** A
+blind player who finds key-by-key configuration tedious can say what they want and have it
+done.
 
-The determinism already in place ([ADR 0012](0012-determinism-and-replay.md)) and the plugin
-introspection already added ([ADR 0016](0016-dynamic-keybinding-and-actions.md),
-`Plugin::commands()`) make Beacon unusually well suited to this: a session can be stepped and
-inspected reproducibly.
+The [session core](../design.md) extracted alongside this (a `Session` independent of the
+winit window) is what makes it possible: the same logic a keyboard drives can be driven by an
+agent, with no display.
 
-## Decision (proposed)
+## Decision
 
-Add a **debug mode** that runs an MCP server exposing Beacon's state and controls.
+`beacon <rom> --mcp` runs the session **headless** and serves the Model Context Protocol on
+**stdio**.
 
-- **Opt-in and local.** `beacon <rom> --debug` starts the server; it is off otherwise. It
-  binds a local endpoint only. Debug mode is the umbrella the debug-facing features live under:
-  frame stepping, memory inspection, and the map buffer
-  ([ADR 0017](0017-plugin-debug-drawing.md)) are all reached through it.
-- **Transport.** A local socket rather than stdio, so the windowed emulator can keep running
-  while an agent is attached. (Stdio remains an option for a purely headless debug run.)
-- **Tools (agent-invoked actions):**
-  - `read_memory(addr, len)`, `read_watch(name)` — inspect WRAM through the same addressing
-    the plugin sees.
-  - `step(n)`, `pause`, `resume` — drive the frame loop.
-  - `save_state` / `load_state(slot)` — reproduce a situation exactly.
-  - `run_command(id)` — invoke a plugin command and get its intents back.
-  - `reload_plugin` — re-read the Lua from disk without restarting, to tighten the edit loop.
-  - `eval_lua(chunk)` — run a snippet in the plugin's environment for probing.
-- **Resources (agent-readable state):**
-  - current frame, module/state summary, the last frame's proposed intents and what the
-    arbiter did with them (the drop reasons already recorded);
-  - the plugin's declared commands and watches;
-  - the map-mode buffer as an image, so the agent can *see* the plugin's interpretation.
-- **Determinism preserved.** Every tool is a function of state the agent set up (loaded slot,
-  stepped frames), so a debugging finding is reproducible and can become a golden-file test.
+- **Stdio, not a socket.** MCP clients spawn their server and speak to it over stdio; that is
+  the path of least resistance for an agent, and needs no port or auth. The original design
+  reached for a socket to keep a GUI running alongside; that motivation fell away once MCP mode
+  was headless — see below. `stdout` carries the protocol, so the JSON event sink is disabled
+  there and the agent reads speech through a tool instead.
+- **Headless, but audio and speech still play.** A blind player does not need the video window,
+  and dropping it is what frees stdio and sidesteps needing a display. Audio and
+  speech-dispatcher still run, so the human hears the game while the agent operates it.
+- **Small threading.** A reader thread runs the protocol and forwards each tool call down a
+  channel; the main thread owns the `Session` and is the only thing that touches it, running
+  frames when nothing is pending. No shared mutable state, no lock — the emulator is
+  single-threaded, as it must be.
+- **Tools implemented:** `get_state`, `recent_speech`, `read_memory`, `step`, `pause`,
+  `resume`, `set_buttons`, `run_command`, `save_state`, `load_state`, `set_slot`,
+  `list_actions`, `get_bindings`, `bind`, `unbind`, `get_setting`, `set_setting`, and the
+  configuration walk (`open_config`, `config_navigate`, `config_bind`, `config_clear`,
+  `config_close`). Tools that speak return what was spoken, so the agent perceives exactly what
+  the player would hear — including driving the configuration modal entirely headless.
+- **Determinism preserved.** Every tool acts on state the agent set up (buttons held, frames
+  stepped, slot loaded), so a finding is reproducible and can become a golden-file test.
 
 ## Why this shape
 
-- Tools + resources is the MCP-native split: things that change state versus things that
-  report it. It maps cleanly onto Beacon's existing verbs (step, read, command) and its
-  existing telemetry (intents, drop reasons).
-- A socket rather than stdio keeps the GUI usable while attached, which matters because much
-  plugin debugging is "watch the screen while the agent pokes memory".
-- `reload_plugin` and `eval_lua` are what turn this from an inspector into a genuine
-  development loop; they are safe because debug mode is explicit, local, and the Lua sandbox
-  is already closed.
+- Returning spoken text from every acting tool makes the agent a first-class *listener*, not
+  just a controller. Configuring bindings, running a scan, or stepping a frame all report what
+  the player would have heard, which is the only sense that matters here.
+- Reusing the exact action, modal, and memory-addressing code (the session core, and
+  `beacon_plugin::wram_offset`) means the agent and the player cannot diverge: there is one
+  implementation, driven two ways.
 
-## Open questions
+## Deferred
 
-- **Auth for the socket.** Local-only may suffice; a token is cheap insurance. Decide before
-  implementing.
-- **`eval_lua` scope.** Full plugin environment is most useful and most powerful. Whether to
-  offer a read-only variant is open.
-- **Overlap with `--json`.** The existing JSON event stream is a subset of what the server
-  would expose; the server likely subsumes it for debugging while `--json` stays the
-  lightweight production integration.
+- **`reload_plugin` and `eval_lua`.** The tightest debugging loop — re-read the Lua from disk,
+  probe with a snippet — is not built yet. It wants the plugin runtime to expose reload/eval,
+  which is additive.
+- **The map-mode image** ([ADR 0017](0017-plugin-debug-drawing.md)) as a readable resource. It
+  lands with map mode itself.
+- **A socket transport** for attaching to an already-running windowed session. Not needed for
+  the headless-agent use case; revisit if driving a live GUI session is wanted.
 
 ## Alternatives considered
 
-- **A bespoke REST/JSON-RPC protocol** — rejected; MCP is the standard an agent already speaks,
-  so there is no reason to invent one.
+- **A bespoke JSON-RPC protocol** — rejected; MCP is the standard an agent already speaks.
 - **Reuse `--json` alone** — rejected; it is one-way and read-only, and cannot step, inspect an
-  arbitrary address, or reload a plugin.
-- **A separate external debugger process attaching over the emulator hook** — rejected as
-  premature; the hook patch is deliberately unscheduled
-  ([ADR 0010](0010-defer-emulator-hook-patch.md)), and in-process access already exposes
-  everything the agent needs.
+  address, rebind, or drive the configuration.
+- **A socket + keep the GUI running** — deferred, not rejected; stdio + headless is simpler and
+  covers the primary use case, and the two can coexist later.
+- **An async runtime (tokio + an MCP SDK)** — rejected; the emulator loop is synchronous, so a
+  single blocking reader thread and a channel is the whole concurrency story, with far fewer
+  dependencies.

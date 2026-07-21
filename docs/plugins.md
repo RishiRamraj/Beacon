@@ -237,17 +237,22 @@ binding works.
 `log("info", "loaded 42 rooms")` or `log("something happened")`. Routed to stderr,
 never to the stdout JSON stream, so it is safe to log freely.
 
+## Debugging with an agent
+
+`beacon yourgame.sfc --mcp` runs headless and serves the Model Context Protocol on
+stdio, so an agent can help you develop a plugin: step frames, read memory by
+address, run your commands, and read back everything spoken — all reproducibly. See
+[ADR 0018](decisions/0018-mcp-debug-server.md) for the tool set.
+
 ## On the horizon
 
-Two capabilities are designed and scheduled but not yet in the API. If you are
-writing a plugin now, know they are coming:
+One capability is designed and scheduled but not yet in the API. If you are writing a
+plugin now, know it is coming:
 
 - **Map mode** — an `on_draw(canvas)` hook to render your interpretation of memory as
   a picture, for debugging and for sighted assistance
-  ([ADR 0017](decisions/0017-plugin-debug-drawing.md)).
-- **A debug-mode MCP server** — so an agent can step frames, read memory, and reload
-  your plugin while you develop it
-  ([ADR 0018](decisions/0018-mcp-debug-server.md)).
+  ([ADR 0017](decisions/0017-plugin-debug-drawing.md)). The MCP server will expose the
+  rendered image as a resource, so an agent can see it too.
 
 ---
 

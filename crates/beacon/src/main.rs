@@ -3,7 +3,10 @@
 mod action;
 mod app;
 mod audio;
+mod config_modal;
 mod input;
+mod mcp;
+mod session;
 mod state;
 
 use std::path::{Path, PathBuf};
@@ -26,6 +29,8 @@ options:
   --json                emit line delimited JSON events on stdout
   --quiet               no speech, useful with --json
   --rate <-100..100>    speech rate; overrides the saved setting
+  --mcp                 no window; serve the MCP control protocol on stdio,
+                        so an agent can drive setup and play (audio still runs)
 
 game controls (fixed):
   arrows                d-pad            enter    start
@@ -54,6 +59,7 @@ struct Args {
     json: bool,
     quiet: bool,
     rate: Option<i8>,
+    mcp: bool,
 }
 
 fn parse_args() -> Args {
@@ -64,6 +70,7 @@ fn parse_args() -> Args {
         json: false,
         quiet: false,
         rate: None,
+        mcp: false,
     };
 
     let mut it = std::env::args().skip(1);
@@ -78,6 +85,7 @@ fn parse_args() -> Args {
             }
             "--json" => args.json = true,
             "--quiet" => args.quiet = true,
+            "--mcp" => args.mcp = true,
             "--rate" => {
                 args.rate = Some(
                     it.next()
@@ -102,7 +110,9 @@ fn parse_args() -> Args {
 fn build_speech(settings: &Settings, args: &Args) -> Fanout {
     let mut fanout = Fanout::new();
 
-    if args.json || settings.speech.json_events {
+    // In MCP mode stdout carries the protocol, so the JSON event sink must stay
+    // off it; the agent gets speech through the recent_speech tool instead.
+    if !args.mcp && (args.json || settings.speech.json_events) {
         fanout.push(Box::new(JsonSink::new(std::io::stdout())));
     }
 
@@ -269,7 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let audio = audio::Audio::new(beacon_emu::AUDIO_SAMPLE_RATE)?;
-    let mut app = app::App::new(
+    let session = session::Session::new(
         emu,
         audio,
         arbiter,
@@ -278,6 +288,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         rom_id.as_deref().unwrap_or("unknown"),
     );
+
+    // MCP mode runs the same session with no window, driven by an agent over
+    // stdio. Audio and speech still play, so a blind player hears the game while
+    // the agent handles setup and assistance.
+    if args.mcp {
+        return mcp::run(session);
+    }
+
+    let mut app = app::App::new(session, input::Input::new());
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
