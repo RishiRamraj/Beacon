@@ -1,7 +1,7 @@
 # ADR 0017: Plugins draw a visual interpretation of memory (map mode)
 
-- **Status:** Proposed (design only; not yet implemented)
-- **Date:** 2026-07-20
+- **Status:** Accepted (implemented)
+- **Date:** 2026-07-20 (implemented 2026-07-21)
 
 ## Context
 
@@ -24,23 +24,26 @@ assistance surface, orthogonal to what the player hears.
 
 Expose a **canvas** to Lua and show what the plugin draws on it in a toggleable view.
 
-- **Lua API.** A plugin optionally defines `on_draw(canvas)`, called when the map view is
-  visible. The canvas is a fixed-size RGBA buffer the host owns, with a small primitive set:
-  `canvas:clear(rgb)`, `canvas:pixel(x, y, rgb)`, `canvas:rect(x, y, w, h, rgb)`,
-  `canvas:line(...)`, and `canvas:text(x, y, string)`. Primitives only — no image loading, no
-  file access — so the surface stays a pure function of memory and the sandbox stays closed.
-- **A bindable action.** `toggle_map` opens and closes the view, bound like any other action
-  ([ADR 0016](0016-dynamic-keybinding-and-actions.md)). It is a first-class action so a
-  controller-only user can reach it too.
-- **Rendering.** The host blits the canvas into a second window (or a split of the main one).
-  `on_draw` runs only while the view is open, and at a bounded rate (every N frames), so a
-  hidden map costs nothing and a visible one cannot dominate the frame budget.
-- **Determinism.** Drawing reads memory and the frame number, never a clock, so the same
-  inputs produce the same picture — consistent with
-  [ADR 0012](0012-determinism-and-replay.md) and testable by hashing the buffer.
-- **Introspection for tooling.** The rendered buffer is retrievable as an image by the debug
-  server ([ADR 0018](0018-mcp-debug-server.md)), so an agent assisting with a plugin can *see*
-  what the plugin drew, not only read numbers.
+- **Lua API.** A plugin optionally defines `on_draw(canvas)`, called while the map view is
+  open. The canvas is a fixed 256x256 `0x00RRGGBB` buffer the host owns, with a small
+  primitive set: `canvas:clear(rgb)`, `canvas:pixel(x,y,rgb)`, `canvas:rect(x,y,w,h,rgb)`,
+  `canvas:line(x0,y0,x1,y1,rgb)`, and `canvas:text(x,y,string,rgb)`, plus `canvas.width` /
+  `canvas.height`. Primitives only — no image loading, no file access — so the surface stays a
+  pure function of memory and the sandbox stays closed.
+- **A bindable action.** `toggle_map` (default `m`) shows and hides the view, bound like any
+  other action ([ADR 0016](0016-dynamic-keybinding-and-actions.md)), so a controller-only user
+  reaches it too. A game whose plugin draws nothing says so rather than showing a blank view.
+- **Rendering.** The host blits the canvas into the **main window**, replacing the game picture
+  while the map is shown — simpler than a second window and enough for a debug/assist view.
+  `on_draw` runs only while the map is open, so a hidden map costs nothing.
+- **Determinism.** Drawing reads memory (and the frame number is passed), never a clock, so the
+  same inputs produce the same picture — consistent with
+  [ADR 0012](0012-determinism-and-replay.md).
+- **Introspection for tooling.** The `get_map` MCP tool renders the map and returns it as a
+  **PNG image content block** ([ADR 0018](0018-mcp-debug-server.md)), so an agent assisting with
+  a plugin can *see* what the plugin drew, not only read numbers. The PNG is encoded by hand
+  (stored-deflate zlib, no image-crate dependency), matching the project's lean-dependency
+  stance.
 
 ## Why this shape
 
@@ -52,14 +55,18 @@ Expose a **canvas** to Lua and show what the plugin draws on it in a toggleable 
 - Making it a bound action rather than a fixed key keeps the whole surface consistent with the
   input model and reachable from a controller.
 
-## Open questions
+## As built, and what is left
 
-- **Text rendering.** A built-in bitmap font is simplest and dependency-free; whether plugins
-  need font choice is unclear. Start with one font.
-- **Second window vs overlay.** A separate window is simplest and does not fight the game view;
-  an overlay is more compact. Lean second window, revisit.
-- **Coordinate model.** Fixed canvas size with the plugin scaling, versus a host-provided
-  logical space. Lean fixed size, documented.
+- **Text** uses one built-in 5x7 bitmap font, currently covering digits, uppercase, space, and
+  a little punctuation — enough for coordinates and room numbers. Lowercase and more glyphs are
+  additive when something needs them.
+- **The map replaces the game view** in the main window rather than opening a second one. If a
+  side-by-side view is wanted later, it is a presentation change that does not touch the plugin
+  API.
+- **The canvas is a fixed 256x256.** A plugin scales into it via `canvas.width` /
+  `canvas.height`. A configurable size can come later without breaking the primitives.
+- **Redraw runs every frame while shown.** A fixed-phase throttle (every N frames) is available
+  if a heavy map ever needs it, but nothing does yet.
 
 ## Alternatives considered
 

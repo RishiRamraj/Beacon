@@ -185,6 +185,7 @@ impl Default for Keymap {
         bind("KeyB", "prev_slot");
         bind("KeyP", "pause");
         bind("KeyF", "frame_advance");
+        bind("KeyM", "toggle_map");
         bind("KeyK", "bind");
 
         // Gamepad defaults, on the pad's extra buttons so a controller-only

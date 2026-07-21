@@ -50,6 +50,11 @@ pub struct Session {
     timing_disturbed: bool,
     /// `Some` while the input configuration is open; the game is suspended then.
     config: Option<ConfigModal>,
+    /// Whether the plugin's map view is showing.
+    show_map: bool,
+    /// The plugin's last rendered map, and its dimensions.
+    map_buffer: Vec<u32>,
+    map_dims: (u32, u32),
 
     /// Buttons currently held, supplied by whatever is driving the session.
     held_buttons: u16,
@@ -87,6 +92,9 @@ impl Session {
             paused: false,
             timing_disturbed: false,
             config: None,
+            show_map: false,
+            map_buffer: Vec::new(),
+            map_dims: (0, 0),
             held_buttons: 0,
             quit: false,
             audio_scratch: Vec::with_capacity(4096),
@@ -132,6 +140,11 @@ impl Session {
             Err(_) => Vec::new(),
         };
         self.dispatch(intents);
+
+        // Keep the map live while it is on screen; it costs nothing when hidden.
+        if self.show_map {
+            self.render_map();
+        }
     }
 
     /// Runs frames until the audio queue is full.
@@ -240,6 +253,7 @@ impl Session {
             Action::PrevSlot => self.change_slot(-1),
             Action::Pause => self.toggle_pause(),
             Action::FrameAdvance => self.frame_advance(),
+            Action::ToggleMap => self.toggle_map(),
             Action::OpenInputConfig => self.open_input_config(),
             Action::Command(name) => self.run_command(&name),
         }
@@ -336,6 +350,52 @@ impl Session {
         self.timing_disturbed = true;
         self.step_one_frame();
         self.say_now(format!("Frame {}.", self.frames));
+    }
+
+    /// Shows or hides the plugin's map view.
+    fn toggle_map(&mut self) {
+        if !self.plugin.has_map() {
+            self.say_now("This game has no map.");
+            return;
+        }
+        self.show_map = !self.show_map;
+        if self.show_map {
+            // Render at once, so a map opened while paused is not blank.
+            self.render_map();
+            self.say_now("Map shown.");
+        } else {
+            self.say_now("Map hidden.");
+        }
+    }
+
+    /// Renders the plugin's map for the current frame into the map buffer,
+    /// returning its dimensions. `None` if the plugin draws no map.
+    pub fn render_map(&mut self) -> Option<(u32, u32)> {
+        let frame = self.frames;
+        // Disjoint field borrows: `ram` reads `emu`, `draw` writes `plugin` and
+        // the buffer.
+        let dims = match self.emu.main_ram() {
+            Ok(ram) => self.plugin.draw(ram, frame, &mut self.map_buffer),
+            Err(_) => None,
+        };
+        if let Some(d) = dims {
+            self.map_dims = d;
+        }
+        dims
+    }
+
+    /// The current map as (width, height, pixels), if it is showing and drawn.
+    pub fn map_view(&self) -> Option<(u32, u32, &[u32])> {
+        if self.show_map && !self.map_buffer.is_empty() {
+            Some((self.map_dims.0, self.map_dims.1, &self.map_buffer))
+        } else {
+            None
+        }
+    }
+
+    /// The last rendered map pixels, for encoding by the MCP server.
+    pub fn map_pixels(&self) -> &[u32] {
+        &self.map_buffer
     }
 
     // --- Input configuration ---------------------------------------------

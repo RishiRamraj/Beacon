@@ -15,7 +15,7 @@ library, and a plugin that matches the ROM (so commands have something to say).
 
 Exit status is non-zero if any check fails.
 """
-import subprocess, json, os, sys, tempfile
+import subprocess, json, os, sys, tempfile, base64, struct, zlib
 
 
 def find_binary(explicit):
@@ -63,11 +63,14 @@ def main():
 
     def tool(name, args=None):
         res = rpc("tools/call", {"name": name, "arguments": args or {}})["result"]
-        text = res["content"][0]["text"]
-        try:
-            val = json.loads(text)
-        except Exception:
-            val = text
+        block = res["content"][0]
+        if "text" in block:
+            try:
+                val = json.loads(block["text"])
+            except Exception:
+                val = block["text"]
+        else:
+            val = block  # e.g. an image content block
         return (not res.get("isError"), val)
 
     passed = failed = 0
@@ -126,6 +129,23 @@ def main():
         # Unmapped read errors rather than lying.
         ok, _ = tool("read_memory", {"address": "0x008000", "length": 4})
         check("unmapped read errors", not ok)
+
+        # Map mode: a valid PNG whose pixel data decompresses to the right size.
+        ok, block = tool("get_map")
+        if ok and isinstance(block, dict) and block.get("type") == "image":
+            raw = base64.b64decode(block["data"])
+            sig = raw[:8] == bytes([137, 80, 78, 71, 13, 10, 26, 10])
+            w, h = struct.unpack(">II", raw[16:24])
+            idat, off = b"", 8
+            while off < len(raw):
+                ln = struct.unpack(">I", raw[off:off + 4])[0]
+                if raw[off + 4:off + 8] == b"IDAT":
+                    idat += raw[off + 8:off + 8 + ln]
+                off += 12 + ln
+            good = sig and len(zlib.decompress(idat)) == h * (1 + w * 3)
+            check("get_map returns a valid PNG", good, f"{w}x{h}")
+        else:
+            check("get_map returns a valid PNG", False, "no image (plugin has no map?)")
 
     finally:
         print(f"\n{passed} passed, {failed} failed")

@@ -36,6 +36,7 @@ use std::time::Duration;
 use beacon_output::{Intent, Priority};
 use mlua::{Function, Lua, Table, Value};
 
+use crate::canvas::{self, Canvas};
 use crate::{CommandDecl, Error, Manifest, Plugin, PluginSpec};
 
 /// Work RAM is 128 KiB: bank $7E is the first 64 KiB, $7F the second.
@@ -55,6 +56,8 @@ pub struct LuaPlugin {
     ram: Ram,
     intents: Intents,
     commands: Vec<CommandDecl>,
+    canvas: Canvas,
+    has_draw: bool,
 }
 
 impl LuaPlugin {
@@ -66,11 +69,14 @@ impl LuaPlugin {
         let ram: Ram = Rc::new(RefCell::new(vec![0u8; WRAM_LEN]));
         let intents: Intents = Rc::new(RefCell::new(Vec::new()));
 
+        let canvas = Canvas::new();
+
         install_mem(&lua, &ram)?;
         install_say(&lua, &intents)?;
         install_log(&lua)?;
         install_commands_table(&lua)?;
         install_watch(&lua, &spec.manifest)?;
+        install_canvas(&lua, &canvas)?;
 
         // Running the chunk defines on_frame and registers commands. A syntax or
         // load-time error is a broken plugin; report it with the chunk name so
@@ -79,12 +85,18 @@ impl LuaPlugin {
             .set_name(spec.chunk_name.as_str())
             .exec()?;
 
+        // Whether the plugin draws a map is fixed at load: it defined on_draw or
+        // it did not.
+        let has_draw = matches!(lua.globals().get("on_draw"), Ok(Value::Function(_)));
+
         Ok(LuaPlugin {
             lua,
             name: spec.manifest.game.name.clone(),
             ram,
             intents,
             commands: spec.manifest.commands.clone(),
+            canvas,
+            has_draw,
         })
     }
 
@@ -149,6 +161,31 @@ impl Plugin for LuaPlugin {
         }
 
         self.drain()
+    }
+
+    fn has_map(&self) -> bool {
+        self.has_draw
+    }
+
+    fn draw(&mut self, ram: &[u8], frame: u64, out: &mut Vec<u32>) -> Option<(u32, u32)> {
+        if !self.has_draw {
+            return None;
+        }
+        self.stage_ram(ram);
+
+        let globals = self.lua.globals();
+        let on_draw = match globals.get::<Value>("on_draw") {
+            Ok(Value::Function(f)) => f,
+            _ => return None,
+        };
+        let canvas_table: Value = globals.get("__beacon_canvas").ok()?;
+        if let Err(e) = on_draw.call::<()>((canvas_table, frame)) {
+            eprintln!("plugin {} on_draw: {e}", self.name);
+            return None;
+        }
+
+        self.canvas.copy_into(out);
+        Some((canvas::WIDTH, canvas::HEIGHT))
     }
 }
 
@@ -316,6 +353,71 @@ fn install_commands_table(lua: &Lua) -> Result<(), Error> {
     Ok(())
 }
 
+/// Installs the `canvas` table: the map-drawing primitives.
+///
+/// Methods are called with the colon syntax (`canvas:pixel(...)`), so each
+/// receives the table as its first argument, which is ignored — the pixels live
+/// in the shared [`Canvas`], not the table.
+fn install_canvas(lua: &Lua, canvas: &Canvas) -> Result<(), Error> {
+    let table = lua.create_table()?;
+    table.set("width", canvas::WIDTH)?;
+    table.set("height", canvas::HEIGHT)?;
+
+    let c = canvas.clone();
+    table.set(
+        "clear",
+        lua.create_function(move |_, (_t, color): (Table, u32)| {
+            c.clear(color);
+            Ok(())
+        })?,
+    )?;
+
+    let c = canvas.clone();
+    table.set(
+        "pixel",
+        lua.create_function(move |_, (_t, x, y, color): (Table, i64, i64, u32)| {
+            c.pixel(x, y, color);
+            Ok(())
+        })?,
+    )?;
+
+    let c = canvas.clone();
+    table.set(
+        "rect",
+        lua.create_function(
+            move |_, (_t, x, y, w, h, color): (Table, i64, i64, i64, i64, u32)| {
+                c.rect(x, y, w, h, color);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let c = canvas.clone();
+    table.set(
+        "line",
+        lua.create_function(
+            move |_, (_t, x0, y0, x1, y1, color): (Table, i64, i64, i64, i64, u32)| {
+                c.line(x0, y0, x1, y1, color);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let c = canvas.clone();
+    table.set(
+        "text",
+        lua.create_function(
+            move |_, (_t, x, y, s, color): (Table, i64, i64, String, u32)| {
+                c.text(x, y, &s, color);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    lua.globals().set("__beacon_canvas", table)?;
+    Ok(())
+}
+
 /// Exposes the manifest's named watches to Lua as a `watch` table.
 fn install_watch(lua: &Lua, manifest: &Manifest) -> Result<(), Error> {
     let watch = lua.create_table()?;
@@ -453,6 +555,32 @@ mod tests {
         assert!(p.on_frame(&ram_with(&[(0x7EF36D, 24)]), 0).is_empty());
         let out = p.on_frame(&ram_with(&[(0x7EF36D, 16)]), 1);
         assert_eq!(out[0].text, "hit");
+    }
+
+    #[test]
+    fn on_draw_renders_into_the_buffer() {
+        let mut p = plugin_from(
+            r#"
+            function on_draw(canvas)
+              canvas:clear(0x000000)
+              canvas:rect(10, 10, 4, 4, 0xFF0000)
+            end
+            "#,
+        );
+        assert!(p.has_map());
+        let mut out = Vec::new();
+        let dims = p.draw(&vec![0u8; WRAM_LEN], 0, &mut out);
+        assert_eq!(dims, Some((256, 256)));
+        // The filled rectangle is red where drawn, black elsewhere.
+        assert_eq!(out[(10 * 256 + 10) as usize], 0xFF0000);
+        assert_eq!(out[0], 0x000000);
+    }
+
+    #[test]
+    fn a_plugin_without_on_draw_has_no_map() {
+        let mut p = plugin_from("function on_frame(frame) end");
+        assert!(!p.has_map());
+        assert_eq!(p.draw(&vec![0u8; WRAM_LEN], 0, &mut Vec::new()), None);
     }
 
     #[test]

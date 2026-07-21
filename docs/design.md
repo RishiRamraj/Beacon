@@ -685,9 +685,13 @@ unchanged.
   Protocol on stdio, so an agent can press buttons, run commands, save and load, rebind keys,
   walk the input configuration, read memory, step frames, and read back everything spoken. An
   end user can hand their whole setup and play to an agent. Enabled by extracting a
-  windowing-independent `Session` core that the winit shell and the MCP runner both drive. Map
-  mode ([ADR 0017](decisions/0017-plugin-debug-drawing.md)) and the tighter plugin-dev tools
-  (`reload_plugin`, `eval_lua`) remain the open debug-mode work.
+  windowing-independent `Session` core that the winit shell and the MCP runner both drive.
+- **Phase 2.7 — map mode. _Landed._** Plugins draw their interpretation of memory onto a
+  `canvas` ([ADR 0017](decisions/0017-plugin-debug-drawing.md)): an `on_draw(canvas)` Lua hook
+  with clear/pixel/rect/line/text primitives and a built-in font. A `toggle_map` action (default
+  `m`) shows it in the window; the MCP `get_map` tool returns it as a hand-encoded PNG, so an
+  agent sees what the plugin believes the state to be. The remaining open debug-mode work is the
+  tighter plugin-dev loop — `reload_plugin` and `eval_lua`.
 - **Phase 3 — navigation.** Spatial beacons, destination selection menu, arrival tones, soft
   targeting, incoming-attack cues. **Start from navi's existing spatial model** — the
   two-ring proximity zones and forward cone scan, which already work — and get it into

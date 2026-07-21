@@ -4,6 +4,7 @@ mod action;
 mod app;
 mod audio;
 mod config_modal;
+mod image;
 mod input;
 mod mcp;
 mod session;
