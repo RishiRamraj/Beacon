@@ -696,11 +696,16 @@ unchanged.
   and `eval_lua` runs a snippet in the plugin's environment against the current frame. With
   these the debug-mode tool surface is complete; the only deferred item is a socket transport
   for attaching to a live windowed session ([ADR 0018](decisions/0018-mcp-debug-server.md)).
-- **Phase 3 — navigation.** Spatial beacons, destination selection menu, arrival tones, soft
-  targeting, incoming-attack cues. **Start from navi's existing spatial model** — the
-  two-ring proximity zones and forward cone scan, which already work — and get it into
-  community hands before building anything more ambitious. Pathfinding comes *after* real
-  players report what the existing model actually fails at (§10.3). This is the
+- **Phase 3 — navigation. _Begun._** The first slice has landed: an on-demand **scan** in the
+  alttp plugin that describes the nearest active sprites — objects and enemies from the
+  game's sprite table — by compass direction and rough distance, and draws them on the map
+  ([ADR 0019](decisions/0019-scan-nearest-first.md)). The sprite addresses were verified
+  against the running game through the MCP tools before being built on. Still ahead, on top of
+  that sprite reading: automatic proximity awareness (tuned with real players), spatial-audio
+  beacons and arrival tones, a destination menu, soft targeting, and pathfinding. **Start from
+  navi's existing spatial model** — the two-ring proximity zones and forward cone scan — and
+  get it into community hands before building anything more ambitious. Pathfinding comes
+  *after* real players report what the existing model actually fails at (§10.3). This is the
   Toby-DOOM-parity milestone and the point at which the tool becomes genuinely playable.
 - **Phase 4 — proof of generality.** A second SNES game plugin, chosen specifically to
   stress the plugin API against something structurally different from ALttP. Packaging,

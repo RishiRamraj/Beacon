@@ -543,4 +543,44 @@ mod tests {
             .select("0000000000000000000000000000000000000000")
             .is_none());
     }
+
+    #[test]
+    fn alttp_scan_describes_a_nearby_sprite() {
+        // Drives the real built-in alttp plugin with synthetic sprite RAM, so the
+        // scan logic (sprite table, direction, distance) is exercised as shipped.
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0]).unwrap();
+
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // module: overworld
+        set(0x7E0011, 0x00); // submodule 0: in play
+        set(0x7EF36C, 24); // max health
+        set(0x7EF36D, 24); // health
+        set(0x7E0022, 0x00);
+        set(0x7E0023, 0x01); // Link X = 0x0100
+        set(0x7E0020, 0x00);
+        set(0x7E0021, 0x01); // Link Y = 0x0100
+                             // One active sprite, 0x40 pixels east of Link, no health -> "object".
+        set(0x7E0DD0, 0x09); // slot 0 state: active
+        set(0x7E0D10, 0x40);
+        set(0x7E0D30, 0x01); // sprite X = 0x0140
+        set(0x7E0D00, 0x00);
+        set(0x7E0D20, 0x01); // sprite Y = 0x0100
+        set(0x7E0E50, 0x00); // no health
+
+        // First frame primes `prev`; the second gives scan a state to read.
+        plugin.on_frame(&ram, 0);
+        plugin.on_frame(&ram, 1);
+        let out = plugin.command("scan", &ram);
+
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("1 nearby")), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("object") && t.contains("east")),
+            "{texts:?}"
+        );
+    }
 }

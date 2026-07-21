@@ -79,6 +79,61 @@ local prev = nil
 -- Latched so the warning fires on crossing the threshold, not every frame below.
 local low_health_warned = false
 
+-- Sprite table: 16 slots of active objects and enemies. Addresses from the
+-- well-documented ALttP RAM map, verified against the running game. Each slot's
+-- fields are 16 consecutive bytes indexed by slot number.
+local SPRITE = {
+  state = 0x7E0DD0, -- 0 = inactive
+  kind  = 0x7E0E20, -- sprite type id
+  x_lo  = 0x7E0D10,
+  x_hi  = 0x7E0D30,
+  y_lo  = 0x7E0D00,
+  y_hi  = 0x7E0D20,
+  hp    = 0x7E0E50,
+}
+
+-- Reads the active sprites, nearest first, each as a table of absolute position,
+-- offset from Link, Manhattan distance, type, and health.
+local function sprites()
+  local s = prev
+  if s == nil or not in_play(s) then return {} end
+  local out = {}
+  for i = 0, 15 do
+    local st = mem.u8(SPRITE.state + i)
+    if st ~= nil and st ~= 0 then
+      local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
+      local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
+      local dx, dy = sx - s.x, sy - s.y
+      out[#out + 1] = {
+        x = sx, y = sy, dx = dx, dy = dy,
+        dist = math.abs(dx) + math.abs(dy),
+        kind = mem.u8(SPRITE.kind + i),
+        hp = mem.u8(SPRITE.hp + i),
+      }
+    end
+  end
+  table.sort(out, function(a, b) return a.dist < b.dist end)
+  return out
+end
+
+-- A compass direction from an offset. y decreases upward on the SNES.
+local function direction(dx, dy)
+  local ax, ay = math.abs(dx), math.abs(dy)
+  local ns = dy < 0 and "north" or "south"
+  local ew = dx < 0 and "west" or "east"
+  if ax > 2 * ay then return ew
+  elseif ay > 2 * ax then return ns
+  else return ns .. ew end
+end
+
+-- A rough distance word. Roughly 16 pixels to a tile.
+local function proximity(dist)
+  if dist < 24 then return "right beside you"
+  elseif dist < 64 then return "close"
+  elseif dist < 160 then return "nearby"
+  else return "in the distance" end
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -186,6 +241,34 @@ on_command("where", function()
   end
 end)
 
+-- "Scan" — describe the objects and enemies around Link, nearest first. This is
+-- the standard scan command; the host binds it to a key (c by default).
+on_command("scan", function()
+  if not (prev ~= nil and in_play(prev)) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  local list = sprites()
+  if #list == 0 then
+    say("Nothing nearby.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+
+  say(
+    string.format("%d nearby.", #list),
+    { priority = "navigation", category = "on-demand" }
+  )
+  -- Describe up to the three nearest, so a busy room does not become a monologue.
+  for i = 1, math.min(3, #list) do
+    local sp = list[i]
+    local kind = (sp.hp ~= nil and sp.hp > 0) and "enemy" or "object"
+    say(
+      string.format("%s, %s, %s.", kind, direction(sp.dx, sp.dy), proximity(sp.dist)),
+      { priority = "navigation", category = "on-demand" }
+    )
+  end
+end)
+
 -- "Coordinates" — a custom command declared in the manifest. The exact tile
 -- position, finer than "where" gives, useful for precise navigation and for
 -- debugging the plugin itself.
@@ -243,6 +326,15 @@ function on_draw(canvas)
   canvas:line(fx + fw, fy, fx + fw, fy + fw, 0x304058)
 
   if in_play(s) then
+    -- Sprites first, so Link's marker sits on top of them. Enemies (those with
+    -- health) in red, other objects in cyan.
+    for _, sp in ipairs(sprites()) do
+      local px = fx + (sp.x % 512) * fw // 512
+      local py = fy + (sp.y % 512) * fw // 512
+      local col = (sp.hp ~= nil and sp.hp > 0) and 0xF04040 or 0x40C0F0
+      canvas:rect(px - 1, py - 1, 3, 3, col)
+    end
+
     local lx = fx + (s.x % 512) * fw // 512
     local ly = fy + (s.y % 512) * fw // 512
     canvas:rect(lx - 2, ly - 2, 5, 5, 0x40FF60) -- Link
