@@ -20,3 +20,6 @@ narrative source; these records are the per-decision index.
 | [0013](0013-delivery-and-packaging.md) | Delivery and packaging | Accepted |
 | [0014](0014-everything-configurable-at-runtime.md) | Every setting is configurable, at runtime, without a text editor | Accepted |
 | [0015](0015-plugin-runtime.md) | Plugin runtime — built-in plus drop-in, memory staged by copy, watchdog deferred | Accepted |
+| [0016](0016-dynamic-keybinding-and-actions.md) | Dynamic key bindings, an action layer, and an input configuration modal | Accepted |
+| [0017](0017-plugin-debug-drawing.md) | Plugins draw a visual interpretation of memory (map mode) | Proposed |
+| [0018](0018-mcp-debug-server.md) | A debug-mode MCP server so an agent can help debug plugins | Proposed |

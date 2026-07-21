@@ -671,6 +671,15 @@ unchanged.
   Tier-1 declarative event DSL (`[[event]]` rules), the 2 ms per-frame watchdog, `beacon.*`
   spatial-audio and `rumble` bindings (Phase 3 territory), and golden-file replay tests,
   which want the savestate + input-log harness to exist first.
+- **Phase 2.5 — input, controls, and debugging aids. _Landed._** Dynamic key bindings over an
+  action layer, a blind-operable input configuration modal reachable from keyboard or
+  controller, plugin-declared custom commands, savestate slots, pause, and frame advance. See
+  [ADR 0016](decisions/0016-dynamic-keybinding-and-actions.md). Two debug-facing capabilities
+  are designed and scheduled but not yet built: plugins drawing a visual interpretation of
+  memory (map mode, [ADR 0017](decisions/0017-plugin-debug-drawing.md)) and a debug-mode MCP
+  server that lets an agent inspect memory, step frames, and reload a plugin
+  ([ADR 0018](decisions/0018-mcp-debug-server.md)). Both live under a single opt-in **debug
+  mode**.
 - **Phase 3 — navigation.** Spatial beacons, destination selection menu, arrival tones, soft
   targeting, incoming-attack cues. **Start from navi's existing spatial model** — the
   two-ring proximity zones and forward cone scan, which already work — and get it into

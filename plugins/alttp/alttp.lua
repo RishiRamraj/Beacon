@@ -186,6 +186,18 @@ on_command("where", function()
   end
 end)
 
+-- "Coordinates" — a custom command declared in the manifest. The exact tile
+-- position, finer than "where" gives, useful for precise navigation and for
+-- debugging the plugin itself.
+on_command("coordinates", function()
+  if prev ~= nil and in_play(prev) then
+    say(string.format("X %d, Y %d.", prev.x, prev.y),
+        { priority = "navigation", category = "on-demand" })
+  else
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+  end
+end)
+
 -- "Status."
 on_command("status", function()
   if prev ~= nil and prev.max_health > 0 then

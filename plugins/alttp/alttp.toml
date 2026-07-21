@@ -29,3 +29,10 @@ indoors     = { addr = 0x7E001B, size = 1 }
 dungeon_room = { addr = 0x7E00A0, size = 2 }
 ow_screen   = { addr = 0x7E008A, size = 2 }
 world       = { addr = 0x7E007B, size = 1 }
+
+# Custom commands this plugin provides, beyond the standard scan/where/status.
+# The user binds keys to these in the input configuration; the host reads the id
+# and label straight from here. Up to ten are allowed.
+[[command]]
+id    = "coordinates"
+label = "Report exact coordinates"

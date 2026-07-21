@@ -1,8 +1,10 @@
 //! Beacon: a SNES emulator with accessibility as a first class feature.
 
+mod action;
 mod app;
 mod audio;
 mod input;
+mod state;
 
 use std::path::{Path, PathBuf};
 
@@ -25,16 +27,20 @@ options:
   --quiet               no speech, useful with --json
   --rate <-100..100>    speech rate; overrides the saved setting
 
-controls:
+game controls (fixed):
   arrows                d-pad            enter    start
   z x a s               B A Y X          rshift   select
   q w                   L R
 
-  c   scan              e   where am I
-  h   status            v   cycle verbosity
-  r   repeat last       esc quit
+action keys (default, all rebindable):
+  c   scan              e   where am I      h   status
+  t   save state        g   load state      n/b next/prev slot
+  p   pause             f   frame advance   v   cycle verbosity
+  r   repeat last       k   input config    esc quit
 
-Settings live at {}, and every value can also be changed while playing.",
+Press the input-config key (k, or the left stick button on a pad) to rebind
+anything, including from a controller alone. Settings live at {}, and every
+value can also be changed while playing.",
         Settings::default_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "the user config directory".into())
@@ -143,27 +149,36 @@ fn plugin_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Picks the plugin for a ROM by hashing it, falling back to no instrumentation.
+/// The headerless SHA-1 of a ROM, used both to select a plugin and to key its
+/// savestates. `None` if the file cannot be read.
+fn rom_id(rom_path: &Path) -> Option<String> {
+    match std::fs::read(rom_path) {
+        Ok(bytes) => Some(beacon_plugin::rom_sha1(beacon_emu::strip_copier_header(
+            &bytes,
+        ))),
+        Err(e) => {
+            eprintln!("could not read ROM: {e}");
+            None
+        }
+    }
+}
+
+/// Picks the plugin matching a ROM hash, falling back to no instrumentation.
 ///
 /// The user never chooses: identification is by headerless SHA-1. A ROM with no
 /// matching plugin still plays, just silently, and a plugin that fails to load
 /// is reported rather than fatal.
-fn select_plugin(rom_path: &Path) -> Box<dyn Plugin> {
-    let bytes = match std::fs::read(rom_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("could not re-read ROM for plugin matching: {e}");
-            return Box::new(NullPlugin);
-        }
+fn select_plugin(sha1: Option<&str>) -> Box<dyn Plugin> {
+    let Some(sha1) = sha1 else {
+        return Box::new(NullPlugin);
     };
-    let sha1 = beacon_plugin::rom_sha1(beacon_emu::strip_copier_header(&bytes));
 
     let mut registry = Registry::builtin();
     for dir in plugin_dirs() {
         registry.load_dir(&dir);
     }
 
-    match registry.select(&sha1) {
+    match registry.select(sha1) {
         Some(spec) => match LuaPlugin::load(spec) {
             Ok(plugin) => {
                 eprintln!("plugin: {}", plugin.name());
@@ -246,14 +261,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let emu = Emulator::load(&args.rom)?;
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
     let speech = build_speech(&settings, &args);
-    let plugin = select_plugin(&args.rom);
+    let rom_id = rom_id(&args.rom);
+    let plugin = select_plugin(rom_id.as_deref());
 
     if let Some(frames) = args.headless {
         return run_headless(emu, arbiter, speech, plugin, frames);
     }
 
     let audio = audio::Audio::new(beacon_emu::AUDIO_SAMPLE_RATE)?;
-    let mut app = app::App::new(emu, audio, arbiter, speech, plugin, settings);
+    let mut app = app::App::new(
+        emu,
+        audio,
+        arbiter,
+        speech,
+        plugin,
+        settings,
+        rom_id.as_deref().unwrap_or("unknown"),
+    );
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
