@@ -690,8 +690,12 @@ unchanged.
   `canvas` ([ADR 0017](decisions/0017-plugin-debug-drawing.md)): an `on_draw(canvas)` Lua hook
   with clear/pixel/rect/line/text primitives and a built-in font. A `toggle_map` action (default
   `m`) shows it in the window; the MCP `get_map` tool returns it as a hand-encoded PNG, so an
-  agent sees what the plugin believes the state to be. The remaining open debug-mode work is the
-  tighter plugin-dev loop — `reload_plugin` and `eval_lua`.
+  agent sees what the plugin believes the state to be.
+- **Phase 2.8 — plugin-dev loop. _Landed._** `reload_plugin` re-reads a drop-in plugin from
+  disk and rebuilds it (edit the Lua, reload, see the effect — no restart, game position kept),
+  and `eval_lua` runs a snippet in the plugin's environment against the current frame. With
+  these the debug-mode tool surface is complete; the only deferred item is a socket transport
+  for attaching to a live windowed session ([ADR 0018](decisions/0018-mcp-debug-server.md)).
 - **Phase 3 — navigation.** Spatial beacons, destination selection menu, arrival tones, soft
   targeting, incoming-attack cues. **Start from navi's existing spatial model** — the
   two-ring proximity zones and forward cone scan, which already work — and get it into

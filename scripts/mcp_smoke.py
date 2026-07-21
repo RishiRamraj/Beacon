@@ -147,6 +147,12 @@ def main():
         else:
             check("get_map returns a valid PNG", False, "no image (plugin has no map?)")
 
+        # Plugin-dev loop: eval a snippet and reload the plugin.
+        ok, ev = tool("eval_lua", {"code": "return 2 + 3"})
+        check("eval_lua evaluates", ok and ev.get("result") == "5", ev.get("result"))
+        ok, rl = tool("reload_plugin")
+        check("reload_plugin succeeds", ok and rl.get("message"), rl.get("message"))
+
     finally:
         print(f"\n{passed} passed, {failed} failed")
         proc.stdin.close()

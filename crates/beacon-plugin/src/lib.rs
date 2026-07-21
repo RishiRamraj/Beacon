@@ -76,6 +76,13 @@ pub trait Plugin {
     fn draw(&mut self, _ram: &[u8], _frame: u64, _out: &mut Vec<u32>) -> Option<(u32, u32)> {
         None
     }
+
+    /// Evaluates a snippet in the plugin's environment against the current frame,
+    /// returning its result as a string. A debugging aid for probing memory and
+    /// the plugin's own state; not every plugin supports it.
+    fn eval(&mut self, _code: &str, _ram: &[u8]) -> Result<String, String> {
+        Err("this plugin does not support eval".to_string())
+    }
 }
 
 /// A bindable command a plugin declares.
@@ -249,6 +256,49 @@ pub struct PluginSpec {
     /// A human-readable origin used in Lua error messages, e.g.
     /// `"alttp.lua (built-in)"`.
     pub chunk_name: String,
+    /// The plugin directory a drop-in was read from, or `None` for a built-in.
+    /// This is what makes reloading from disk possible.
+    pub dir: Option<PathBuf>,
+}
+
+impl PluginSpec {
+    /// Re-reads this plugin from disk, picking up any edits.
+    ///
+    /// A drop-in is re-read from its directory, so a plugin author's changes to
+    /// the manifest or the Lua take effect. A built-in has no directory, so this
+    /// returns it unchanged — reloading it just re-instantiates, which still
+    /// resets a plugin's state, useful on its own.
+    pub fn reloaded(&self) -> Result<PluginSpec, Error> {
+        match &self.dir {
+            Some(dir) => read_plugin_dir(dir),
+            None => Ok(self.clone()),
+        }
+    }
+
+    /// Whether this plugin can be re-read from disk (a drop-in, not a built-in).
+    pub fn is_reloadable_from_disk(&self) -> bool {
+        self.dir.is_some()
+    }
+}
+
+/// Reads a plugin from a directory: its `*.toml` manifest and the Lua it names.
+fn read_plugin_dir(dir: &Path) -> Result<PluginSpec, Error> {
+    let manifest_path = find_manifest(dir).ok_or_else(|| Error::NoManifest(dir.to_owned()))?;
+    let text = std::fs::read_to_string(&manifest_path)?;
+    let manifest = Manifest::parse(&text)?;
+
+    let script_path = dir.join(&manifest.script);
+    let lua_source = std::fs::read_to_string(&script_path).map_err(|e| Error::ScriptRead {
+        path: script_path.clone(),
+        source: e,
+    })?;
+
+    Ok(PluginSpec {
+        manifest,
+        lua_source,
+        chunk_name: script_path.display().to_string(),
+        dir: Some(dir.to_owned()),
+    })
 }
 
 /// The alttp reference plugin, compiled in so a fresh binary instruments the
@@ -274,6 +324,7 @@ impl Registry {
             manifest,
             lua_source: ALTTP_LUA.to_string(),
             chunk_name: "alttp.lua (built-in)".to_string(),
+            dir: None,
         });
         r
     }
@@ -305,21 +356,7 @@ impl Registry {
     }
 
     fn load_plugin_dir(&mut self, dir: &Path) -> Result<(), Error> {
-        let manifest_path = find_manifest(dir).ok_or_else(|| Error::NoManifest(dir.to_owned()))?;
-        let text = std::fs::read_to_string(&manifest_path)?;
-        let manifest = Manifest::parse(&text)?;
-
-        let script_path = dir.join(&manifest.script);
-        let lua_source = std::fs::read_to_string(&script_path).map_err(|e| Error::ScriptRead {
-            path: script_path.clone(),
-            source: e,
-        })?;
-
-        self.specs.push(PluginSpec {
-            manifest,
-            lua_source,
-            chunk_name: script_path.display().to_string(),
-        });
+        self.specs.push(read_plugin_dir(dir)?);
         Ok(())
     }
 

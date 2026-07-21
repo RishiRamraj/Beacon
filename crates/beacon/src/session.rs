@@ -19,7 +19,7 @@ use beacon_config::Settings;
 use beacon_emu::{Emulator, FrameInfo};
 use beacon_output::sink::{Fanout, SpeechSink};
 use beacon_output::{Arbiter, Intent, Priority, Utterance};
-use beacon_plugin::Plugin;
+use beacon_plugin::{LuaPlugin, Plugin, PluginSpec};
 
 use crate::action::{self, Action, Bindable};
 use crate::audio::Audio;
@@ -40,6 +40,9 @@ pub struct Session {
     arbiter: Arbiter,
     speech: Fanout,
     plugin: Box<dyn Plugin>,
+    /// The spec the plugin was built from, kept so it can be reloaded. `None` for
+    /// a session with no matching plugin.
+    reload_spec: Option<PluginSpec>,
     settings: Settings,
 
     slots: SlotStore,
@@ -77,6 +80,7 @@ impl Session {
         arbiter: Arbiter,
         speech: Fanout,
         plugin: Box<dyn Plugin>,
+        reload_spec: Option<PluginSpec>,
         settings: Settings,
         rom_id: &str,
     ) -> Self {
@@ -86,6 +90,7 @@ impl Session {
             arbiter,
             speech,
             plugin,
+            reload_spec,
             settings,
             slots: SlotStore::new(rom_id),
             active_slot: 0,
@@ -587,6 +592,45 @@ impl Session {
         self.arbiter.set_verbosity(self.settings.arbiter.verbosity);
         self.persist_settings();
         Ok(())
+    }
+
+    /// Rebuilds the plugin from its source, picking up edits on disk.
+    ///
+    /// The tight edit-run loop for a plugin author: change the Lua, reload, see
+    /// the effect, without restarting the emulator or losing the game's position.
+    /// The plugin's own Lua state (its `prev`, its latches) resets, which is
+    /// expected — it re-derives from the next frame.
+    pub fn reload_plugin(&mut self) -> Result<String, String> {
+        let Some(spec) = &self.reload_spec else {
+            return Err("no plugin is loaded to reload".to_string());
+        };
+        let fresh = spec.reloaded().map_err(|e| e.to_string())?;
+        let plugin = LuaPlugin::load(&fresh).map_err(|e| e.to_string())?;
+
+        let name = plugin.name().to_string();
+        let from_disk = fresh.is_reloadable_from_disk();
+        self.plugin = Box::new(plugin);
+        self.reload_spec = Some(fresh);
+        // The old map belongs to the old plugin; drop it and let it redraw.
+        self.map_buffer.clear();
+        if self.show_map {
+            self.render_map();
+        }
+        Ok(if from_disk {
+            format!("reloaded {name} from disk")
+        } else {
+            format!("re-instantiated built-in {name} (no disk source to reread)")
+        })
+    }
+
+    /// Evaluates a Lua snippet in the plugin's environment against the current
+    /// frame, returning its result. For an agent probing memory and plugin state.
+    pub fn eval_lua(&mut self, code: &str) -> Result<String, String> {
+        let ram = match self.emu.main_ram() {
+            Ok(r) => r,
+            Err(e) => return Err(e.to_string()),
+        };
+        self.plugin.eval(code, ram)
     }
 }
 

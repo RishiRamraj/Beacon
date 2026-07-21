@@ -119,6 +119,16 @@ fn dispatch(s: &mut Session, name: &str, args: &Value) -> Result<Value, String> 
 
         "recent_speech" => Ok(json!({ "spoken": s.take_speech() })),
 
+        "reload_plugin" => {
+            let message = s.reload_plugin()?;
+            Ok(json!({ "message": message }))
+        }
+
+        "eval_lua" => {
+            let code = arg_string(args, "code")?;
+            Ok(json!({ "result": s.eval_lua(&code)? }))
+        }
+
         "get_map" => match s.render_map() {
             Some((w, h)) => {
                 let png = crate::image::encode_png(w, h, s.map_pixels());
@@ -335,6 +345,16 @@ fn tool_defs() -> Vec<ToolDef> {
             "get_map",
             "Render the plugin's map — its visual interpretation of memory — and return it as a PNG image. Errors if the plugin draws no map.",
             none(),
+        ),
+        ToolDef::new(
+            "reload_plugin",
+            "Re-read the plugin from disk and rebuild it, picking up edits to its Lua or manifest without restarting. The game keeps its position; the plugin's own state resets.",
+            none(),
+        ),
+        ToolDef::new(
+            "eval_lua",
+            "Evaluate a Lua snippet in the plugin's environment against the current frame, e.g. 'return mem.u8(0x7E0010)'. Returns the result as a string. For probing while developing a plugin.",
+            obj(json!({ "code": { "type": "string" } }), &["code"]),
         ),
         ToolDef::new(
             "read_memory",

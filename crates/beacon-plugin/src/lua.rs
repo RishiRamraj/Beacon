@@ -187,6 +187,40 @@ impl Plugin for LuaPlugin {
         self.canvas.copy_into(out);
         Some((canvas::WIDTH, canvas::HEIGHT))
     }
+
+    fn eval(&mut self, code: &str, ram: &[u8]) -> Result<String, String> {
+        self.stage_ram(ram);
+        // Evaluate as an expression first (so "mem.u8(0x10)" returns a value);
+        // fall back to executing it as a statement block.
+        let value = self
+            .lua
+            .load(code)
+            .set_name("eval")
+            .eval::<Value>()
+            .or_else(|_| {
+                self.lua
+                    .load(code)
+                    .set_name("eval")
+                    .exec()
+                    .map(|_| Value::Nil)
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(describe_value(&value))
+    }
+}
+
+/// Renders a Lua value as a short human string for an eval result.
+fn describe_value(value: &Value) -> String {
+    match value {
+        Value::Nil => "nil".to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Integer(i) => i.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.to_string_lossy().to_string(),
+        Value::Table(_) => "<table>".to_string(),
+        Value::Function(_) => "<function>".to_string(),
+        other => format!("<{}>", other.type_name()),
+    }
 }
 
 /// Installs the `mem` table: bounds-checked reads over the staged frame.
@@ -450,6 +484,7 @@ mod tests {
             manifest,
             lua_source: lua.to_string(),
             chunk_name: "test.lua".to_string(),
+            dir: None,
         };
         LuaPlugin::load(&spec).unwrap()
     }
@@ -581,6 +616,19 @@ mod tests {
         let mut p = plugin_from("function on_frame(frame) end");
         assert!(!p.has_map());
         assert_eq!(p.draw(&vec![0u8; WRAM_LEN], 0, &mut Vec::new()), None);
+    }
+
+    #[test]
+    fn eval_reads_memory_and_returns_values() {
+        let mut p = plugin_from("");
+        let ram = ram_with(&[(0x7EF36D, 12)]);
+        assert_eq!(p.eval("return mem.u8(0x7EF36D)", &ram).unwrap(), "12");
+        assert_eq!(p.eval("return 2 + 3", &ram).unwrap(), "5");
+        assert_eq!(p.eval("return 'hi'", &ram).unwrap(), "hi");
+        // A statement block (no return) evaluates to nil, not an error.
+        assert_eq!(p.eval("local x = 1", &ram).unwrap(), "nil");
+        // A syntax error surfaces as an Err, not a panic.
+        assert!(p.eval("this is not lua", &ram).is_err());
     }
 
     #[test]
