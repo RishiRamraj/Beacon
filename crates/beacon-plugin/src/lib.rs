@@ -52,7 +52,35 @@ pub trait Plugin {
     /// them immediately rather than putting them through rate limiting. An
     /// unknown command returns nothing.
     fn command(&mut self, name: &str, ram: &[u8]) -> Vec<Intent>;
+
+    /// The plugin's own bindable commands, beyond the standard scan/where/status.
+    ///
+    /// These are what the host offers the user to bind keys to, so a plugin can
+    /// expose game-specific actions ("read the current sign", "list inventory")
+    /// without the host knowing anything about them. Declared in the manifest.
+    fn commands(&self) -> &[CommandDecl] {
+        &[]
+    }
 }
+
+/// A bindable command a plugin declares.
+///
+/// The `id` is what the host sends back to [`Plugin::command`] and what a key
+/// binds to (as `command:<id>`); the `label` is what is spoken when the user is
+/// choosing what to bind. Kept in the manifest so the host can list a plugin's
+/// commands without running any Lua.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandDecl {
+    pub id: String,
+    pub label: String,
+}
+
+/// The three commands the host itself always offers, independent of any plugin.
+pub const STANDARD_COMMANDS: [&str; 3] = ["scan", "where", "status"];
+
+/// The most custom commands a plugin may declare, beyond the standard three.
+pub const MAX_CUSTOM_COMMANDS: usize = 10;
 
 /// A plugin that does nothing, used when no plugin matches the ROM.
 ///
@@ -118,12 +146,42 @@ pub struct Manifest {
     /// Named memory watches, exposed to the Lua as a `watch` table.
     #[serde(default)]
     pub watch: BTreeMap<String, Watch>,
+    /// Custom bindable commands this plugin provides. `[[command]]` in TOML.
+    #[serde(default, rename = "command")]
+    pub commands: Vec<CommandDecl>,
 }
 
 impl Manifest {
-    /// Parses a manifest from TOML text.
+    /// Parses and validates a manifest from TOML text.
     pub fn parse(text: &str) -> Result<Self, Error> {
-        toml::from_str(text).map_err(|e| Error::Manifest(e.to_string()))
+        let manifest: Manifest =
+            toml::from_str(text).map_err(|e| Error::Manifest(e.to_string()))?;
+        manifest.validate_commands()?;
+        Ok(manifest)
+    }
+
+    /// Rejects a command list that is too long, collides with the standard
+    /// commands, or repeats an id — all author mistakes worth catching at load.
+    fn validate_commands(&self) -> Result<(), Error> {
+        if self.commands.len() > MAX_CUSTOM_COMMANDS {
+            return Err(Error::Manifest(format!(
+                "at most {MAX_CUSTOM_COMMANDS} custom commands, found {}",
+                self.commands.len()
+            )));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for c in &self.commands {
+            if STANDARD_COMMANDS.contains(&c.id.as_str()) {
+                return Err(Error::Manifest(format!(
+                    "command id '{}' is reserved (scan/where/status are built in)",
+                    c.id
+                )));
+            }
+            if !seen.insert(c.id.as_str()) {
+                return Err(Error::Manifest(format!("duplicate command id '{}'", c.id)));
+            }
+        }
+        Ok(())
     }
 
     /// Whether this plugin claims a ROM with the given headerless SHA-1.
@@ -341,6 +399,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.watch["flag"].size, 1);
+    }
+
+    #[test]
+    fn manifest_parses_custom_commands() {
+        let m = Manifest::parse(
+            r#"
+            script = "x.lua"
+            [game]
+            name = "Test"
+            [[command]]
+            id = "read_sign"
+            label = "Read the current sign"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(m.commands.len(), 1);
+        assert_eq!(m.commands[0].id, "read_sign");
+        assert_eq!(m.commands[0].label, "Read the current sign");
+    }
+
+    #[test]
+    fn custom_commands_may_not_shadow_standard_ones() {
+        let err = Manifest::parse(
+            r#"
+            script = "x.lua"
+            [game]
+            name = "Test"
+            [[command]]
+            id = "scan"
+            label = "nope"
+            "#,
+        );
+        assert!(err.is_err(), "scan is reserved");
+    }
+
+    #[test]
+    fn too_many_custom_commands_are_rejected() {
+        let mut toml = String::from("script = \"x.lua\"\n[game]\nname = \"Test\"\n");
+        for i in 0..(MAX_CUSTOM_COMMANDS + 1) {
+            toml.push_str(&format!("[[command]]\nid = \"c{i}\"\nlabel = \"l{i}\"\n"));
+        }
+        assert!(Manifest::parse(&toml).is_err());
     }
 
     #[test]

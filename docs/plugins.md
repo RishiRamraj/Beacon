@@ -49,6 +49,11 @@ sha1   = ["0123456789abcdef0123456789abcdef01234567"]
 [watch]
 health = { addr = 0x7EF36D, size = 1 }
 room   = { addr = 0x7E00A0, size = 2 }
+
+# Custom commands, optional. Up to ten. The user binds keys to these.
+[[command]]
+id    = "coordinates"
+label = "Report exact coordinates"
 ```
 
 | Key | Required | Meaning |
@@ -58,6 +63,7 @@ room   = { addr = 0x7E00A0, size = 2 }
 | `game.sha1` | to match a ROM | List of headerless ROM SHA-1s this plugin claims. |
 | `game.region` | no | Informational only, for now. |
 | `watch` | no | Named addresses, each `{ addr, size }`. `size` defaults to 1. |
+| `command` | no | Up to ten `{ id, label }` custom commands; see [Custom commands](#custom-commands). |
 
 Unknown keys are **rejected**, not ignored, so a typo is caught at load rather
 than silently doing nothing.
@@ -189,22 +195,59 @@ Registers a handler for a named command. When the player issues it, `fn` is call
 against the current frame; whatever it `say`s is spoken **immediately**, bypassing
 rate limiting, because it answers a direct request.
 
-The commands the host currently dispatches:
+The three **standard** commands every game shares, and their default keys (all
+rebindable):
 
-| Command | Key | Convention |
+| Command | Default key | Convention |
 |---|---|---|
 | `"where"` | `e` | Where am I — location and facing. |
 | `"status"` | `h` | Health and resources. |
 | `"scan"` | `c` | Describe surroundings. |
 
-A command with no handler falls back to a spoken "not available" message, so an
-unbound key is never silent. You may register handlers for only the commands your
-game supports.
+A command with no handler falls back to a spoken acknowledgement, so a bound key is
+never silent. You may register handlers for only the commands your game supports.
+
+### Custom commands
+
+Beyond the standard three, a plugin may declare up to ten **custom** commands —
+game-specific actions like "read the current sign" or "list inventory". Declare each
+in the manifest with an `id` and a human `label`, and implement it with
+`on_command(id, fn)`:
+
+```toml
+[[command]]
+id    = "coordinates"
+label = "Report exact coordinates"
+```
+
+```lua
+on_command("coordinates", function()
+  say(string.format("X %d, Y %d.", mem.u16(watch.link_x.addr), mem.u16(watch.link_y.addr)),
+      { priority = "navigation" })
+end)
+```
+
+The user binds a key or gamepad button to it in Beacon's input configuration, where
+it is listed by the `label` you gave. The `id`s `scan`, `where`, and `status` are
+reserved. See [ADR 0016](decisions/0016-dynamic-keybinding-and-actions.md) for how
+binding works.
 
 ### `log(level, message)` — diagnostics
 
 `log("info", "loaded 42 rooms")` or `log("something happened")`. Routed to stderr,
 never to the stdout JSON stream, so it is safe to log freely.
+
+## On the horizon
+
+Two capabilities are designed and scheduled but not yet in the API. If you are
+writing a plugin now, know they are coming:
+
+- **Map mode** — an `on_draw(canvas)` hook to render your interpretation of memory as
+  a picture, for debugging and for sighted assistance
+  ([ADR 0017](decisions/0017-plugin-debug-drawing.md)).
+- **A debug-mode MCP server** — so an agent can step frames, read memory, and reload
+  your plugin while you develop it
+  ([ADR 0018](decisions/0018-mcp-debug-server.md)).
 
 ---
 

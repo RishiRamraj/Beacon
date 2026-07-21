@@ -14,6 +14,7 @@
 //! [`Settings::set`] so a hotkey, a menu, or a voice command can adjust
 //! anything by name without a bespoke handler per field.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,10 @@ pub struct Settings {
     pub speech: Speech,
     pub arbiter: ArbiterSettings,
     pub braille: Braille,
+    /// Key bindings. Serialized as `[keys]`; the field is `keymap` to avoid
+    /// colliding with [`Settings::keys`], the list of scalar setting names.
+    #[serde(rename = "keys")]
+    pub keymap: Keymap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +108,96 @@ impl Default for Braille {
     }
 }
 
+/// Key bindings: physical key name to action id.
+///
+/// Keys are named as the host names them (e.g. `"KeyC"`, `"F5"`, `"Escape"`);
+/// this crate does not know about `winit`, it just stores strings. Action ids
+/// are the host's vocabulary too: a bare name for a built-in action
+/// (`"save_state"`), or `"command:<id>"` for a plugin command (`"command:scan"`).
+///
+/// The map is the **complete** binding set, not a set of overrides: writing a
+/// `[keys]` table in the settings file replaces the defaults wholesale, and a
+/// runtime rebind writes the whole map back. Most users never touch it and get
+/// [`Keymap::default`].
+///
+/// Game controls (the SNES buttons) are deliberately **not** here. They are a
+/// separate, fixed mapping so that a rebindable action can never silently steal
+/// a key the game needs mid-combat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Keymap {
+    bindings: BTreeMap<String, String>,
+}
+
+impl Keymap {
+    /// The action bound to a key, if any.
+    pub fn action_for(&self, key: &str) -> Option<&str> {
+        self.bindings.get(key).map(String::as_str)
+    }
+
+    /// Binds a key to an action, replacing any previous binding of that key.
+    pub fn bind(&mut self, key: impl Into<String>, action: impl Into<String>) {
+        self.bindings.insert(key.into(), action.into());
+    }
+
+    /// Removes any binding for a key.
+    pub fn unbind(&mut self, key: &str) {
+        self.bindings.remove(key);
+    }
+
+    /// The keys currently bound to an action, sorted. Several keys may map to
+    /// one action, so this is a list.
+    pub fn keys_for(&self, action: &str) -> Vec<String> {
+        self.bindings
+            .iter()
+            .filter(|(_, a)| a.as_str() == action)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Every binding, key to action.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.bindings.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
+
+impl Default for Keymap {
+    /// The out-of-the-box bindings.
+    ///
+    /// Chosen from the letter keys that are neither SNES buttons nor claimed by
+    /// screen readers (function keys and the number row are avoided). Every one
+    /// is rebindable; these are only a starting point. Plugin custom commands
+    /// are unbound by default, since only the plugin knows what they are.
+    fn default() -> Self {
+        let mut bindings = BTreeMap::new();
+        let mut bind = |k: &str, a: &str| {
+            bindings.insert(k.to_string(), a.to_string());
+        };
+        bind("KeyC", "command:scan");
+        bind("KeyE", "command:where");
+        bind("KeyH", "command:status");
+        bind("KeyV", "cycle_verbosity");
+        bind("KeyR", "repeat_last");
+        bind("Escape", "quit");
+        bind("KeyT", "save_state");
+        bind("KeyG", "load_state");
+        bind("KeyN", "next_slot");
+        bind("KeyB", "prev_slot");
+        bind("KeyP", "pause");
+        bind("KeyF", "frame_advance");
+        bind("KeyK", "bind");
+
+        // Gamepad defaults, on the pad's extra buttons so a controller-only
+        // player can reach the essentials and the configuration without a
+        // keyboard. Everything else they bind themselves.
+        bind("Pad:LeftThumb", "bind");
+        bind("Pad:RightThumb", "command:scan");
+        bind("Pad:LeftTrigger2", "command:where");
+        bind("Pad:RightTrigger2", "command:status");
+        Keymap { bindings }
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
@@ -164,6 +259,14 @@ impl Settings {
         let text = toml::to_string_pretty(self).map_err(|e| Error::Serialise(e.to_string()))?;
         std::fs::write(path, text)?;
         Ok(())
+    }
+
+    /// The directory settings and related state (savestates, keymaps) live in.
+    ///
+    /// The parent of [`default_path`](Settings::default_path), so a caller
+    /// wanting a sibling directory — `states/`, say — has one place to root it.
+    pub fn config_dir() -> Option<PathBuf> {
+        Self::default_path().and_then(|p| p.parent().map(Path::to_path_buf))
     }
 
     /// The conventional settings path for this user.
@@ -270,10 +373,36 @@ mod tests {
         s.speech.rate = 85;
         s.arbiter.verbosity = 3;
         s.braille.enabled = true;
+        s.keymap.bind("KeyD", "command:custom1");
 
         let text = toml::to_string_pretty(&s).unwrap();
         let back: Settings = toml::from_str(&text).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn keymap_defaults_are_present_and_editable() {
+        let mut k = Keymap::default();
+        assert_eq!(k.action_for("Escape"), Some("quit"));
+        assert_eq!(k.action_for("KeyF"), Some("frame_advance"));
+
+        // A rebind replaces the key's action; several keys can share an action.
+        k.bind("KeyC", "command:custom1");
+        assert_eq!(k.action_for("KeyC"), Some("command:custom1"));
+        k.bind("KeyO", "command:custom1");
+        let mut keys = k.keys_for("command:custom1");
+        keys.sort();
+        assert_eq!(keys, vec!["KeyC".to_string(), "KeyO".to_string()]);
+
+        k.unbind("KeyC");
+        assert_eq!(k.action_for("KeyC"), None);
+    }
+
+    #[test]
+    fn absent_keys_table_yields_default_bindings() {
+        // A settings file with no [keys] must still be fully bound.
+        let s: Settings = toml::from_str("[speech]\nrate = 20\n").unwrap();
+        assert_eq!(s.keymap.action_for("Escape"), Some("quit"));
     }
 
     #[test]

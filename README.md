@@ -56,17 +56,34 @@ you have already configured. If it is not running, Beacon says so and plays on.
 
 ### Controls
 
-| Key | Action | Key | Action |
-|---|---|---|---|
-| arrows | d-pad | enter | start |
-| z x a s | B A Y X | right shift | select |
-| q w | L R | | |
-| c | scan | e | where am I |
-| h | status | v | cycle verbosity |
-| r | repeat last | esc | quit |
+Game controls are fixed; everything else is an **action** and every action is
+rebindable, from the keyboard or a controller.
 
-A gamepad works too, and both are live at once. The left stick doubles as a
-d-pad, which some players find easier than the hat.
+| Game (fixed) | | Actions (default keys, rebindable) | |
+|---|---|---|---|
+| arrows | d-pad | c / e / h | scan / where am I / status |
+| z x a s | B A Y X | t / g | save state / load state |
+| q w | L R | n / b | next / previous save slot |
+| enter | start | p / f | pause / frame advance |
+| right shift | select | v / r | cycle verbosity / repeat last |
+| | | k | open input configuration |
+| | | esc | quit |
+
+A gamepad works too, and both are live at once; the left stick doubles as a
+d-pad. Actions are reachable from the pad's spare buttons — by default the left
+stick button opens the input configuration, so a controller-only player can
+rebind everything without a keyboard.
+
+**Rebinding.** Press the input-configuration key (`k`, or the left stick button).
+The game pauses; use up/down to choose an action — each is spoken with its current
+binding — then press the key or button to assign it, delete to clear, escape to
+finish. Everything is announced, so it works without sight, and changes are saved
+immediately.
+
+**Savestates.** Ten slots per game, kept under your config directory and keyed by
+ROM so games never collide. Save and load act on the active slot; next/previous
+move between slots, announced as you go. Frame advance and pause are there for
+debugging a plugin — stepping one frame at a time to watch memory change.
 
 ### Other modes
 

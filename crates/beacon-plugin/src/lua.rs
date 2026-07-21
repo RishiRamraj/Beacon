@@ -36,7 +36,7 @@ use std::time::Duration;
 use beacon_output::{Intent, Priority};
 use mlua::{Function, Lua, Table, Value};
 
-use crate::{Error, Manifest, Plugin, PluginSpec};
+use crate::{CommandDecl, Error, Manifest, Plugin, PluginSpec};
 
 /// Work RAM is 128 KiB: bank $7E is the first 64 KiB, $7F the second.
 const WRAM_LEN: usize = 128 * 1024;
@@ -69,6 +69,7 @@ pub struct LuaPlugin {
     name: String,
     ram: Ram,
     intents: Intents,
+    commands: Vec<CommandDecl>,
 }
 
 impl LuaPlugin {
@@ -98,6 +99,7 @@ impl LuaPlugin {
             name: spec.manifest.game.name.clone(),
             ram,
             intents,
+            commands: spec.manifest.commands.clone(),
         })
     }
 
@@ -117,6 +119,10 @@ impl LuaPlugin {
 impl Plugin for LuaPlugin {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn commands(&self) -> &[CommandDecl] {
+        &self.commands
     }
 
     fn on_frame(&mut self, ram: &[u8], frame: u64) -> Vec<Intent> {
