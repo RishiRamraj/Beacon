@@ -3,7 +3,9 @@
 mod action;
 mod app;
 mod audio;
+mod config_modal;
 mod input;
+mod session;
 mod state;
 
 use std::path::{Path, PathBuf};
@@ -269,7 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let audio = audio::Audio::new(beacon_emu::AUDIO_SAMPLE_RATE)?;
-    let mut app = app::App::new(
+    let session = session::Session::new(
         emu,
         audio,
         arbiter,
@@ -278,6 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         rom_id.as_deref().unwrap_or("unknown"),
     );
+    let mut app = app::App::new(session, input::Input::new());
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

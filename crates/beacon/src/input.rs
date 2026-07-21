@@ -103,10 +103,6 @@ pub fn key_name(key: KeyCode) -> Option<&'static str> {
 }
 
 /// The key for a stable string, the inverse of [`key_name`].
-///
-/// Production resolves actions by name and never needs the `KeyCode` back; this
-/// exists for completeness and for the binding-safety tests.
-#[allow(dead_code)]
 pub fn key_from_name(name: &str) -> Option<KeyCode> {
     KEY_TABLE
         .iter()
@@ -158,6 +154,19 @@ pub fn pad_button_name(b: Button) -> Option<&'static str> {
 /// Whether a gamepad button name drives the game, and so cannot be bound.
 pub fn is_game_pad_name(name: &str) -> bool {
     GAME_PAD.iter().any(|(_, n, _)| *n == name)
+}
+
+/// Whether an input name — key or gamepad button — drives the game.
+///
+/// The device-independent form of the binding-safety check: it lets the modal
+/// and any programmatic binder (the MCP server) refuse a game control by name,
+/// without knowing whether it came from a keyboard or a pad.
+pub fn is_game_input_name(name: &str) -> bool {
+    if name.starts_with("Pad:") {
+        is_game_pad_name(name)
+    } else {
+        key_from_name(name).is_some_and(is_game_button)
+    }
 }
 
 /// A key or gamepad name in a form worth speaking.
