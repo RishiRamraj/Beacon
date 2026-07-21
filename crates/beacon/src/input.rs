@@ -54,6 +54,26 @@ pub fn is_game_button(key: KeyCode) -> bool {
     key_to_button(key).is_some()
 }
 
+/// The SNES button bit for a human name, for a programmatic driver (the MCP
+/// server) that presses buttons by name rather than through a device.
+pub fn snes_button_from_name(name: &str) -> Option<u16> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "a" => button::A,
+        "b" => button::B,
+        "x" => button::X,
+        "y" => button::Y,
+        "l" => button::L,
+        "r" => button::R,
+        "start" => button::START,
+        "select" => button::SELECT,
+        "up" => button::UP,
+        "down" => button::DOWN,
+        "left" => button::LEFT,
+        "right" => button::RIGHT,
+        _ => return None,
+    })
+}
+
 // --- Keyboard: naming ------------------------------------------------------
 
 /// The keys the keymap can name, paired with their stable string form.

@@ -41,22 +41,7 @@ use crate::{CommandDecl, Error, Manifest, Plugin, PluginSpec};
 /// Work RAM is 128 KiB: bank $7E is the first 64 KiB, $7F the second.
 const WRAM_LEN: usize = 128 * 1024;
 
-/// Resolves a SNES address to an offset into work RAM.
-///
-/// Handles the two WRAM banks directly and the low-RAM mirror that the first
-/// 8 KiB is visible through in banks $00-$3F and $80-$BF. Anything else — ROM,
-/// hardware registers, unmapped space — returns `None`, which surfaces to Lua as
-/// `nil` rather than a wrong value.
-fn wram_offset(addr: u32) -> Option<usize> {
-    let bank = addr >> 16;
-    let low = (addr & 0xFFFF) as usize;
-    match bank {
-        0x7E => Some(low),
-        0x7F => Some(0x10000 + low),
-        0x00..=0x3F | 0x80..=0xBF if low < 0x2000 => Some(low),
-        _ => None,
-    }
-}
+use crate::wram_offset;
 
 /// The shared frame buffer the `mem` closures read from.
 type Ram = Rc<RefCell<Vec<u8>>>;

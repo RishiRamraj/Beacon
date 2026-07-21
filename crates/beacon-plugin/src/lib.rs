@@ -193,6 +193,24 @@ impl Manifest {
     }
 }
 
+/// Resolves a SNES address to an offset into the 128 KiB of work RAM.
+///
+/// Handles the two WRAM banks directly ($7E, $7F) and the low-RAM mirror the
+/// first 8 KiB is visible through in banks $00-$3F and $80-$BF. Anything else —
+/// ROM, hardware registers, unmapped space — returns `None`. This is the single
+/// definition of Beacon's memory addressing, shared by the Lua `mem` API and any
+/// other reader (the MCP debug server), so they can never drift.
+pub fn wram_offset(addr: u32) -> Option<usize> {
+    let bank = addr >> 16;
+    let low = (addr & 0xFFFF) as usize;
+    match bank {
+        0x7E => Some(low),
+        0x7F => Some(0x10000 + low),
+        0x00..=0x3F | 0x80..=0xBF if low < 0x2000 => Some(low),
+        _ => None,
+    }
+}
+
 /// The SHA-1 a plugin is matched against.
 ///
 /// Callers pass the ROM already stripped of any 512-byte copier header, so the
