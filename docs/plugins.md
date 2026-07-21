@@ -262,6 +262,12 @@ enough for coordinates and room numbers. `on_draw` runs only while the map is sh
 so it costs nothing when hidden. See [`plugins/alttp/alttp.lua`](../plugins/alttp/alttp.lua)
 for a worked example, and [ADR 0017](decisions/0017-plugin-debug-drawing.md).
 
+The alttp plugin's `on_draw` produces this — the room, Link's position and facing,
+and his health, drawn from memory:
+
+![The alttp map: ROOM 260, three health hearts, and Link as a dot facing north
+with his coordinates.](images/alttp-map.png)
+
 ## Debugging with an agent
 
 `beacon yourgame.sfc --mcp` runs headless and serves the Model Context Protocol on

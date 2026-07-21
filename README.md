@@ -129,6 +129,18 @@ PNG the agent can see), and the configuration walk (`open_config`,
 round-trip, stepping, commands, settings, and binding — as a quick check that
 agent control works against your ROM.
 
+`scripts/capture_map.py <alttp.sfc>` shows the extreme case: an agent boots the
+ROM, skips the intro, creates a save file (navigating the name-entry screen),
+starts a new game, advances the opening until Link is controllable, and fetches
+the plugin's map — all over MCP, with no window. Its output:
+
+![The A Link to the Past plugin's map: a header reading ROOM 260, three health
+hearts, and Link shown as a dot facing north with his coordinates.](docs/images/alttp-map.png)
+
+That is the plugin's *interpretation* of memory, not the game's own screen: the
+room it read, Link's position and facing, and his health — drawn by the plugin,
+legible to an agent.
+
 ## Settings
 
 Everything is configurable, and nothing needs configuring to start. Settings
