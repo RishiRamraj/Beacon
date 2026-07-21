@@ -23,3 +23,4 @@ narrative source; these records are the per-decision index.
 | [0016](0016-dynamic-keybinding-and-actions.md) | Dynamic key bindings, an action layer, and an input configuration modal | Accepted |
 | [0017](0017-plugin-debug-drawing.md) | Plugins draw a visual interpretation of memory (map mode) | Accepted |
 | [0018](0018-mcp-debug-server.md) | An MCP server so an agent can drive the whole experience | Accepted |
+| [0019](0019-scan-nearest-first.md) | Scan describes the nearest objects on demand, before any spatial audio | Accepted |
