@@ -103,6 +103,26 @@ or any other tool can subscribe:
 **stdout carries only the event stream.** Diagnostics and emulator logs go to
 stderr, so piping stdout into a parser is safe.
 
+### Agent control (MCP)
+
+```sh
+beacon rom.sfc --mcp        # no window; serve the Model Context Protocol on stdio
+```
+
+`--mcp` runs the game with audio and speech but no video window, and speaks the
+[Model Context Protocol](https://modelcontextprotocol.io) on stdio. An agent can
+then drive the whole thing — press buttons, run commands, save and load, rebind
+keys, walk the input configuration, read memory, step frames — and read back
+everything Beacon spoke, so it perceives exactly what the player would hear. The
+intent is that a player can hand their setup and play to an agent rather than
+configure key by key.
+
+The tools are self-describing (`tools/list`); highlights: `get_state`,
+`read_memory`, `step`, `set_buttons`, `run_command`, `save_state` / `load_state`,
+`list_actions`, `bind` / `unbind`, `set_setting`, and the configuration walk
+(`open_config`, `config_navigate`, `config_bind`, `config_close`). See
+[ADR 0018](docs/decisions/0018-mcp-debug-server.md).
+
 ## Settings
 
 Everything is configurable, and nothing needs configuring to start. Settings
@@ -158,7 +178,8 @@ manifest format and the complete Lua host API (`mem.u8/u16/u24/slice`, `say`,
 | `crates/beacon-output` | Event arbitration and the speech / JSON sinks |
 | `crates/beacon-config` | User settings, typed and string-keyed for runtime changes |
 | `crates/beacon-plugin` | Plugin runtime: manifest loader, ROM matching, Lua host API |
-| `crates/beacon` | The host binary |
+| `crates/beacon-mcp` | Minimal MCP server over stdio, for agent control |
+| `crates/beacon` | The host binary (session core, winit shell, MCP runner) |
 | `plugins/alttp` | The A Link to the Past reference plugin (TOML + Lua) |
 | `vendor/bsnes-jg` | Emulator core, as a submodule pinned to a release tag |
 | `docs/plugins.md` | Plugin authoring guide: manifest format and Lua host API |

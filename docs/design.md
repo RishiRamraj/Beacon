@@ -680,6 +680,14 @@ unchanged.
   server that lets an agent inspect memory, step frames, and reload a plugin
   ([ADR 0018](decisions/0018-mcp-debug-server.md)). Both live under a single opt-in **debug
   mode**.
+- **Phase 2.6 — agent control. _Landed._** The MCP server from ADR 0018 is built. `--mcp`
+  runs the session headless (audio and speech still play) and serves the Model Context
+  Protocol on stdio, so an agent can press buttons, run commands, save and load, rebind keys,
+  walk the input configuration, read memory, step frames, and read back everything spoken. An
+  end user can hand their whole setup and play to an agent. Enabled by extracting a
+  windowing-independent `Session` core that the winit shell and the MCP runner both drive. Map
+  mode ([ADR 0017](decisions/0017-plugin-debug-drawing.md)) and the tighter plugin-dev tools
+  (`reload_plugin`, `eval_lua`) remain the open debug-mode work.
 - **Phase 3 — navigation.** Spatial beacons, destination selection menu, arrival tones, soft
   targeting, incoming-attack cues. **Start from navi's existing spatial model** — the
   two-ring proximity zones and forward cone scan, which already work — and get it into

@@ -12,6 +12,7 @@
 //! rather than being read from a device here, so the same session runs whether a
 //! keyboard, a gamepad, or an agent is supplying them.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use beacon_config::Settings;
@@ -20,10 +21,14 @@ use beacon_output::sink::{Fanout, SpeechSink};
 use beacon_output::{Arbiter, Intent, Priority, Utterance};
 use beacon_plugin::Plugin;
 
-use crate::action::{self, Action};
+use crate::action::{self, Action, Bindable};
 use crate::audio::Audio;
 use crate::config_modal::{Bound, ConfigModal};
 use crate::state::{SlotStore, SLOTS};
+
+/// How many recent spoken lines to retain for an agent to read back. Bounded so
+/// a long GUI session does not accumulate them without limit.
+const SPEECH_LOG_CAP: usize = 512;
 
 /// NTSC frame rate. Session time comes from the frame counter, not the clock, so
 /// a replay of the same inputs arbitrates identically.
@@ -53,6 +58,8 @@ pub struct Session {
 
     audio_scratch: Vec<f32>,
     last_spoken: Option<String>,
+    /// Recent spoken lines, for an agent to read what a player would have heard.
+    speech_log: VecDeque<String>,
     frames: u64,
     warned_slow: bool,
 }
@@ -84,6 +91,7 @@ impl Session {
             quit: false,
             audio_scratch: Vec::with_capacity(4096),
             last_spoken: None,
+            speech_log: VecDeque::new(),
             frames: 0,
             warned_slow: false,
         }
@@ -169,6 +177,10 @@ impl Session {
 
     fn say(&mut self, utterance: Utterance) {
         self.last_spoken = Some(utterance.text.clone());
+        if self.speech_log.len() >= SPEECH_LOG_CAP {
+            self.speech_log.pop_front();
+        }
+        self.speech_log.push_back(utterance.text.clone());
         if let Err(e) = self.speech.speak(&utterance) {
             eprintln!("speech: {e}");
         }
@@ -391,7 +403,7 @@ impl Session {
         self.say_now("Configuration saved.");
     }
 
-    // --- Queries (the shell needs these; the MCP server adds more) -------
+    // --- Queries used by the winit shell ---------------------------------
 
     pub fn quit_requested(&self) -> bool {
         self.quit
@@ -405,6 +417,116 @@ impl Session {
     /// The current video frame's pixels.
     pub fn framebuffer(&self) -> &[u32] {
         self.emu.framebuffer()
+    }
+
+    // --- The agent-facing control surface (used by the MCP server) -------
+    //
+    // These are the same verbs the device shell drives, plus the reads an agent
+    // needs to see what a player would. Keeping them here, on the one core, means
+    // a keyboard, a controller, and an agent all act through identical logic.
+
+    pub fn frame_count(&self) -> u64 {
+        self.frames
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    pub fn active_slot_index(&self) -> u8 {
+        self.active_slot
+    }
+
+    pub fn plugin_name(&self) -> &str {
+        self.plugin.name()
+    }
+
+    /// Drains the recent spoken lines, so an agent reads each only once.
+    pub fn take_speech(&mut self) -> Vec<String> {
+        self.speech_log.drain(..).collect()
+    }
+
+    /// Reads work RAM by SNES address, sharing the plugin's addressing. `None`
+    /// if any byte of the range is outside mapped WRAM.
+    pub fn read_wram(&self, addr: u32, len: usize) -> Option<Vec<u8>> {
+        let ram = self.emu.main_ram().ok()?;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let offset = beacon_plugin::wram_offset(addr.wrapping_add(i as u32))?;
+            out.push(*ram.get(offset)?);
+        }
+        Some(out)
+    }
+
+    /// Pauses and advances exactly `n` frames, running the plugin over each. Used
+    /// by an agent stepping through a situation; unlike frame advance it does not
+    /// announce each frame.
+    pub fn step_frames(&mut self, n: u32) {
+        self.paused = true;
+        self.timing_disturbed = true;
+        for _ in 0..n {
+            self.step_one_frame();
+        }
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        self.timing_disturbed = true;
+    }
+
+    /// Sets the active save slot, wrapping into range.
+    pub fn set_active_slot(&mut self, slot: u8) {
+        self.active_slot = slot % SLOTS;
+    }
+
+    /// The current bindings, as (input name, action id) pairs.
+    pub fn bindings(&self) -> Vec<(String, String)> {
+        self.settings
+            .keymap
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The bindable actions, with labels and their current keys.
+    pub fn bindable_actions(&self) -> Vec<Bindable> {
+        action::bindable_actions(self.plugin.as_ref())
+    }
+
+    /// The keys currently bound to an action id.
+    pub fn keys_for_action(&self, action_id: &str) -> Vec<String> {
+        self.settings.keymap.keys_for(action_id)
+    }
+
+    /// Binds an input to an action, refusing a game control, and persists.
+    pub fn bind(&mut self, name: &str, action_id: &str) -> Result<(), String> {
+        if crate::input::is_game_input_name(name) {
+            return Err(format!("{name} controls the game and can't be reassigned"));
+        }
+        self.settings.keymap.bind(name, action_id);
+        self.persist_settings();
+        Ok(())
+    }
+
+    /// Removes any binding for an input, and persists.
+    pub fn unbind(&mut self, name: &str) {
+        self.settings.keymap.unbind(name);
+        self.persist_settings();
+    }
+
+    /// Reads a setting by name.
+    pub fn get_setting(&self, key: &str) -> Result<String, String> {
+        self.settings.get(key).map_err(|e| e.to_string())
+    }
+
+    /// Sets a setting by name, keeping the arbiter in step and persisting.
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<(), String> {
+        self.settings.set(key, value).map_err(|e| e.to_string())?;
+        // Verbosity lives in two places; keep the live arbiter aligned with the
+        // stored setting.
+        self.arbiter.set_verbosity(self.settings.arbiter.verbosity);
+        self.persist_settings();
+        Ok(())
     }
 }
 
