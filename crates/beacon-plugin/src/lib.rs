@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+pub mod canvas;
 pub mod lua;
 
 pub use beacon_output::Intent;
@@ -60,6 +61,20 @@ pub trait Plugin {
     /// without the host knowing anything about them. Declared in the manifest.
     fn commands(&self) -> &[CommandDecl] {
         &[]
+    }
+
+    /// Whether the plugin renders a map (defines `on_draw`).
+    fn has_map(&self) -> bool {
+        false
+    }
+
+    /// Renders the plugin's map for the current frame into `out`, returning its
+    /// dimensions, or `None` if the plugin draws nothing.
+    ///
+    /// Called only while the map view is open. `out` is filled with `0x00RRGGBB`
+    /// pixels, row-major, so the host blits it exactly as it blits a frame.
+    fn draw(&mut self, _ram: &[u8], _frame: u64, _out: &mut Vec<u32>) -> Option<(u32, u32)> {
+        None
     }
 }
 

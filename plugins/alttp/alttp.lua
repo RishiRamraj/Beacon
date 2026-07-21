@@ -198,6 +198,69 @@ on_command("coordinates", function()
   end
 end)
 
+-- Map mode: a schematic of what the plugin reads, for debugging and for sighted
+-- assistance. Not the game's own map — a picture of Link's state as this plugin
+-- understands it. Integer math throughout (// is floor division) so coordinates
+-- stay whole for the canvas.
+function on_draw(canvas)
+  local w, h = canvas.width, canvas.height
+  canvas:clear(0x101828)
+
+  local s = prev
+  if s == nil then
+    canvas:text(8, 8, "NO STATE YET", 0x808890)
+    return
+  end
+
+  -- Header: where we are.
+  local place = "TITLE"
+  if in_play(s) then
+    if s.indoors == 1 then
+      place = string.format("ROOM %d", s.dungeon_room)
+    else
+      place = string.format("AREA %d", s.ow_screen)
+    end
+  else
+    place = module_name(s.module):upper()
+  end
+  canvas:text(8, 8, place, 0xE0E0E0)
+
+  -- Health hearts along the top, filled for current, outlined for the rest.
+  local max_hearts = s.max_health // 8
+  local cur_eighths = s.health
+  for i = 0, max_hearts - 1 do
+    local x = 8 + i * 9
+    local filled = (i + 1) * 8 <= cur_eighths
+    canvas:rect(x, 20, 7, 7, filled and 0xE03030 or 0x402028)
+  end
+
+  -- The playfield: Link's position within the current 512-pixel screen.
+  local fx, fy, fw = 28, 40, 200
+  canvas:rect(fx, fy, fw, fw, 0x1C2438)
+  canvas:line(fx, fy, fx + fw, fy, 0x304058)
+  canvas:line(fx, fy + fw, fx + fw, fy + fw, 0x304058)
+  canvas:line(fx, fy, fx, fy + fw, 0x304058)
+  canvas:line(fx + fw, fy, fx + fw, fy + fw, 0x304058)
+
+  if in_play(s) then
+    local lx = fx + (s.x % 512) * fw // 512
+    local ly = fy + (s.y % 512) * fw // 512
+    canvas:rect(lx - 2, ly - 2, 5, 5, 0x40FF60) -- Link
+
+    -- A short line in the direction he faces.
+    local dx, dy = 0, 0
+    if s.direction == 0 then dy = -12
+    elseif s.direction == 2 then dy = 12
+    elseif s.direction == 4 then dx = -12
+    else dx = 12 end
+    canvas:line(lx, ly, lx + dx, ly + dy, 0xFFF060)
+
+    canvas:text(8, h - 14, string.format("X %d Y %d", s.x, s.y), 0x9098A0)
+  else
+    canvas:text(fx + 8, fy + fw // 2, "NOT IN PLAY", 0x707880)
+  end
+end
+
 -- "Status."
 on_command("status", function()
   if prev ~= nil and prev.max_health > 0 then

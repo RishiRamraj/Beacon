@@ -119,6 +119,19 @@ fn dispatch(s: &mut Session, name: &str, args: &Value) -> Result<Value, String> 
 
         "recent_speech" => Ok(json!({ "spoken": s.take_speech() })),
 
+        "get_map" => match s.render_map() {
+            Some((w, h)) => {
+                let png = crate::image::encode_png(w, h, s.map_pixels());
+                // An image content block, so the agent sees the plugin's map.
+                Ok(json!({
+                    "type": "image",
+                    "data": crate::image::base64(&png),
+                    "mimeType": "image/png",
+                }))
+            }
+            None => Err("this game's plugin draws no map".to_string()),
+        },
+
         "read_memory" => {
             let addr = arg_u32(args, "address")?;
             let len = arg_u64(args, "length").unwrap_or(1) as usize;
@@ -316,6 +329,11 @@ fn tool_defs() -> Vec<ToolDef> {
         ToolDef::new(
             "recent_speech",
             "Drain and return the lines Beacon has spoken since the last read — what the player would have heard.",
+            none(),
+        ),
+        ToolDef::new(
+            "get_map",
+            "Render the plugin's map — its visual interpretation of memory — and return it as a PNG image. Errors if the plugin draws no map.",
             none(),
         ),
         ToolDef::new(

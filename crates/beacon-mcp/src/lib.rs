@@ -123,17 +123,27 @@ pub fn serve<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// Wraps a tool result as MCP content. The value is serialized to a text block,
-/// so a structured result reaches the agent as JSON it can parse.
+/// Wraps a tool result as MCP content.
+///
+/// Most results are structured data, serialized to a text block so the agent
+/// gets JSON it can parse. A tool that wants to return a ready-made content block
+/// — an image, say — returns an object with a `type` of `"image"` or `"text"`,
+/// or an array of such blocks, and it passes through unchanged.
 fn tool_content(value: &Value, is_error: bool) -> Value {
-    let text = match value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
+    let content = match value {
+        Value::Array(_) => value.clone(),
+        Value::Object(o)
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("image") | Some("text")
+            ) =>
+        {
+            json!([value])
+        }
+        Value::String(s) => json!([{ "type": "text", "text": s }]),
+        other => json!([{ "type": "text", "text": other.to_string() }]),
     };
-    json!({
-        "content": [{ "type": "text", "text": text }],
-        "isError": is_error,
-    })
+    json!({ "content": content, "isError": is_error })
 }
 
 fn success(id: Value, result: Value) -> Value {
@@ -228,6 +238,35 @@ mod tests {
         );
         assert_eq!(err[0]["result"]["isError"], true);
         assert_eq!(err[0]["result"]["content"][0]["text"], "no such widget");
+    }
+
+    #[test]
+    fn image_result_passes_through_as_a_content_block() {
+        // A tool returning an image block is not re-wrapped as text.
+        struct Img;
+        impl Handler for Img {
+            fn tools(&self) -> Vec<ToolDef> {
+                vec![]
+            }
+            fn call(&self, _name: &str, _args: &Value) -> Result<Value, String> {
+                Ok(json!({ "type": "image", "data": "AAAA", "mimeType": "image/png" }))
+            }
+        }
+        let mut out = Vec::new();
+        serve(
+            Cursor::new(
+                br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{}}}"#
+                    .to_vec(),
+            ),
+            &mut out,
+            ServerInfo { name: "t".into(), version: "0".into() },
+            &Img,
+        )
+        .unwrap();
+        let v: Value =
+            serde_json::from_str(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap();
+        assert_eq!(v["result"]["content"][0]["type"], "image");
+        assert_eq!(v["result"]["content"][0]["mimeType"], "image/png");
     }
 
     #[test]

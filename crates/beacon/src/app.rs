@@ -90,15 +90,24 @@ impl App {
             return;
         }
 
-        let info = self.session.frame_info();
-        let (src_w, src_h) = (info.width as usize, info.height as usize);
+        // The map view, when open, replaces the game picture. Its pixels are
+        // tightly packed, so the stride is its width.
+        let (src_w, src_h, stride, src) = if let Some((w, h, px)) = self.session.map_view() {
+            (w as usize, h as usize, w as usize, px)
+        } else {
+            let info = self.session.frame_info();
+            // `pitch` is a byte stride; the framebuffer is 32-bit pixels.
+            let stride = (info.pitch as usize / 4).max(info.width as usize);
+            (
+                info.width as usize,
+                info.height as usize,
+                stride,
+                self.session.framebuffer(),
+            )
+        };
         if src_w == 0 || src_h == 0 {
             return;
         }
-
-        // `pitch` is a byte stride; the framebuffer is 32-bit pixels.
-        let stride = (info.pitch as usize / 4).max(src_w);
-        let src = self.session.framebuffer();
 
         let Ok(mut buf) = surface.buffer_mut() else {
             return;

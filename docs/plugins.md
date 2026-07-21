@@ -237,6 +237,31 @@ binding works.
 `log("info", "loaded 42 rooms")` or `log("something happened")`. Routed to stderr,
 never to the stdout JSON stream, so it is safe to log freely.
 
+### `on_draw(canvas)` — map mode (optional)
+
+Define `on_draw` and the player can toggle a **map view** (default key `m`) showing
+your visual interpretation of memory — Link's position, the current room, health,
+whatever helps. It is not the game's own map; it is a picture of what your plugin
+believes the state to be, for debugging and for sighted assistance. Through the MCP
+server's `get_map` tool the same picture reaches an agent as a PNG.
+
+`canvas` is a fixed 256x256 surface. Colours are 24-bit `0xRRGGBB`. Coordinates are
+integers, so use floor division (`//`) when scaling.
+
+| Call | Draws |
+|---|---|
+| `canvas:clear(rgb)` | Fill the whole canvas. |
+| `canvas:pixel(x, y, rgb)` | One pixel. |
+| `canvas:rect(x, y, w, h, rgb)` | A filled rectangle. |
+| `canvas:line(x0, y0, x1, y1, rgb)` | A line. |
+| `canvas:text(x, y, string, rgb)` | Text in the built-in 5x7 font. |
+| `canvas.width`, `canvas.height` | The canvas size. |
+
+The font currently covers digits, uppercase letters, space, and basic punctuation —
+enough for coordinates and room numbers. `on_draw` runs only while the map is shown,
+so it costs nothing when hidden. See [`plugins/alttp/alttp.lua`](../plugins/alttp/alttp.lua)
+for a worked example, and [ADR 0017](decisions/0017-plugin-debug-drawing.md).
+
 ## Debugging with an agent
 
 `beacon yourgame.sfc --mcp` runs headless and serves the Model Context Protocol on
@@ -246,13 +271,9 @@ address, run your commands, and read back everything spoken — all reproducibly
 
 ## On the horizon
 
-One capability is designed and scheduled but not yet in the API. If you are writing a
-plugin now, know it is coming:
-
-- **Map mode** — an `on_draw(canvas)` hook to render your interpretation of memory as
-  a picture, for debugging and for sighted assistance
-  ([ADR 0017](decisions/0017-plugin-debug-drawing.md)). The MCP server will expose the
-  rendered image as a resource, so an agent can see it too.
+The tightest plugin-development loop — reloading your Lua from disk without a restart
+(`reload_plugin`) and probing with a snippet (`eval_lua`) over the MCP server — is
+designed but not yet built ([ADR 0018](decisions/0018-mcp-debug-server.md)).
 
 ---
 

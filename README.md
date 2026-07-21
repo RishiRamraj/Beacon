@@ -66,6 +66,7 @@ rebindable, from the keyboard or a controller.
 | q w | L R | n / b | next / previous save slot |
 | enter | start | p / f | pause / frame advance |
 | right shift | select | v / r | cycle verbosity / repeat last |
+| | | m | show/hide the plugin map |
 | | | k | open input configuration |
 | | | esc | quit |
 
@@ -119,8 +120,9 @@ configure key by key.
 
 The tools are self-describing (`tools/list`); highlights: `get_state`,
 `read_memory`, `step`, `set_buttons`, `run_command`, `save_state` / `load_state`,
-`list_actions`, `bind` / `unbind`, `set_setting`, and the configuration walk
-(`open_config`, `config_navigate`, `config_bind`, `config_close`). See
+`list_actions`, `bind` / `unbind`, `set_setting`, `get_map` (the plugin's map as a
+PNG the agent can see), and the configuration walk (`open_config`,
+`config_navigate`, `config_bind`, `config_close`). See
 [ADR 0018](docs/decisions/0018-mcp-debug-server.md).
 
 `scripts/mcp_smoke.py <rom>` drives the server end to end — a savestate

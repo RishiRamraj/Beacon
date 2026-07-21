@@ -30,6 +30,8 @@ pub enum Action {
     /// Advance exactly one frame, pausing if not already paused. A debugging aid
     /// for watching a plugin frame by frame.
     FrameAdvance,
+    /// Show or hide the plugin's map view.
+    ToggleMap,
     /// Open the input configuration modal.
     OpenInputConfig,
     /// Run a plugin command by id (scan, where, status, or a custom one).
@@ -56,6 +58,7 @@ impl Action {
             "prev_slot" => Action::PrevSlot,
             "pause" => Action::Pause,
             "frame_advance" => Action::FrameAdvance,
+            "toggle_map" => Action::ToggleMap,
             "bind" => Action::OpenInputConfig,
             _ => return None,
         })
@@ -75,13 +78,14 @@ pub struct Bindable {
 ///
 /// Ordered by how often they are reached for, not alphabetically: a player
 /// scrolling the list hears the common ones first.
-const BUILTIN: [(&str, &str); 11] = [
+const BUILTIN: [(&str, &str); 12] = [
     ("save_state", "Save state"),
     ("load_state", "Load state"),
     ("next_slot", "Next save slot"),
     ("prev_slot", "Previous save slot"),
     ("pause", "Pause or resume"),
     ("frame_advance", "Advance one frame"),
+    ("toggle_map", "Show or hide the map"),
     ("cycle_verbosity", "Cycle verbosity"),
     ("repeat_last", "Repeat last announcement"),
     ("bind", "Open input configuration"),
