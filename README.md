@@ -123,6 +123,10 @@ The tools are self-describing (`tools/list`); highlights: `get_state`,
 (`open_config`, `config_navigate`, `config_bind`, `config_close`). See
 [ADR 0018](docs/decisions/0018-mcp-debug-server.md).
 
+`scripts/mcp_smoke.py <rom>` drives the server end to end — a savestate
+round-trip, stepping, commands, settings, and binding — as a quick check that
+agent control works against your ROM.
+
 ## Settings
 
 Everything is configurable, and nothing needs configuring to start. Settings
