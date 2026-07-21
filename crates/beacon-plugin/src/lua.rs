@@ -1,6 +1,11 @@
 //! The Lua side of a plugin: the host API, and the frame and command entry
 //! points.
 //!
+//! The author-facing reference for everything here — manifest format, every
+//! `mem`/`say`/`on_command` signature, defaults, and the priority classes — is
+//! `docs/plugins.md`. Keep the two in step: this module is the implementation of
+//! the contract that document describes.
+//!
 //! A plugin script runs against a small set of globals the host installs:
 //!
 //! - `mem.u8/u16/u24(addr)` and `mem.slice(addr, len)` — bounds-checked reads of

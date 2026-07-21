@@ -5,7 +5,9 @@
 //! That knowledge is the actual product here, and it must not require rebuilding
 //! Beacon to add or change. So a plugin is a TOML manifest plus a Lua script,
 //! selected automatically by hashing the ROM. See
-//! `docs/decisions/0004-plugin-model-toml-profile-plus-lua.md`.
+//! `docs/decisions/0004-plugin-model-toml-profile-plus-lua.md` for why, and
+//! `docs/plugins.md` for the author-facing reference to the manifest and the Lua
+//! host API.
 //!
 //! # What lives where
 //!

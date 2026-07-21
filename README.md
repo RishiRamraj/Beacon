@@ -125,11 +125,12 @@ plugins/
 ```
 
 A drop-in that matches the same ROM as a built-in overrides it, so you can
-iterate without rebuilding. The reference plugin,
-[`plugins/alttp/`](plugins/alttp/), is the worked example; the Lua host API
-(`mem.u8/u16/u24/slice`, `say`, `on_command`, `log`, `watch`) is documented in
-[ADR 0015](docs/decisions/0015-plugin-runtime.md) and
-[ADR 0004](docs/decisions/0004-plugin-model-toml-profile-plus-lua.md).
+iterate without rebuilding.
+
+**[docs/plugins.md](docs/plugins.md) is the plugin authoring guide** — the full
+manifest format and the complete Lua host API (`mem.u8/u16/u24/slice`, `say`,
+`on_command`, `log`, `watch`), with semantics and defaults. The reference plugin,
+[`plugins/alttp/`](plugins/alttp/), is the worked example to read alongside it.
 
 ## Layout
 
@@ -143,6 +144,7 @@ iterate without rebuilding. The reference plugin,
 | `crates/beacon` | The host binary |
 | `plugins/alttp` | The A Link to the Past reference plugin (TOML + Lua) |
 | `vendor/bsnes-jg` | Emulator core, as a submodule pinned to a release tag |
+| `docs/plugins.md` | Plugin authoring guide: manifest format and Lua host API |
 | `docs/design.md` | Full design document |
 | `docs/decisions/` | Architecture decision records |
 
