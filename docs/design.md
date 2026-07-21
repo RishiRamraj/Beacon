@@ -661,8 +661,16 @@ unchanged.
   section 5, including verbosity. Plus the Windows braille sink (§6.6), experimental, built
   against NVDA's Braille Viewer. All of this lands before any real plugin exists, so the
   plugin never learns bad habits.
-- **Phase 2 — plugin runtime.** Lua via `mlua`, profile loader, ROM hash matching, the host
-  API. Port navi's event detection. **Golden-file replay tests from this point onward.**
+- **Phase 2 — plugin runtime. _Landed._** Lua via `mlua` (vendored Lua 5.4), the TOML
+  manifest loader, ROM SHA-1 matching, and the host API (`mem.u8/u16/u24/slice`, `say`,
+  `on_command`, `log`, and the manifest's `watch` table). navi's event detection is ported
+  as `plugins/alttp/alttp.lua`, selected automatically by ROM hash; the native `alttp.rs`
+  stand-in is retired. Plugins are built-in (the alttp reference is embedded) or drop-in
+  (`plugins/` beside the executable), with drop-ins overriding built-ins on the same ROM.
+  Deferred within this phase, tracked in [ADR 0015](decisions/0015-plugin-runtime.md): the
+  Tier-1 declarative event DSL (`[[event]]` rules), the 2 ms per-frame watchdog, `beacon.*`
+  spatial-audio and `rumble` bindings (Phase 3 territory), and golden-file replay tests,
+  which want the savestate + input-log harness to exist first.
 - **Phase 3 — navigation.** Spatial beacons, destination selection menu, arrival tones, soft
   targeting, incoming-attack cues. **Start from navi's existing spatial model** — the
   two-ring proximity zones and forward cone scan, which already work — and get it into

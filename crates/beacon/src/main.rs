@@ -1,16 +1,16 @@
 //! Beacon: a SNES emulator with accessibility as a first class feature.
 
-mod alttp;
 mod app;
 mod audio;
 mod input;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use beacon_config::Settings;
 use beacon_emu::Emulator;
 use beacon_output::sink::{Fanout, JsonSink, SpeechSink};
 use beacon_output::{Arbiter, Config};
+use beacon_plugin::{LuaPlugin, NullPlugin, Plugin, Registry};
 
 fn usage() -> ! {
     eprintln!(
@@ -127,17 +127,71 @@ fn build_speech(settings: &Settings, args: &Args) -> Fanout {
     fanout
 }
 
+/// Directories searched for drop-in plugins, in addition to the built-ins.
+///
+/// A `plugins/` directory beside the executable is the shipped layout; one in
+/// the working directory is the convenience during development. Both are
+/// optional: a missing directory is not an error.
+fn plugin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.join("plugins"));
+        }
+    }
+    dirs.push(PathBuf::from("plugins"));
+    dirs
+}
+
+/// Picks the plugin for a ROM by hashing it, falling back to no instrumentation.
+///
+/// The user never chooses: identification is by headerless SHA-1. A ROM with no
+/// matching plugin still plays, just silently, and a plugin that fails to load
+/// is reported rather than fatal.
+fn select_plugin(rom_path: &Path) -> Box<dyn Plugin> {
+    let bytes = match std::fs::read(rom_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("could not re-read ROM for plugin matching: {e}");
+            return Box::new(NullPlugin);
+        }
+    };
+    let sha1 = beacon_plugin::rom_sha1(beacon_emu::strip_copier_header(&bytes));
+
+    let mut registry = Registry::builtin();
+    for dir in plugin_dirs() {
+        registry.load_dir(&dir);
+    }
+
+    match registry.select(&sha1) {
+        Some(spec) => match LuaPlugin::load(spec) {
+            Ok(plugin) => {
+                eprintln!("plugin: {}", plugin.name());
+                Box::new(plugin)
+            }
+            Err(e) => {
+                eprintln!("plugin failed to load, running without instrumentation: {e}");
+                Box::new(NullPlugin)
+            }
+        },
+        None => {
+            eprintln!("no plugin matches this ROM (sha1 {sha1}); running without instrumentation");
+            Box::new(NullPlugin)
+        }
+    }
+}
+
 /// Runs without a window. Used for benchmarking and for replay testing, both of
 /// which want the frame loop without the presentation.
 fn run_headless(
     mut emu: Emulator,
     mut arbiter: Arbiter,
     mut speech: Fanout,
+    mut plugin: Box<dyn Plugin>,
     frames: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Instant;
 
-    let mut game = alttp::Alttp::new();
     let mut audio = Vec::new();
     let start = Instant::now();
 
@@ -154,7 +208,7 @@ fn run_headless(
         audio.clear();
         emu.drain_audio(&mut audio);
 
-        let intents = game.on_frame(emu.main_ram()?);
+        let intents = plugin.on_frame(emu.main_ram()?, n);
         if !intents.is_empty() {
             // Time from the frame counter, not the clock, so a replay of the
             // same inputs arbitrates identically.
@@ -192,13 +246,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let emu = Emulator::load(&args.rom)?;
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
     let speech = build_speech(&settings, &args);
+    let plugin = select_plugin(&args.rom);
 
     if let Some(frames) = args.headless {
-        return run_headless(emu, arbiter, speech, frames);
+        return run_headless(emu, arbiter, speech, plugin, frames);
     }
 
     let audio = audio::Audio::new(beacon_emu::AUDIO_SAMPLE_RATE)?;
-    let mut app = app::App::new(emu, audio, arbiter, speech, settings);
+    let mut app = app::App::new(emu, audio, arbiter, speech, plugin, settings);
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

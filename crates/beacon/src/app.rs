@@ -8,13 +8,13 @@ use beacon_config::Settings;
 use beacon_emu::Emulator;
 use beacon_output::sink::{Fanout, SpeechSink};
 use beacon_output::{Arbiter, Intent, Priority, Utterance};
+use beacon_plugin::Plugin;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
-use crate::alttp::Alttp;
 use crate::audio::Audio;
 use crate::input::{Command, Input};
 
@@ -32,7 +32,7 @@ pub struct App {
     input: Input,
     arbiter: Arbiter,
     speech: Fanout,
-    game: Alttp,
+    plugin: Box<dyn Plugin>,
     settings: Settings,
 
     window: Option<Rc<Window>>,
@@ -52,6 +52,7 @@ impl App {
         audio: Audio,
         arbiter: Arbiter,
         speech: Fanout,
+        plugin: Box<dyn Plugin>,
         settings: Settings,
     ) -> Self {
         App {
@@ -60,7 +61,7 @@ impl App {
             input: Input::new(),
             arbiter,
             speech,
-            game: Alttp::new(),
+            plugin,
             settings,
             window: None,
             surface: None,
@@ -106,8 +107,9 @@ impl App {
             }
 
             // Instrumentation runs here: between frames, against real memory.
+            let frame = self.frames;
             let intents = match self.emu.main_ram() {
-                Ok(ram) => self.game.on_frame(ram),
+                Ok(ram) => self.plugin.on_frame(ram, frame),
                 Err(_) => Vec::new(),
             };
             self.dispatch(intents);
@@ -152,25 +154,35 @@ impl App {
         });
     }
 
+    /// Runs a plugin command against the current frame's memory.
+    ///
+    /// The plugin's answer is a direct response to a keypress, so it is spoken
+    /// immediately rather than arbitrated. `fallback` covers a plugin that does
+    /// not implement the command, or has nothing to say: silence would read as a
+    /// broken key.
+    fn run_command(&mut self, name: &str, fallback: &str) {
+        let intents = match self.emu.main_ram() {
+            Ok(ram) => self.plugin.command(name, ram),
+            Err(_) => Vec::new(),
+        };
+        if intents.is_empty() {
+            self.say_now(fallback);
+        } else {
+            for intent in intents {
+                self.say_now(intent.text);
+            }
+        }
+    }
+
     fn handle_command(&mut self, cmd: Command, event_loop: &ActiveEventLoop) {
         match cmd {
             Command::Quit => {
                 self.say_now("Goodbye.");
                 event_loop.exit();
             }
-            Command::Where => {
-                let intent = self.game.describe_position();
-                self.say_now(intent.text);
-            }
-            Command::Status => {
-                let intent = self.game.describe_status();
-                self.say_now(intent.text);
-            }
-            Command::Scan => {
-                // Placeholder until the spatial model is ported. Saying so is
-                // better than silence, which reads as a broken key.
-                self.say_now("Scan is not implemented yet.");
-            }
+            Command::Where => self.run_command("where", "Nothing to report."),
+            Command::Status => self.run_command("status", "Nothing to report."),
+            Command::Scan => self.run_command("scan", "Scan is not available for this game."),
             Command::RepeatLast => match self.last_spoken.clone() {
                 Some(text) => self.say_now(text),
                 None => self.say_now("Nothing to repeat."),

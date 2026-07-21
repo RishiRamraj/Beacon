@@ -1,0 +1,31 @@
+# The Legend of Zelda: A Link to the Past — Beacon plugin.
+#
+# The declarative half. Game identity and the ROMs this plugin matches live
+# here; the logic lives in alttp.lua. Addresses come from the alttp-navi proof
+# of concept, the surviving product of the reverse-engineering effort.
+
+# Top-level keys must precede the first table header in TOML.
+script = "alttp.lua"
+
+[game]
+name   = "The Legend of Zelda: A Link to the Past"
+region = "NTSC-U"
+# Headerless SHA-1s this plugin instruments. The USA 1.0 release for now; other
+# revisions and regions can be added as they are verified.
+sha1   = ["6d4f10a8b10e10dbe624cb23cf03b88bb8252973"]
+
+# Named memory watches, read by the Lua as watch.<name>.addr. Keeping them here
+# puts every address a reviewer needs in one legible place.
+[watch]
+module      = { addr = 0x7E0010, size = 1 }
+submodule   = { addr = 0x7E0011, size = 1 }
+health      = { addr = 0x7EF36D, size = 1 }
+max_health  = { addr = 0x7EF36C, size = 1 }
+rupees      = { addr = 0x7EF360, size = 2 }
+link_x      = { addr = 0x7E0022, size = 2 }
+link_y      = { addr = 0x7E0020, size = 2 }
+direction   = { addr = 0x7E002F, size = 1 }
+indoors     = { addr = 0x7E001B, size = 1 }
+dungeon_room = { addr = 0x7E00A0, size = 2 }
+ow_screen   = { addr = 0x7E008A, size = 2 }
+world       = { addr = 0x7E007B, size = 1 }

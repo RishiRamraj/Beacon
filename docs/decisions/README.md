@@ -19,3 +19,4 @@ narrative source; these records are the per-decision index.
 | [0012](0012-determinism-and-replay.md) | Determinism and golden-file replay testing | Accepted |
 | [0013](0013-delivery-and-packaging.md) | Delivery and packaging | Accepted |
 | [0014](0014-everything-configurable-at-runtime.md) | Every setting is configurable, at runtime, without a text editor | Accepted |
+| [0015](0015-plugin-runtime.md) | Plugin runtime — built-in plus drop-in, memory staged by copy, watchdog deferred | Accepted |

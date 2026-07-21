@@ -10,9 +10,10 @@ happening on screen. Game specific knowledge lives in plugins, so instrumenting
 a new game does not mean modifying the emulator.
 
 **Status: playable, early.** The emulator runs games with video, audio, keyboard
-and gamepad input, and speaks what it detects through your screen reader. There
-is no plugin runtime yet, so game knowledge is currently built in, and only
-A Link to the Past is instrumented.
+and gamepad input, and speaks what it detects through your screen reader. Game
+knowledge lives in plugins — a TOML manifest plus a Lua script — selected
+automatically by hashing the ROM. A Link to the Past ships built-in; other games
+are drop-in (see [Plugins](#plugins)).
 
 ## What makes it different
 
@@ -101,13 +102,46 @@ verbosity = 2      # 0 critical only, 3 everything
 max_per_frame = 2
 ```
 
+## Plugins
+
+A plugin is the accessibility knowledge for one game. It is two files in a
+directory:
+
+- a **TOML manifest** — the game's name, the ROM SHA-1s it matches, and named
+  memory watches;
+- a **Lua script** — reads memory each frame and *proposes* what to say. It never
+  speaks directly; the host decides what actually survives, so behaviour stays
+  consistent across games.
+
+Beacon identifies your ROM by its headerless SHA-1 and loads the matching plugin
+with no configuration. The A Link to the Past plugin is compiled in. To add your
+own, drop a directory into `plugins/` beside the executable:
+
+```
+plugins/
+  mygame/
+    mygame.toml
+    mygame.lua
+```
+
+A drop-in that matches the same ROM as a built-in overrides it, so you can
+iterate without rebuilding. The reference plugin,
+[`plugins/alttp/`](plugins/alttp/), is the worked example; the Lua host API
+(`mem.u8/u16/u24/slice`, `say`, `on_command`, `log`, `watch`) is documented in
+[ADR 0015](docs/decisions/0015-plugin-runtime.md) and
+[ADR 0004](docs/decisions/0004-plugin-model-toml-profile-plus-lua.md).
+
 ## Layout
 
 | Path | Purpose |
 |---|---|
 | `crates/bsnes-sys` | Raw FFI and the C ABI shim over bsnes-jg's C++ API |
 | `crates/beacon-emu` | Safe emulator wrapper: frame loop, memory, savestates, input |
+| `crates/beacon-output` | Event arbitration and the speech / JSON sinks |
+| `crates/beacon-config` | User settings, typed and string-keyed for runtime changes |
+| `crates/beacon-plugin` | Plugin runtime: manifest loader, ROM matching, Lua host API |
 | `crates/beacon` | The host binary |
+| `plugins/alttp` | The A Link to the Past reference plugin (TOML + Lua) |
 | `vendor/bsnes-jg` | Emulator core, as a submodule pinned to a release tag |
 | `docs/design.md` | Full design document |
 | `docs/decisions/` | Architecture decision records |
