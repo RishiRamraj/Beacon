@@ -47,11 +47,22 @@ sprites, and draw those sprites on the map.
 - The enemy/object heuristic and the distance thresholds are tuning knobs, expected to change
   once players use them.
 
+## Update — conservative automatic proximity (2026-07-21)
+
+Automatic enemy proximity now follows scan, built the careful way. The plugin tracks the nearest
+enemy's proximity *ring* and speaks only when it crosses into a closer one ("Enemy north, close"),
+resetting once no enemy is near so a fresh approach speaks again. It is Interaction priority (a
+low-verbosity player silences it), its own rate-limited `proximity` category, and hysteresis by
+ring rather than raw distance — so it announces on approach, not every frame. The thresholds are a
+starting point for players to tune. This is the in-plugin form of navi's zone state machine;
+[ADR 0005](0005-event-arbitration-in-host.md) §5.4 anticipates promoting that hysteresis to a host
+primitive once a second game wants it.
+
 ## Alternatives considered
 
-- **Automatic proximity chatter first** — rejected as the opening move; without real-player
-  tuning it risks recreating the PoC's noise. The arbiter is ready for it when the thresholds are
-  earned.
+- **Automatic proximity chatter first** — rejected as the *opening* move; scan came first so there
+  was a verified sprite reading to build on, and automatic cues followed conservatively (see the
+  update above) rather than as an untuned firehose.
 - **Spatial-audio beacons first** — deferred; it is a much larger build (a real-time tone mixer,
   eventually HRTF), and knowing *what is nearby* is the prerequisite value. Scan comes first,
   audio direction later, behind the same sprite reading.

@@ -41,3 +41,7 @@ vendor/**/objs/
 *.bst
 *.state
 *.log
+
+# Python bytecode cache from the demo scripts
+__pycache__/
+*.pyc
