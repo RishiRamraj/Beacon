@@ -118,6 +118,15 @@ everything Beacon spoke, so it perceives exactly what the player would hear. The
 intent is that a player can hand their setup and play to an agent rather than
 configure key by key.
 
+To keep **playing in the window** while an agent assists, use `--control` instead:
+Beacon serves the same protocol on a local Unix socket (under `$XDG_RUNTIME_DIR`),
+so an agent can attach to your live session — pause it, read state, adjust
+settings — without taking over the window.
+
+```sh
+beacon rom.sfc --control        # window runs; agent attaches over the socket
+```
+
 The tools are self-describing (`tools/list`); highlights: `get_state`,
 `read_memory`, `step`, `set_buttons`, `run_command`, `save_state` / `load_state`,
 `list_actions`, `bind` / `unbind`, `set_setting`, `get_map` (the plugin's map as a
