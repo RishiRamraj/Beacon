@@ -23,6 +23,7 @@ use beacon_plugin::{LuaPlugin, Plugin, PluginSpec};
 
 use crate::action::{self, Action, Bindable};
 use crate::audio::Audio;
+use crate::beacons::BeaconMixer;
 use crate::config_modal::{Bound, ConfigModal};
 use crate::state::{SlotStore, SLOTS};
 
@@ -67,6 +68,8 @@ pub struct Session {
     quit: bool,
 
     audio_scratch: Vec<f32>,
+    /// Synthesises the plugin's spatial-audio beacons into the audio stream.
+    beacon_mixer: BeaconMixer,
     last_spoken: Option<String>,
     /// Recent spoken lines, for an agent to read what a player would have heard.
     speech_log: VecDeque<String>,
@@ -107,6 +110,7 @@ impl Session {
             held_buttons: 0,
             quit: false,
             audio_scratch: Vec::with_capacity(4096),
+            beacon_mixer: BeaconMixer::new(beacon_emu::AUDIO_SAMPLE_RATE),
             last_spoken: None,
             speech_log: VecDeque::new(),
             frames: 0,
@@ -137,6 +141,15 @@ impl Session {
         self.audio_scratch.clear();
         self.emu.drain_audio(&mut self.audio_scratch);
         if !self.audio_scratch.is_empty() {
+            // Mix the plugin's spatial-audio beacons into the game audio before
+            // it is queued. The beacons are owned here, so the mixer and the
+            // buffer can be borrowed together.
+            if self.settings.beacons.enabled {
+                let beacons = self.plugin.beacons();
+                let master = self.settings.beacons.volume;
+                self.beacon_mixer
+                    .mix(&beacons, &mut self.audio_scratch, master);
+            }
             let scratch = std::mem::take(&mut self.audio_scratch);
             self.audio.submit(&scratch);
             self.audio_scratch = scratch;

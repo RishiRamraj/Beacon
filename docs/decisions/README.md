@@ -25,3 +25,4 @@ narrative source; these records are the per-decision index.
 | [0018](0018-mcp-debug-server.md) | An MCP server so an agent can drive the whole experience | Accepted |
 | [0019](0019-scan-nearest-first.md) | Scan describes the nearest objects on demand, before any spatial audio | Accepted |
 | [0020](0020-rom-access-and-game-text.md) | ROM access for plugins, and reading the game's own text | Accepted |
+| [0021](0021-spatial-audio-beacons.md) | Spatial-audio beacons by stereo panning, HRTF deferred | Accepted |
