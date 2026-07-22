@@ -601,6 +601,7 @@ mod tests {
         set(0x7E0021, 0x01); // Link Y = 0x0100
                              // One active sprite, 0x40 pixels east of Link, no health -> "object".
         set(0x7E0DD0, 0x09); // slot 0 state: active
+        set(0x7E0E20, 3); // kind 3: an unnamed sprite id, so it reads as "object"
         set(0x7E0D10, 0x40);
         set(0x7E0D30, 0x01); // sprite X = 0x0140
         set(0x7E0D00, 0x00);
@@ -685,9 +686,9 @@ mod tests {
 
     #[test]
     fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
-        // A sprite whose type the table calls a non-enemy (75 = "lantern") but
-        // which has health is still a threat: detected via health, called "enemy",
-        // and given a beacon. This is the case the type-only classification missed.
+        // A sprite whose type is not in ENEMY_TYPES (75) but which has health is
+        // still a threat: detected via health, called "enemy", and given a beacon.
+        // This is the case the type-only classification missed.
         let r = Registry::builtin();
         let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -704,7 +705,7 @@ mod tests {
             set(0x7E0021, 0x01); // Link Y = 0x0100
             let ex = 0x0100u16 + 60;
             set(0x7E0DD0, 0x09); // active
-            set(0x7E0E20, 75); // type the table calls "lantern"
+            set(0x7E0E20, 75); // a type not in ENEMY_TYPES
             set(0x7E0D10, (ex & 0xFF) as u8);
             set(0x7E0D30, (ex >> 8) as u8);
             set(0x7E0D00, 0x00);
