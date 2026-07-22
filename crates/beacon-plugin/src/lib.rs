@@ -682,4 +682,47 @@ mod tests {
             "announces again on re-entry"
         );
     }
+
+    #[test]
+    fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
+        // A sprite whose type the table calls a non-enemy (75 = "lantern") but
+        // which has health is still a threat: detected via health, called "enemy",
+        // and given a beacon. This is the case the type-only classification missed.
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        let mut ram = vec![0u8; 128 * 1024];
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0010, 0x09);
+            set(0x7E0011, 0x00);
+            set(0x7EF36C, 24);
+            set(0x7EF36D, 24);
+            set(0x7E0022, 0x00);
+            set(0x7E0023, 0x01); // Link X = 0x0100
+            set(0x7E0020, 0x00);
+            set(0x7E0021, 0x01); // Link Y = 0x0100
+            let ex = 0x0100u16 + 60;
+            set(0x7E0DD0, 0x09); // active
+            set(0x7E0E20, 75); // type the table calls "lantern"
+            set(0x7E0D10, (ex & 0xFF) as u8);
+            set(0x7E0D30, (ex >> 8) as u8);
+            set(0x7E0D00, 0x00);
+            set(0x7E0D20, 0x01);
+            set(0x7E0E50, 4); // has health -> a threat
+        }
+        plugin.on_frame(&ram, 0); // prime prev (enemy already present)
+        let out = plugin.on_frame(&ram, 1);
+        assert!(
+            out.iter()
+                .any(|i| i.text.starts_with("enemy") && i.text.contains("east")),
+            "damageable sprite announced as enemy: {:?}",
+            out.iter().map(|i| &i.text).collect::<Vec<_>>()
+        );
+        let b = plugin.beacons();
+        assert!(
+            b.iter().any(|b| b.id == "enemy"),
+            "a beacon is placed on it"
+        );
+    }
 }

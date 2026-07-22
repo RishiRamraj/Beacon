@@ -104,6 +104,22 @@ local function sprite_name(kind)
   return SPRITE_NAMES[kind] or (ENEMY_TYPES[kind] and "enemy" or "object")
 end
 
+-- Whether a sprite is a threat. Damageable (has health) OR a known enemy type:
+-- the type table is not exhaustive, so health is what catches the rest.
+local function is_enemy(sp)
+  return (sp.hp ~= nil and sp.hp > 0) or ENEMY_TYPES[sp.kind] == true
+end
+
+-- What to call an enemy: its type name only when the type is a classified enemy,
+-- otherwise just "enemy" — a damageable sprite the table does not name is still a
+-- threat, and a wrong name would be worse than none.
+local function enemy_name(sp)
+  if ENEMY_TYPES[sp.kind] then
+    return SPRITE_NAMES[sp.kind] or "enemy"
+  end
+  return "enemy"
+end
+
 -- Reads the active sprites, nearest first, each with slot, position, offset from
 -- Link, Manhattan distance, type, and health.
 local function sprites()
@@ -347,10 +363,10 @@ function on_frame(frame)
     end
     for i = 0, 15 do
       local sp = active[i]
-      local visible = sp ~= nil and ENEMY_TYPES[sp.kind] and on_screen(sp.dx, sp.dy)
+      local visible = sp ~= nil and is_enemy(sp) and on_screen(sp.dx, sp.dy)
       if visible and not announced[i] then
         say(
-          string.format("%s, %s.", sprite_name(sp.kind), direction(sp.dx, sp.dy)),
+          string.format("%s, %s.", enemy_name(sp), direction(sp.dx, sp.dy)),
           { priority = "interaction", category = "enemy" }
         )
         announced[i] = true
@@ -363,7 +379,7 @@ function on_frame(frame)
     -- grows louder as it closes. Cleared when nothing is in range.
     local nearest = nil
     for _, sp in ipairs(list) do
-      if ENEMY_TYPES[sp.kind] then
+      if is_enemy(sp) then
         nearest = sp
         break
       end
@@ -432,10 +448,13 @@ on_command("scan", function()
     { priority = "navigation", category = "on-demand" }
   )
   -- Describe up to the three nearest, so a busy room does not become a monologue.
+  -- Enemies are named as enemies (a damageable sprite is a threat even if the
+  -- type table would call it something else); the rest by their object name.
   for i = 1, math.min(3, #list) do
     local sp = list[i]
+    local nm = is_enemy(sp) and enemy_name(sp) or (SPRITE_NAMES[sp.kind] or "object")
     say(
-      string.format("%s, %s, %s.", sprite_name(sp.kind), direction(sp.dx, sp.dy), proximity(sp.dist)),
+      string.format("%s, %s, %s.", nm, direction(sp.dx, sp.dy), proximity(sp.dist)),
       { priority = "navigation", category = "on-demand" }
     )
   end
