@@ -27,16 +27,66 @@ pub struct App {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     context: Option<softbuffer::Context<Rc<Window>>>,
+    /// Show only the map, no game picture (`--map-only`).
+    map_only: bool,
+    /// Tracks the map's visibility so the window is resized when it toggles.
+    map_shown: bool,
+}
+
+/// The base game panel size, the SNES 256x224 scaled up.
+const GAME_W: u32 = 256 * DEFAULT_SCALE;
+const GAME_H: u32 = 224 * DEFAULT_SCALE;
+
+/// The window size for the current presentation: the map alone (square), the
+/// game plus a square map panel beside it, or the game alone.
+fn window_size(map_only: bool, map_beside: bool) -> winit::dpi::LogicalSize<u32> {
+    if map_only {
+        winit::dpi::LogicalSize::new(GAME_H, GAME_H)
+    } else if map_beside {
+        winit::dpi::LogicalSize::new(GAME_W + GAME_H, GAME_H)
+    } else {
+        winit::dpi::LogicalSize::new(GAME_W, GAME_H)
+    }
+}
+
+/// Nearest-neighbour scales a source image into a rectangle of the destination.
+#[allow(clippy::too_many_arguments)]
+fn blit(
+    dst: &mut [u32],
+    dst_w: usize,
+    x0: usize,
+    y0: usize,
+    dw: usize,
+    dh: usize,
+    src: &[u32],
+    sw: usize,
+    sh: usize,
+    stride: usize,
+) {
+    if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
+        return;
+    }
+    for y in 0..dh {
+        let row = (y * sh / dh) * stride;
+        for x in 0..dw {
+            let px = src.get(row + x * sw / dw).copied().unwrap_or(0);
+            if let Some(d) = dst.get_mut((y0 + y) * dst_w + (x0 + x)) {
+                *d = px;
+            }
+        }
+    }
 }
 
 impl App {
-    pub fn new(session: Session, input: Input) -> Self {
+    pub fn new(session: Session, input: Input, map_only: bool) -> Self {
         App {
             session,
             input,
             window: None,
             surface: None,
             context: None,
+            map_only,
+            map_shown: false,
         }
     }
 
@@ -90,36 +140,65 @@ impl App {
             return;
         }
 
-        // The map view, when open, replaces the game picture. Its pixels are
-        // tightly packed, so the stride is its width.
-        let (src_w, src_h, stride, src) = if let Some((w, h, px)) = self.session.map_view() {
-            (w as usize, h as usize, w as usize, px)
-        } else {
-            let info = self.session.frame_info();
-            // `pitch` is a byte stride; the framebuffer is 32-bit pixels.
-            let stride = (info.pitch as usize / 4).max(info.width as usize);
-            (
-                info.width as usize,
-                info.height as usize,
-                stride,
-                self.session.framebuffer(),
-            )
-        };
-        if src_w == 0 || src_h == 0 {
-            return;
-        }
+        let (win_w, win_h) = (size.width as usize, size.height as usize);
+
+        // The game picture.
+        let info = self.session.frame_info();
+        // `pitch` is a byte stride; the framebuffer is 32-bit pixels.
+        let game_stride = (info.pitch as usize / 4).max(info.width as usize);
+        let (gw, gh) = (info.width as usize, info.height as usize);
+        let game = self.session.framebuffer();
+
+        // The map, if shown, sits in a square panel to the right of the game.
+        let map = self.session.map_view();
 
         let Ok(mut buf) = surface.buffer_mut() else {
             return;
         };
+        buf.fill(0); // letterbox any area a panel does not cover
 
-        let (dst_w, dst_h) = (size.width as usize, size.height as usize);
-        for y in 0..dst_h {
-            let sy = y * src_h / dst_h;
-            let row = sy * stride;
-            for x in 0..dst_w {
-                let sx = x * src_w / dst_w;
-                buf[y * dst_w + x] = src.get(row + sx).copied().unwrap_or(0);
+        match (self.map_only, map) {
+            // Map only: it fills the window; no game picture.
+            (true, Some((mw, mh, mpix))) => {
+                let (mw, mh) = (mw as usize, mh as usize);
+                blit(&mut buf, win_w, 0, 0, win_w, win_h, mpix, mw, mh, mw);
+            }
+            // Game with the map in a square panel to its right.
+            (false, Some((mw, mh, mpix))) => {
+                let map_side = win_h.min(win_w / 2);
+                let game_w = win_w - map_side;
+                blit(
+                    &mut buf,
+                    win_w,
+                    0,
+                    0,
+                    game_w,
+                    win_h,
+                    game,
+                    gw,
+                    gh,
+                    game_stride,
+                );
+                let map_y = (win_h - map_side) / 2;
+                let (mw, mh) = (mw as usize, mh as usize);
+                blit(
+                    &mut buf, win_w, game_w, map_y, map_side, map_side, mpix, mw, mh, mw,
+                );
+            }
+            // No map: the game fills the window.
+            (_, None) => {
+                blit(
+                    &mut buf,
+                    win_w,
+                    0,
+                    0,
+                    win_w,
+                    win_h,
+                    game,
+                    gw,
+                    gh,
+                    game_stride,
+                );
             }
         }
 
@@ -133,12 +212,12 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // Size for the map up front if it is already on (from --map), so the
+        // window does not have to jump on the first frame.
+        self.map_shown = self.session.map_shown();
         let attrs = Window::default_attributes()
             .with_title("Beacon")
-            .with_inner_size(winit::dpi::LogicalSize::new(
-                256 * DEFAULT_SCALE,
-                224 * DEFAULT_SCALE,
-            ));
+            .with_inner_size(window_size(self.map_only, self.map_shown));
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
@@ -223,7 +302,86 @@ impl ApplicationHandler for App {
         self.session.run_frames();
 
         if let Some(window) = self.window.as_ref() {
+            // Grow or shrink the window when the map is toggled, so the game
+            // panel keeps its size and the map appears beside it.
+            let shown = self.session.map_shown();
+            if shown != self.map_shown {
+                self.map_shown = shown;
+                // In map-only mode the window stays square regardless.
+                let _ = window.request_inner_size(window_size(self.map_only, shown));
+            }
             window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_sizes_match_the_presentation() {
+        let game = window_size(false, false);
+        assert_eq!((game.width, game.height), (GAME_W, GAME_H));
+
+        // Map beside: game plus a square panel the height of the game.
+        let beside = window_size(false, true);
+        assert_eq!((beside.width, beside.height), (GAME_W + GAME_H, GAME_H));
+
+        // Map only: a square, whatever the map-shown flag says.
+        let only = window_size(true, false);
+        assert_eq!((only.width, only.height), (GAME_H, GAME_H));
+        assert_eq!(window_size(true, true), only);
+    }
+
+    #[test]
+    fn blit_copies_at_one_to_one() {
+        let src = vec![1, 2, 3, 4]; // 2x2
+        let mut dst = vec![0u32; 16]; // 4x4
+        blit(&mut dst, 4, 1, 1, 2, 2, &src, 2, 2, 2);
+        assert_eq!(dst[4 + 1], 1); // row 1, col 1
+        assert_eq!(dst[4 + 2], 2);
+        assert_eq!(dst[2 * 4 + 1], 3); // row 2
+        assert_eq!(dst[2 * 4 + 2], 4);
+        assert_eq!(dst[0], 0); // outside the placed rect, untouched
+    }
+
+    #[test]
+    fn blit_scales_up_nearest_neighbour() {
+        let src = vec![7]; // 1x1
+        let mut dst = vec![0u32; 9]; // 3x3
+        blit(&mut dst, 3, 0, 0, 3, 3, &src, 1, 1, 1);
+        assert!(dst.iter().all(|&p| p == 7));
+    }
+
+    #[test]
+    fn blit_clips_rather_than_panics() {
+        let src = vec![9; 4];
+        let mut dst = vec![0u32; 4]; // 2x2
+                                     // Destination rect runs off the buffer; must not panic.
+        blit(&mut dst, 2, 1, 1, 4, 4, &src, 2, 2, 2);
+        assert_eq!(dst[3], 9); // the one in-bounds pixel (row 1, col 1) got written
+    }
+
+    #[test]
+    fn side_by_side_layout_splits_the_window() {
+        // Replicates present()'s region math: a game frame on the left, a square
+        // map panel on the right, into one buffer.
+        let (win_w, win_h) = (20usize, 8usize);
+        let map_side = win_h.min(win_w / 2); // 8
+        let game_w = win_w - map_side; // 12
+        let mut buf = vec![0u32; win_w * win_h];
+        let game = vec![0x111111u32; 4]; // 2x2
+        let map = vec![0x222222u32; 4]; // 2x2
+        blit(&mut buf, win_w, 0, 0, game_w, win_h, &game, 2, 2, 2);
+        let map_y = (win_h - map_side) / 2;
+        blit(
+            &mut buf, win_w, game_w, map_y, map_side, map_side, &map, 2, 2, 2,
+        );
+        // Left region is the game, right region is the map, no overlap.
+        assert_eq!(buf[0], 0x111111);
+        assert_eq!(buf[game_w - 1], 0x111111);
+        assert_eq!(buf[game_w], 0x222222);
+        assert_eq!(buf[win_w - 1], 0x222222);
     }
 }
