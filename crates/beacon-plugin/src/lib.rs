@@ -860,4 +860,89 @@ mod tests {
             open_vol
         );
     }
+
+    // A dungeon frame: Link at (link_tx, link_ty), a door tile at (door_tx,
+    // door_ty), and wall tiles, all in the $7F2000 collision grid. No sprites.
+    fn dungeon_frame(
+        link: (u16, u16),
+        door: (u16, u16),
+        walls: &[(u16, u16)],
+    ) -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0010, 0x07); // dungeon
+            set(0x7E0011, 0x00);
+            set(0x7E001B, 0x01); // indoors
+            set(0x7EF36C, 24);
+            set(0x7EF36D, 24);
+            let lx = link.0 * 8 + 4;
+            let ly = link.1 * 8 + 4;
+            set(0x7E0022, (lx & 0xFF) as u8);
+            set(0x7E0023, (lx >> 8) as u8);
+            set(0x7E0020, (ly & 0xFF) as u8);
+            set(0x7E0021, (ly >> 8) as u8);
+            let tile = |set: &mut dyn FnMut(u32, u8), tx: u16, ty: u16, attr: u8| {
+                set(0x7F2000 + (ty as u32 & 63) * 64 + (tx as u32 & 63), attr);
+            };
+            tile(&mut set, door.0, door.1, 0x30); // a door tile
+            for &(wx, wy) in walls {
+                tile(&mut set, wx, wy, 0x01); // wall
+            }
+        }
+        ram
+    }
+
+    fn path_beacon(plugin: &LuaPlugin) -> Option<BeaconState> {
+        plugin.beacons().into_iter().find(|b| b.id == "path")
+    }
+
+    #[test]
+    fn alttp_pathfinder_routes_around_a_wall_to_a_door() {
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        // Door is due south of Link, but a wall spans the whole west side of row 13
+        // (tx 0..11), so the only way through is the gap at tx>=12 to the east.
+        let walls: Vec<(u16, u16)> = (0..=11).map(|x| (x, 13)).collect();
+        let ram = dungeon_frame((10, 10), (10, 16), &walls);
+
+        plugin.on_frame(&ram, 0); // prime
+        plugin.command("pathfind", &ram); // plan a route to the nearest door
+        plugin.on_frame(&ram, 1); // follower places the guide beacon
+
+        let guide = path_beacon(&plugin).expect("a guide beacon toward the route");
+        // A straight shot would point due south (dx≈0); routing around the wall
+        // means the first corner is to the east.
+        assert!(
+            guide.dx > 0.0,
+            "guide points east around the wall, not straight south (dx={}, dy={})",
+            guide.dx,
+            guide.dy
+        );
+    }
+
+    #[test]
+    fn alttp_pathfinder_announces_arrival_at_the_goal() {
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        // Open room, door five tiles south of Link.
+        let start = dungeon_frame((10, 10), (10, 15), &[]);
+        plugin.on_frame(&start, 0);
+        plugin.command("pathfind", &start);
+        plugin.on_frame(&start, 1);
+        let guide = path_beacon(&plugin).expect("guide beacon while en route");
+        assert!(guide.dy > 0.0, "points south toward the door, dy={}", guide.dy);
+
+        // Walk Link onto the door tile: the follower reports arrival and clears.
+        let at_door = dungeon_frame((10, 15), (10, 15), &[]);
+        let out = plugin.on_frame(&at_door, 2);
+        assert!(
+            out.iter().any(|i| i.text.contains("arrived")),
+            "arrival is announced: {:?}",
+            out.iter().map(|i| &i.text).collect::<Vec<_>>()
+        );
+        assert!(path_beacon(&plugin).is_none(), "guide beacon cleared on arrival");
+    }
 }

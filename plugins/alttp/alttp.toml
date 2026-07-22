@@ -41,3 +41,11 @@ label = "Report exact coordinates"
 id    = "read_text"
 label = "Read the current text box"
 key   = "KeyD"                       # "d" for dialogue; rebindable
+
+[[command]]
+id    = "pathfind"
+label = "Guide to the nearest door"
+
+[[command]]
+id    = "pathfind_stop"
+label = "Stop guiding"

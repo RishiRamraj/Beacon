@@ -400,6 +400,229 @@ local function sight_blocked(s, x0, y0, x1, y1)
   return false
 end
 
+-- ===========================================================================
+-- Pathfinding. A* over the passable tiles of Link's current 512-pixel window (a
+-- whole dungeon room, or the loaded overworld screen), then a follow-the-beacon
+-- guide: a tone is placed at the next corner of the route and pans toward it, so
+-- the player walks toward the sound and it hops forward as they close on each
+-- corner. Inspired by the Toby Accessibility Mod's pathfinder; Beacon reads a
+-- real tile grid, so the graph is the grid itself rather than an inferred one.
+-- The follower state is global so it can be driven and inspected over MCP.
+-- ===========================================================================
+
+-- Tiles a route may not cross: walls/cliffs, pits, water, and solid objects.
+local IMPASSABLE = {}
+for _, a in ipairs({
+  0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F, -- wall / cliff
+  0x20,                                                       -- pit / hole
+  0x08, 0x09, 0x4B,                                           -- water
+  0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56,                   -- solid object
+}) do IMPASSABLE[a] = true end
+
+local function tile_passable(s, wtx, wty)
+  local attr = tile_attr_at(s, wtx * 8, wty * 8)
+  if attr == nil or IMPASSABLE[attr] then return false end
+  if s.module == 0x07 and attr == 0x04 then return false end -- indoor wall
+  return true
+end
+
+-- A* from one world tile to another, both inside Link's current 512-pixel (64
+-- tile) window. Returns a list of world tiles {tx, ty} from start to goal, or nil
+-- if unreachable / out of the window. 4-connected, Manhattan heuristic, binary
+-- heap — a few thousand nodes at most, run on demand, not per frame.
+local function plan_path(s, s_tx, s_ty, g_tx, g_ty)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3 -- window origin
+  local slx, sly, glx, gly = s_tx - ox, s_ty - oy, g_tx - ox, g_ty - oy
+  if slx < 0 or slx > 63 or sly < 0 or sly > 63 then return nil end
+  if glx < 0 or glx > 63 or gly < 0 or gly > 63 then return nil end
+  if not tile_passable(s, g_tx, g_ty) then return nil end
+
+  local function h(x, y) return math.abs(x - glx) + math.abs(y - gly) end
+  local start, goal = sly * 64 + slx, gly * 64 + glx
+  local g, came, closed, heap = {}, {}, {}, {}
+  local function push(n, f)
+    heap[#heap + 1] = { n = n, f = f }
+    local i = #heap
+    while i > 1 and heap[i >> 1].f > heap[i].f do
+      heap[i], heap[i >> 1] = heap[i >> 1], heap[i]; i = i >> 1
+    end
+  end
+  local function pop()
+    local top = heap[1].n
+    heap[1] = heap[#heap]; heap[#heap] = nil
+    local i, n = 1, #heap
+    while true do
+      local l, r, m = i * 2, i * 2 + 1, i
+      if l <= n and heap[l].f < heap[m].f then m = l end
+      if r <= n and heap[r].f < heap[m].f then m = r end
+      if m == i then break end
+      heap[i], heap[m] = heap[m], heap[i]; i = m
+    end
+    return top
+  end
+
+  g[start] = 0
+  push(start, h(slx, sly))
+  local dirs = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
+  while #heap > 0 do
+    local n = pop()
+    if n == goal then
+      local rev, cur = {}, n
+      while cur do rev[#rev + 1] = { ox + cur % 64, oy + cur // 64 }; cur = came[cur] end
+      local path = {}
+      for i = #rev, 1, -1 do path[#path + 1] = rev[i] end
+      return path
+    end
+    if not closed[n] then
+      closed[n] = true
+      local nx, ny = n % 64, n // 64
+      for _, d in ipairs(dirs) do
+        local cx, cy = nx + d[1], ny + d[2]
+        if cx >= 0 and cx <= 63 and cy >= 0 and cy <= 63
+            and tile_passable(s, ox + cx, oy + cy) then
+          local c = cy * 64 + cx
+          local t = g[n] + 1
+          if not closed[c] and (g[c] == nil or t < g[c]) then
+            g[c] = t; came[c] = n
+            push(c, t + h(cx, cy))
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- Whether every tile on the straight line between two world tiles is passable.
+local function line_passable(s, ax, ay, bx, by)
+  local dx, dy = math.abs(bx - ax), -math.abs(by - ay)
+  local sx = ax < bx and 1 or -1
+  local sy = ay < by and 1 or -1
+  local err = dx + dy
+  local cx, cy = ax, ay
+  while true do
+    if not tile_passable(s, cx, cy) then return false end
+    if cx == bx and cy == by then return true end
+    local e2 = 2 * err
+    if e2 >= dy then err = err + dy; cx = cx + sx end
+    if e2 <= dx then err = err + dx; cy = cy + sy end
+  end
+end
+
+-- String-pulling: drop interior waypoints Link can walk straight past, so the
+-- guide beacon points at real corners rather than every tile.
+local function simplify(s, tiles)
+  if #tiles <= 2 then return tiles end
+  local out, anchor = { tiles[1] }, 1
+  for i = 2, #tiles - 1 do
+    if not line_passable(s, tiles[anchor][1], tiles[anchor][2], tiles[i + 1][1], tiles[i + 1][2]) then
+      out[#out + 1] = tiles[i]; anchor = i
+    end
+  end
+  out[#out + 1] = tiles[#tiles]
+  return out
+end
+
+-- Follower state. Global so an agent can inspect/drive it over MCP.
+pathfind_active = false
+pathfind_path = nil   -- string-pulled list of world-tile waypoints {tx, ty}
+pathfind_goal = nil   -- {tx, ty}
+local pathfind_wp = 1
+local pathfind_area = nil
+local pathfind_replan_in = 0
+
+local PATH_PITCH = 3.0         -- a high, distinct navigation tone
+local PATH_ALIGNED_PITCH = 3.4 -- brighter when Link faces the way to go
+local PATH_VOLUME = 0.7
+local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
+local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
+
+local function area_id(s)
+  return (s.indoors == 1) and ("d" .. s.dungeon_room) or ("o" .. s.ow_screen)
+end
+
+local function pathfind_replan(s)
+  if pathfind_goal == nil then return false end
+  local tiles = plan_path(s, s.x >> 3, s.y >> 3, pathfind_goal[1], pathfind_goal[2])
+  if tiles == nil then return false end
+  pathfind_path = simplify(s, tiles)
+  pathfind_wp = math.min(2, #pathfind_path)
+  pathfind_area = area_id(s)
+  pathfind_replan_in = REPLAN_INTERVAL
+  return true
+end
+
+-- Begin guiding Link to a world-pixel destination. Global for MCP / other cues.
+function pathfind_to(wx, wy)
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Cannot navigate now.", { priority = "navigation", category = "on-demand" })
+    return false
+  end
+  pathfind_goal = { wx >> 3, wy >> 3 }
+  if pathfind_replan(s) then
+    pathfind_active = true
+    say("Following the guide.", { priority = "navigation", category = "on-demand" })
+    return true
+  end
+  pathfind_goal = nil
+  pathfind_active = false
+  beacon.clear("path")
+  say("No path there.", { priority = "navigation", category = "on-demand" })
+  return false
+end
+
+function pathfind_stop()
+  pathfind_active = false
+  pathfind_path = nil
+  pathfind_goal = nil
+  beacon.clear("path")
+end
+
+-- Advance the follower one frame and place or clear the guide beacon.
+local function pathfind_update(s)
+  if not pathfind_active then return end
+  if not in_play(s) then beacon.clear("path"); return end
+
+  pathfind_replan_in = pathfind_replan_in - 1
+  if pathfind_area ~= area_id(s) or pathfind_replan_in <= 0 then
+    if not pathfind_replan(s) then
+      say("Lost the path.", { priority = "navigation", category = "on-demand" })
+      pathfind_stop()
+      return
+    end
+  end
+
+  local path = pathfind_path
+  while pathfind_wp <= #path do
+    local w = path[pathfind_wp]
+    if math.abs(w[1] * 8 + 4 - s.x) + math.abs(w[2] * 8 + 4 - s.y) <= WAYPOINT_REACHED then
+      pathfind_wp = pathfind_wp + 1
+    else
+      break
+    end
+  end
+  if pathfind_wp > #path then
+    say("You have arrived.", { priority = "navigation", category = "on-demand" })
+    pathfind_stop()
+    return
+  end
+
+  local w = path[pathfind_wp]
+  local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
+  local on_course
+  if math.abs(dx) > math.abs(dy) then
+    on_course = (dx > 0 and s.direction == 6) or (dx < 0 and s.direction == 4)
+  else
+    on_course = (dy > 0 and s.direction == 2) or (dy < 0 and s.direction == 0)
+  end
+  beacon.set("path", {
+    x = dx, y = dy,
+    pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
+    volume = PATH_VOLUME,
+  })
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -553,6 +776,9 @@ function on_frame(frame)
       announced[i] = false
     end
   end
+
+  -- Route guidance runs last, so its beacon coexists with the object beacons.
+  pathfind_update(now)
 end
 
 -- "Where am I?"
@@ -631,6 +857,39 @@ on_command("coordinates", function()
   else
     say("Not in play.", { priority = "navigation", category = "on-demand" })
   end
+end)
+
+-- "Guide me to the nearest door." A concrete use of the pathfinder: it scans the
+-- current window for door tiles and routes to the nearest one. Other targets
+-- (markers, unexplored frontier) can drive pathfind_to the same way.
+on_command("pathfind", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local best, best_d
+  for y = 0, 63 do
+    for x = 0, 63 do
+      local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
+      if attr and attr >= 0x30 and attr <= 0x37 then -- a door / passage tile
+        local d = math.abs(x - ltx) + math.abs(y - lty)
+        if best_d == nil or d < best_d then best_d, best = d, { ox + x, oy + y } end
+      end
+    end
+  end
+  if best == nil then
+    say("No door nearby.", { priority = "navigation", category = "on-demand" })
+  else
+    pathfind_to(best[1] * 8 + 4, best[2] * 8 + 4)
+  end
+end)
+
+on_command("pathfind_stop", function()
+  pathfind_stop()
+  say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
 end)
 
 -- Map mode: a schematic of what the plugin reads, for debugging and for sighted
@@ -744,6 +1003,25 @@ function on_draw(canvas)
       local px = fx + (sp.x % 512) * fw // 512
       local py = fy + (sp.y % 512) * fw // 512
       canvas:rect(px - 1, py - 1, 3, 3, class_col[category(sp)])
+    end
+
+    -- The active guidance route: the same corners the audio beacon leads through,
+    -- drawn as a magenta line with a dot at each corner and the current target
+    -- brightened — so the guide is legible on the map too.
+    if pathfind_active and pathfind_path then
+      local function plot(wt)
+        return fx + ((wt[1] * 8 + 4) % 512) * fw // 512,
+               fy + ((wt[2] * 8 + 4) % 512) * fw // 512
+      end
+      for i = 1, #pathfind_path - 1 do
+        local ax, ay = plot(pathfind_path[i])
+        local bx, by = plot(pathfind_path[i + 1])
+        canvas:line(ax, ay, bx, by, 0xFF60D0)
+      end
+      for i, wt in ipairs(pathfind_path) do
+        local px, py = plot(wt)
+        canvas:rect(px - 1, py - 1, 3, 3, (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
+      end
     end
 
     local lx = fx + (s.x % 512) * fw // 512
