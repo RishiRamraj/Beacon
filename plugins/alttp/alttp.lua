@@ -1005,6 +1005,25 @@ function on_draw(canvas)
       canvas:rect(px - 1, py - 1, 3, 3, class_col[category(sp)])
     end
 
+    -- The active guidance route: the same corners the audio beacon leads through,
+    -- drawn as a magenta line with a dot at each corner and the current target
+    -- brightened — so the guide is legible on the map too.
+    if pathfind_active and pathfind_path then
+      local function plot(wt)
+        return fx + ((wt[1] * 8 + 4) % 512) * fw // 512,
+               fy + ((wt[2] * 8 + 4) % 512) * fw // 512
+      end
+      for i = 1, #pathfind_path - 1 do
+        local ax, ay = plot(pathfind_path[i])
+        local bx, by = plot(pathfind_path[i + 1])
+        canvas:line(ax, ay, bx, by, 0xFF60D0)
+      end
+      for i, wt in ipairs(pathfind_path) do
+        local px, py = plot(wt)
+        canvas:rect(px - 1, py - 1, 3, 3, (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
+      end
+    end
+
     local lx = fx + (s.x % 512) * fw // 512
     local ly = fy + (s.y % 512) * fw // 512
     canvas:rect(lx - 2, ly - 2, 5, 5, 0x40FF60) -- Link
