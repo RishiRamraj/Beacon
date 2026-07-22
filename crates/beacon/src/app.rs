@@ -7,6 +7,7 @@
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::mpsc::Receiver;
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -15,6 +16,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::input::{self, Input};
+use crate::mcp;
 use crate::session::Session;
 
 /// Default window scale over the SNES's 256x224.
@@ -23,6 +25,9 @@ const DEFAULT_SCALE: u32 = 3;
 pub struct App {
     session: Session,
     input: Input,
+    /// When present, an agent is attached over the control socket; its tool calls
+    /// arrive here and are run against the session each event-loop wake.
+    control_rx: Option<Receiver<mcp::Request>>,
 
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
@@ -78,10 +83,16 @@ fn blit(
 }
 
 impl App {
-    pub fn new(session: Session, input: Input, map_only: bool) -> Self {
+    pub fn new(
+        session: Session,
+        input: Input,
+        map_only: bool,
+        control_rx: Option<Receiver<mcp::Request>>,
+    ) -> Self {
         App {
             session,
             input,
+            control_rx,
             window: None,
             surface: None,
             context: None,
@@ -278,6 +289,13 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Run any control-socket requests first, so an attached agent stays
+        // responsive even while the game is paused (this wake still fires).
+        if let Some(rx) = self.control_rx.as_ref() {
+            mcp::drain(&mut self.session, rx);
+            self.honour_quit(event_loop);
+        }
+
         // Poll the pad once per wake, before running frames. This must happen
         // regardless of pause or mode, so a controller-only player can act,
         // step, and reach the configuration without a keyboard.

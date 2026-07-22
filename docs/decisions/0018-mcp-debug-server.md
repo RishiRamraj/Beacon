@@ -54,6 +54,14 @@ agent, with no display.
   just re-instantiates.
 - **Determinism preserved.** Every tool acts on state the agent set up (buttons held, frames
   stepped, slot loaded), so a finding is reproducible and can become a golden-file test.
+- **Attach to a live windowed session (`--control`).** Beyond the headless stdio server, the
+  windowed app can serve the same protocol on a **Unix socket** at a predictable path, so an
+  agent attaches to a session the player is *already playing* — pausing it, reading state,
+  adjusting settings — without ever touching the session across threads. The socket's reader
+  thread forwards tool calls down the same channel the headless server uses; the windowed event
+  loop drains them each wake, so the session stays responsive even while paused. It reuses the
+  entire tool set. This is what makes "an agent can drive a headless session" into "an agent can
+  assist your actual playthrough" — the case a player hits when they pause and want help.
 
 ## Why this shape
 
@@ -66,9 +74,10 @@ agent, with no display.
 
 ## Deferred
 
-- **A socket transport** for attaching to an already-running windowed session. Not needed for
-  the headless-agent use case; revisit if driving a live GUI session is wanted. This is the last
-  open item under debug mode — the tool surface itself is complete.
+Nothing outstanding: the tool surface is complete, and both transports — stdio (headless) and a
+Unix socket (attach to a live window, `--control`) — are built. Authentication for the socket is
+left off deliberately: it lives under the per-user runtime directory, local only. A token can be
+added if attaching across trust boundaries ever matters.
 
 ## Alternatives considered
 

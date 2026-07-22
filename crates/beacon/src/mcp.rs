@@ -8,12 +8,19 @@
 //! play to an agent. Audio and speech still run, so the human hears the game; only
 //! the (unneeded) video window is absent.
 //!
+//! There are two transports. `--mcp` serves it on **stdio**, headless (this
+//! module's [`run`]). `--control` serves it on a **Unix socket** ([`serve_socket`])
+//! while the window runs, so an agent can attach to a session the player is
+//! already playing and assist it live — the windowed loop drains those requests
+//! each wake via [`drain`].
+//!
 //! Threading is deliberately small. A reader thread runs the protocol
-//! ([`beacon_mcp::serve`]) and forwards each tool call down a channel; the main
-//! thread owns the [`Session`] and is the only thing that touches it, running
-//! frames when nothing is pending. So there is no shared mutable state and no lock
-//! — the emulator is single-threaded, as it must be.
+//! ([`beacon_mcp::serve`]) and forwards each tool call down a channel; the thread
+//! that owns the [`Session`] is the only thing that touches it. So there is no
+//! shared mutable state and no lock — the emulator is single-threaded, as it must
+//! be.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
@@ -23,8 +30,8 @@ use serde_json::{json, Value};
 use crate::session::Session;
 
 /// One tool call in flight: the tool name, its arguments, and where to send the
-/// result. The main thread runs it against the session and replies.
-type Request = (String, Value, Sender<Result<Value, String>>);
+/// result. The thread that owns the [`Session`] runs it and replies.
+pub(crate) type Request = (String, Value, Sender<Result<Value, String>>);
 
 /// The protocol-side handler. It owns no session state; it just forwards calls to
 /// the thread that does, and waits for the answer.
@@ -103,6 +110,57 @@ pub fn run(mut session: Session) -> Result<(), Box<dyn std::error::Error>> {
 
     drop(reader); // detached; the process exits on return
     Ok(())
+}
+
+/// The conventional control-socket path for this session.
+///
+/// Under the runtime dir so it is per-user and cleaned up by the system, with a
+/// predictable name so an agent knows where to attach.
+pub(crate) fn control_socket_path() -> PathBuf {
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    Path::new(&dir).join("beacon-control.sock")
+}
+
+/// Serves the MCP protocol on a Unix socket, returning the channel the main
+/// thread drains to run tool calls against its [`Session`].
+///
+/// This is the attach-to-a-running-session transport: the windowed app keeps the
+/// session on its own thread and drains this each event-loop wake, so an agent
+/// can pause, inspect, and adjust a live playthrough without the socket ever
+/// touching the session directly. One client at a time; when it disconnects the
+/// next is accepted.
+pub(crate) fn serve_socket(path: &Path) -> std::io::Result<Receiver<Request>> {
+    use std::os::unix::net::UnixListener;
+
+    // A stale socket file from a crashed run would block the bind.
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(path)?;
+
+    let (tx, rx) = mpsc::channel::<Request>();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(stream) = conn else { continue };
+            let Ok(reader) = stream.try_clone().map(std::io::BufReader::new) else {
+                continue;
+            };
+            let handler = ChannelHandler { tx: tx.clone() };
+            let info = ServerInfo {
+                name: "beacon".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            // Blocks until the client disconnects, then loops to the next.
+            let _ = beacon_mcp::serve(reader, stream, info, &handler);
+        }
+    });
+    Ok(rx)
+}
+
+/// Runs every queued control request against the session. Called from the
+/// windowed event loop each wake, so a live session stays responsive to an agent.
+pub(crate) fn drain(session: &mut Session, rx: &Receiver<Request>) {
+    while let Ok((name, args, resp)) = rx.try_recv() {
+        let _ = resp.send(dispatch(session, &name, &args));
+    }
 }
 
 /// Runs a tool against the session. `Ok` is a structured result; `Err` is a tool

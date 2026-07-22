@@ -36,6 +36,8 @@ options:
                         so an agent can drive setup and play (audio still runs)
   --map                 start with the plugin's map beside the game (toggle: m)
   --map-only            show only the plugin's map, no game picture
+  --control             serve the MCP control protocol on a local socket while
+                        the window runs, so an agent can assist a live session
 
 game controls (fixed):
   arrows                d-pad            enter    start
@@ -67,6 +69,7 @@ struct Args {
     mcp: bool,
     map: bool,
     map_only: bool,
+    control: bool,
 }
 
 fn parse_args() -> Args {
@@ -80,6 +83,7 @@ fn parse_args() -> Args {
         mcp: false,
         map: false,
         map_only: false,
+        control: false,
     };
 
     let mut it = std::env::args().skip(1);
@@ -97,6 +101,7 @@ fn parse_args() -> Args {
             "--mcp" => args.mcp = true,
             "--map" => args.map = true,
             "--map-only" => args.map_only = true,
+            "--control" => args.control = true,
             "--rate" => {
                 args.rate = Some(
                     it.next()
@@ -316,7 +321,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return mcp::run(session);
     }
 
-    let mut app = app::App::new(session, input::Input::new(), args.map_only);
+    // With --control, an agent can attach to this live windowed session over a
+    // local socket and drive it while the player keeps playing.
+    let control_rx = if args.control {
+        let path = mcp::control_socket_path();
+        match mcp::serve_socket(&path) {
+            Ok(rx) => {
+                eprintln!("beacon: control socket ready at {}", path.display());
+                Some(rx)
+            }
+            Err(e) => {
+                eprintln!("could not open control socket: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut app = app::App::new(session, input::Input::new(), args.map_only, control_rx);
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
