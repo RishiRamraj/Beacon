@@ -36,3 +36,7 @@ world       = { addr = 0x7E007B, size = 1 }
 [[command]]
 id    = "coordinates"
 label = "Report exact coordinates"
+
+[[command]]
+id    = "read_text"
+label = "Read the current text box"

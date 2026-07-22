@@ -148,6 +148,23 @@ than a wrong value. Index a `slice` result with Lua's `string.byte(s, i)` (1-bas
 Your script sees **only the frame it was handed**. The memory is staged per call,
 so you cannot keep a reference and read it later, when it would be stale.
 
+### `rom` — reading static game data
+
+Read-only access to the headerless ROM, for decoding static data (dialogue
+tables, lookup tables) at load. Offsets are raw file offsets into the headerless
+image; a plugin maps SNES addresses to offsets itself.
+
+| Call | Returns |
+|---|---|
+| `rom.u8(offset)` | Byte at `offset`, or `nil` if out of range. |
+| `rom.slice(offset, len)` | A Lua string of `len` bytes (empty if out of range). |
+| `rom.size` | The ROM length in bytes. |
+
+Decode once at load — reading a large `rom.slice` and indexing it with
+`string.byte` is far faster than a `rom.u8` call per byte. The alttp plugin uses
+this to decode the game's dialogue table; see [`plugins/alttp/alttp.lua`](../plugins/alttp/alttp.lua)
+and [ADR 0020](decisions/0020-rom-access-and-game-text.md).
+
 ### `watch` — named addresses from the manifest
 
 The manifest's `[watch]` table, as a Lua table: `watch.<name>.addr` and

@@ -64,7 +64,11 @@ impl LuaPlugin {
     /// Instantiates a plugin from its spec: builds the Lua state, installs the
     /// host API, and runs the script once so it can register commands and define
     /// `on_frame`.
-    pub fn load(spec: &PluginSpec) -> Result<Self, Error> {
+    ///
+    /// `rom` is the headerless ROM, exposed to Lua as `rom` so a plugin can
+    /// decode static game data (dialogue tables, lookup tables) at load. Pass an
+    /// empty `Rc` when no ROM is available; reads then return `nil`.
+    pub fn load(spec: &PluginSpec, rom: Rc<Vec<u8>>) -> Result<Self, Error> {
         let lua = Lua::new();
         let ram: Ram = Rc::new(RefCell::new(vec![0u8; WRAM_LEN]));
         let intents: Intents = Rc::new(RefCell::new(Vec::new()));
@@ -77,6 +81,7 @@ impl LuaPlugin {
         install_commands_table(&lua)?;
         install_watch(&lua, &spec.manifest)?;
         install_canvas(&lua, &canvas)?;
+        install_rom(&lua, rom)?;
 
         // Running the chunk defines on_frame and registers commands. A syntax or
         // load-time error is a broken plugin; report it with the chunk name so
@@ -452,6 +457,35 @@ fn install_canvas(lua: &Lua, canvas: &Canvas) -> Result<(), Error> {
     Ok(())
 }
 
+/// Installs the `rom` table: read-only access to the headerless ROM by file
+/// offset, for a plugin decoding static game data at load.
+///
+/// Offsets are raw file offsets into the headerless image; a plugin maps SNES
+/// addresses to offsets itself (the mapping is game-specific). An out-of-range
+/// read is `nil`, and `rom.size` is the length in bytes.
+fn install_rom(lua: &Lua, rom: Rc<Vec<u8>>) -> Result<(), Error> {
+    let table = lua.create_table()?;
+    table.set("size", rom.len() as u32)?;
+
+    let r = rom.clone();
+    table.set(
+        "u8",
+        lua.create_function(move |_, off: usize| Ok(r.get(off).copied()))?,
+    )?;
+
+    let r = rom.clone();
+    table.set(
+        "slice",
+        lua.create_function(move |lua, (off, len): (usize, usize)| {
+            let bytes = r.get(off..off.saturating_add(len)).unwrap_or(&[]);
+            lua.create_string(bytes)
+        })?,
+    )?;
+
+    lua.globals().set("rom", table)?;
+    Ok(())
+}
+
 /// Exposes the manifest's named watches to Lua as a `watch` table.
 fn install_watch(lua: &Lua, manifest: &Manifest) -> Result<(), Error> {
     let watch = lua.create_table()?;
@@ -470,6 +504,10 @@ mod tests {
     use super::*;
 
     fn plugin_from(lua: &str) -> LuaPlugin {
+        plugin_from_rom(lua, Vec::new())
+    }
+
+    fn plugin_from_rom(lua: &str, rom: Vec<u8>) -> LuaPlugin {
         let manifest = Manifest::parse(
             r#"
             script = "t.lua"
@@ -486,7 +524,7 @@ mod tests {
             chunk_name: "test.lua".to_string(),
             dir: None,
         };
-        LuaPlugin::load(&spec).unwrap()
+        LuaPlugin::load(&spec, std::rc::Rc::new(rom)).unwrap()
     }
 
     fn ram_with(pairs: &[(u32, u8)]) -> Vec<u8> {
@@ -616,6 +654,35 @@ mod tests {
         let mut p = plugin_from("function on_frame(frame) end");
         assert!(!p.has_map());
         assert_eq!(p.draw(&vec![0u8; WRAM_LEN], 0, &mut Vec::new()), None);
+    }
+
+    #[test]
+    fn rom_reads_bytes_by_offset() {
+        let mut p = plugin_from_rom(
+            r#"
+            function on_frame(frame)
+              local s = rom.slice(0, 2) -- bytes 0xAA 0xBB as a string
+              say(string.format("%d %d %d", rom.size, rom.u8(1), string.byte(s, 1)))
+            end
+            "#,
+            vec![0xAA, 0xBB, 0xCC],
+        );
+        let out = p.on_frame(&vec![0u8; WRAM_LEN], 0);
+        // size 3, byte[1]=0xBB=187, slice byte 1 = 0xAA=170
+        assert_eq!(out[0].text, "3 187 170");
+    }
+
+    #[test]
+    fn rom_out_of_range_is_nil() {
+        let mut p = plugin_from_rom(
+            r#"
+            function on_frame(frame)
+              if rom.u8(99) == nil then say("nil") else say("value") end
+            end
+            "#,
+            vec![1, 2, 3],
+        );
+        assert_eq!(p.on_frame(&vec![0u8; WRAM_LEN], 0)[0].text, "nil");
     }
 
     #[test]

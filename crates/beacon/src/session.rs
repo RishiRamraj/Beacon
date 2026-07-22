@@ -43,6 +43,8 @@ pub struct Session {
     /// The spec the plugin was built from, kept so it can be reloaded. `None` for
     /// a session with no matching plugin.
     reload_spec: Option<PluginSpec>,
+    /// The headerless ROM, handed to the plugin on load and reload.
+    rom: std::rc::Rc<Vec<u8>>,
     settings: Settings,
 
     slots: SlotStore,
@@ -81,6 +83,7 @@ impl Session {
         speech: Fanout,
         plugin: Box<dyn Plugin>,
         reload_spec: Option<PluginSpec>,
+        rom: std::rc::Rc<Vec<u8>>,
         settings: Settings,
         rom_id: &str,
     ) -> Self {
@@ -91,6 +94,7 @@ impl Session {
             speech,
             plugin,
             reload_spec,
+            rom,
             settings,
             slots: SlotStore::new(rom_id),
             active_slot: 0,
@@ -618,7 +622,7 @@ impl Session {
             return Err("no plugin is loaded to reload".to_string());
         };
         let fresh = spec.reloaded().map_err(|e| e.to_string())?;
-        let plugin = LuaPlugin::load(&fresh).map_err(|e| e.to_string())?;
+        let plugin = LuaPlugin::load(&fresh, self.rom.clone()).map_err(|e| e.to_string())?;
 
         let name = plugin.name().to_string();
         let from_disk = fresh.is_reloadable_from_disk();

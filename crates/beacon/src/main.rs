@@ -11,6 +11,7 @@ mod session;
 mod state;
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use beacon_config::Settings;
 use beacon_emu::Emulator;
@@ -168,16 +169,14 @@ fn plugin_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// The headerless SHA-1 of a ROM, used both to select a plugin and to key its
-/// savestates. `None` if the file cannot be read.
-fn rom_id(rom_path: &Path) -> Option<String> {
+/// Reads the ROM, stripped of any copier header, for hashing and for plugins to
+/// decode static game data. Empty (with a message) if the file cannot be read.
+fn read_rom(rom_path: &Path) -> Rc<Vec<u8>> {
     match std::fs::read(rom_path) {
-        Ok(bytes) => Some(beacon_plugin::rom_sha1(beacon_emu::strip_copier_header(
-            &bytes,
-        ))),
+        Ok(bytes) => Rc::new(beacon_emu::strip_copier_header(&bytes).to_vec()),
         Err(e) => {
             eprintln!("could not read ROM: {e}");
-            None
+            Rc::new(Vec::new())
         }
     }
 }
@@ -186,8 +185,9 @@ fn rom_id(rom_path: &Path) -> Option<String> {
 ///
 /// The user never chooses: identification is by headerless SHA-1. A ROM with no
 /// matching plugin still plays, just silently, and a plugin that fails to load
-/// is reported rather than fatal.
-fn select_plugin(sha1: Option<&str>) -> (Box<dyn Plugin>, Option<PluginSpec>) {
+/// is reported rather than fatal. The plugin is handed the ROM so it can decode
+/// static game data at load.
+fn select_plugin(sha1: Option<&str>, rom: &Rc<Vec<u8>>) -> (Box<dyn Plugin>, Option<PluginSpec>) {
     let Some(sha1) = sha1 else {
         return (Box::new(NullPlugin), None);
     };
@@ -198,7 +198,7 @@ fn select_plugin(sha1: Option<&str>) -> (Box<dyn Plugin>, Option<PluginSpec>) {
     }
 
     match registry.select(sha1) {
-        Some(spec) => match LuaPlugin::load(spec) {
+        Some(spec) => match LuaPlugin::load(spec, rom.clone()) {
             Ok(plugin) => {
                 eprintln!("plugin: {}", plugin.name());
                 // Keep the spec so the session can reload the plugin later.
@@ -281,8 +281,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let emu = Emulator::load(&args.rom)?;
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
     let speech = build_speech(&settings, &args);
-    let rom_id = rom_id(&args.rom);
-    let (plugin, reload_spec) = select_plugin(rom_id.as_deref());
+    let rom = read_rom(&args.rom);
+    let sha1 = (!rom.is_empty()).then(|| beacon_plugin::rom_sha1(&rom));
+    let (plugin, reload_spec) = select_plugin(sha1.as_deref(), &rom);
 
     if let Some(frames) = args.headless {
         return run_headless(emu, arbiter, speech, plugin, frames);
@@ -296,8 +297,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         speech,
         plugin,
         reload_spec,
+        rom.clone(),
         settings,
-        rom_id.as_deref().unwrap_or("unknown"),
+        sha1.as_deref().unwrap_or("unknown"),
     );
     if args.map || args.map_only {
         session.show_map_at_start();
