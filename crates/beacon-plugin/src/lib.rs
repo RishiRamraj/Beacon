@@ -549,7 +549,7 @@ mod tests {
         // Drives the real built-in alttp plugin with synthetic sprite RAM, so the
         // scan logic (sprite table, direction, distance) is exercised as shipped.
         let r = Registry::builtin();
-        let mut plugin = LuaPlugin::load(&r.specs()[0]).unwrap();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
         let mut ram = vec![0u8; 128 * 1024];
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn alttp_enemy_proximity_speaks_on_approach_not_every_frame() {
         let r = Registry::builtin();
-        let mut plugin = LuaPlugin::load(&r.specs()[0]).unwrap();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
         // An in-play frame with one enemy (health > 0) `dx` pixels east of Link.
         let frame = |dx: u16| -> Vec<u8> {

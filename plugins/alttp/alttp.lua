@@ -146,6 +146,94 @@ local function enemy_ring(dist)
   else return nil end
 end
 
+-- Game text: decode ALttP's compressed dialogue table from the ROM once at load,
+-- then read the current message by id at runtime. Ported from the alttp-navi
+-- proof of concept. The data tables below are generated from its decoder and
+-- must not be hand-edited.
+local ALPHABET = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "!", "?", "-", ".", ",", "...", ">", "(", ")", "", "", "", "", "", "\"", "", "", "", "", "'", "", "", "", "", "", "", "", " ", "<", "", "", "", "" }
+local DICTIONARY = { "    ", "   ", "  ", "'s ", "and ", "are ", "all ", "ain", "and", "at ", "ast", "an", "at", "ble", "ba", "be", "bo", "can ", "che", "com", "ck", "des", "di", "do", "en ", "er ", "ear", "ent", "ed ", "en", "er", "ev", "for", "fro", "give ", "get", "go", "have", "has", "her", "hi", "ha", "ight ", "ing ", "in", "is", "it", "just", "know", "ly ", "la", "lo", "man", "ma", "me", "mu", "n't ", "non", "not", "open", "ound", "out ", "of", "on", "or", "per", "ple", "pow", "pro", "re ", "re", "some", "se", "sh", "so", "st", "ter ", "thin", "ter", "tha", "the", "thi", "to", "tr", "up", "ver", "with", "wa", "we", "wh", "wi", "you", "Her", "Tha", "The", "Thi", "You" }
+local CMD_LENGTHS = { 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1 }
+local CMD_NAMES = { "NextPic", "Choose", "Item", "Name", "Window", "Number", "Position", "ScrollSpd", "Selchg", "Unused_Crash", "Choose3", "Choose2", "Scroll", "1", "2", "3", "Color", "Wait", "Sound", "Speed", "Unused_Mark", "Unused_Mark2", "Unused_Clear", "Waitkey" }
+local ROM_ADDRS = { 0x9C8000, 0x8EDF40 }
+
+-- WRAM $7E1CF0 holds the id of the message currently displayed.
+local DIALOG_ID = 0x7E1CF0
+
+local function snes_to_rom(snes)
+  local bank = (snes >> 16) & 0x7F
+  local off = snes & 0xFFFF
+  return bank * 0x8000 + (off - 0x8000)
+end
+
+local function normalize(s)
+  s = s:gsub("%s+", " ")
+  return s:match("^%s*(.-)%s*$")
+end
+
+-- Decodes every message into a table keyed by message id (0-based), matching the
+-- dialog id read from WRAM at runtime.
+local function decode_dialog()
+  if rom.size == 0 then return {} end
+  local data = rom.slice(0, rom.size) -- whole ROM as a byte string, read once
+  local function byte(pos) return string.byte(data, pos + 1) end -- 0-based
+
+  local messages = {}
+  local id = 0
+  local addr_idx = 1
+  local pos = snes_to_rom(ROM_ADDRS[addr_idx])
+  local current = {}
+
+  while pos < rom.size do
+    local b = byte(pos)
+    pos = pos + 1
+    if b == nil then break end
+
+    if b == 0xFF then -- end of all dialogue
+      if #current > 0 then messages[id] = normalize(table.concat(current)) end
+      break
+    elseif b == 0x7F then -- end of one message
+      messages[id] = normalize(table.concat(current))
+      id = id + 1
+      current = {}
+    elseif b == 0x80 then -- switch ROM bank
+      addr_idx = addr_idx + 1
+      if addr_idx <= #ROM_ADDRS then
+        pos = snes_to_rom(ROM_ADDRS[addr_idx])
+      else
+        break
+      end
+    elseif b <= 0x5E then -- alphabet character
+      current[#current + 1] = ALPHABET[b + 1] or ""
+    elseif b >= 0x67 and b <= 0x7E then -- command byte
+      local cmd_idx = b - 0x67
+      local name = CMD_NAMES[cmd_idx + 1]
+      if name == "Name" then
+        current[#current + 1] = "Link"
+      elseif name == "1" or name == "2" or name == "3" or name == "Scroll" then
+        current[#current + 1] = " "
+      end
+      if CMD_LENGTHS[cmd_idx + 1] == 2 then pos = pos + 1 end -- skip parameter
+    elseif b >= 0x88 then -- dictionary entry
+      current[#current + 1] = DICTIONARY[b - 0x88 + 1] or ""
+    end
+    -- bytes 0x5F-0x66 and 0x81-0x87 are unused; skip
+  end
+  return messages
+end
+
+-- Global (in this plugin's own Lua state) so it can be inspected with eval_lua
+-- when developing or debugging.
+dialog = decode_dialog()
+
+-- The message currently displayed, or nil if none / not decoded.
+local function current_dialog_text()
+  local did = mem.u16(DIALOG_ID)
+  if did == nil then return nil end
+  local text = dialog[did]
+  if text and text ~= "" then return text end
+  return nil
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -198,8 +286,17 @@ function on_frame(frame)
     )
   end
 
-  -- Top level state changes: file select, entering a dungeon, and so on.
-  if now.module ~= was.module then
+  -- Game text: when a text or menu box opens (module 0x0E), read it aloud.
+  if now.module == 0x0E and was.module ~= 0x0E then
+    local text = current_dialog_text()
+    if text then
+      say(text, { priority = "navigation", category = "dialog" })
+    end
+  end
+
+  -- Top level state changes: file select, entering a dungeon, and so on. The
+  -- text module is handled just above, so it is not also announced generically.
+  if now.module ~= was.module and now.module ~= 0x0E then
     say(module_name(now.module), { priority = "navigation", category = "area" })
   end
 
@@ -301,6 +398,16 @@ on_command("scan", function()
       string.format("%s, %s, %s.", kind, direction(sp.dx, sp.dy), proximity(sp.dist)),
       { priority = "navigation", category = "on-demand" }
     )
+  end
+end)
+
+-- "Read text" — re-read the message currently on screen, a custom command.
+on_command("read_text", function()
+  local text = current_dialog_text()
+  if text then
+    say(text, { priority = "navigation", category = "on-demand" })
+  else
+    say("No text on screen.", { priority = "navigation", category = "on-demand" })
   end
 end)
 

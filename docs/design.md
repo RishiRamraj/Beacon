@@ -709,6 +709,10 @@ unchanged.
   get it into community hands before building anything more ambitious. Pathfinding comes
   *after* real players report what the existing model actually fails at (§10.3). This is the
   Toby-DOOM-parity milestone and the point at which the tool becomes genuinely playable.
+  **Reading the game's own text** has also landed
+  ([ADR 0020](decisions/0020-rom-access-and-game-text.md)): plugins gained read-only `rom`
+  access, and the alttp plugin decodes ALttP's dialogue table from the ROM at load, speaking a
+  message when its box opens (dialogue and menus alike) with a `read_text` command to re-read.
 - **Phase 4 — proof of generality.** A second SNES game plugin, chosen specifically to
   stress the plugin API against something structurally different from ALttP. Packaging,
   documentation, ROM hash database.
