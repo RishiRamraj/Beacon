@@ -162,7 +162,10 @@ local prev = nil
 -- Latched so the warning fires on crossing the threshold, not every frame below.
 local low_health_warned = false
 -- Whether each sprite slot's enemy has already been announced since it entered
--- the visible screen, so each entrance speaks once. Reset when it leaves.
+-- the visible screen, so each entrance speaks once. Reset only once it has left
+-- the screen — not merely ducked out of line of sight, so a patrolling enemy
+-- weaving behind cover is not re-announced as a fresh enemy each time it steps
+-- back into view (which sounds like a whole sequence of enemies).
 local announced = {}
 
 -- Sprite table: 16 slots of active objects and enemies. Addresses from the
@@ -901,19 +904,22 @@ function on_frame(frame)
     end
     for i = 0, 15 do
       local sp = active[i]
-      -- On screen, a threat, and not hidden behind a wall: a sprite the player
-      -- could actually see. Occluded enemies stay unannounced until they clear
-      -- the wall, so the callout matches what is really visible.
-      local visible = sp ~= nil and is_enemy(sp) and on_screen(sp.dx, sp.dy)
-        and not sight_blocked(now, now.x, now.y, sp.x, sp.y)
-      if visible and not announced[i] then
+      -- "Present" = a threat that is on the visible screen, whether or not a wall
+      -- currently hides it. An occluded enemy is still present, so it stays
+      -- latched; only leaving the screen re-arms it.
+      local present = sp ~= nil and is_enemy(sp) and on_screen(sp.dx, sp.dy)
+      if not present then
+        announced[i] = false -- off screen: a genuine re-entrance may speak again
+      elseif not announced[i]
+          and not sight_blocked(now, now.x, now.y, sp.x, sp.y) then
+        -- Announce once, when it is actually in the clear. If it first appears
+        -- occluded it waits, but it will not re-announce merely for stepping back
+        -- into line of sight after ducking behind cover.
         say(
           string.format("%s, %s.", enemy_name(sp), direction(sp.dx, sp.dy)),
           { priority = "interaction", category = "enemy" }
         )
         announced[i] = true
-      elseif not visible then
-        announced[i] = false
       end
     end
 

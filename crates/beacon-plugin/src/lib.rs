@@ -1034,6 +1034,75 @@ mod tests {
     }
 
     #[test]
+    fn alttp_a_patrolling_enemy_weaving_out_of_sight_is_not_re_announced() {
+        // The bug: a patrolling enemy that ducks behind cover and steps back into
+        // line of sight was announced afresh each time it reappeared, so one enemy
+        // sounded like a whole sequence of them. It should announce once and stay
+        // quiet while it remains on screen, occluded or not.
+        let r = Registry::builtin();
+
+        // Same setup as the occlusion test: Green Soldier 60 px east, on the same
+        // row. `wall` toggles a wall tile on the line between Link and the enemy.
+        let frame = |wall: bool| -> Vec<u8> {
+            let mut ram = vec![0u8; 128 * 1024];
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0010, 0x07); // dungeon module
+            set(0x7E0011, 0x00);
+            set(0x7EF36C, 24);
+            set(0x7EF36D, 24);
+            set(0x7E0022, 0x00);
+            set(0x7E0023, 0x01); // Link X = 0x0100
+            set(0x7E0020, 0x00);
+            set(0x7E0021, 0x01); // Link Y = 0x0100
+            let ex = 0x0100u16 + 60;
+            set(0x7E0DD0, 0x09);
+            set(0x7E0E20, 65); // Green Soldier
+            set(0x7E0D10, (ex & 0xFF) as u8);
+            set(0x7E0D30, (ex >> 8) as u8);
+            set(0x7E0D00, 0x00);
+            set(0x7E0D20, 0x01);
+            if wall {
+                set(0x7F2000 + 32 * 64 + 35, 0x01); // wall between them
+            }
+            ram
+        };
+        let named = |out: &[Intent]| out.iter().any(|i| i.text.contains("Green Soldier"));
+
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        plugin.on_frame(&frame(false), 0); // prime
+        assert!(named(&plugin.on_frame(&frame(false), 1)), "announced on entry");
+
+        // It steps behind cover (still on screen) and back out several times. Each
+        // reappearance must stay silent — it never left the screen.
+        for f in 2..20 {
+            let occluded = f % 2 == 0;
+            let out = plugin.on_frame(&frame(occluded), f);
+            assert!(
+                !named(&out),
+                "no re-announce while it only weaves in and out of sight (frame {f})"
+            );
+        }
+
+        // But if it truly leaves the screen and comes back, that is a real new
+        // entrance and speaks again. Move the enemy far off screen for a while.
+        let off = {
+            let mut ram = frame(false);
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            let ex = 0x0100u16 + 400; // well off screen (|dx| > 128)
+            set(0x7E0D10, (ex & 0xFF) as u8);
+            set(0x7E0D30, (ex >> 8) as u8);
+            ram
+        };
+        for f in 20..60 {
+            plugin.on_frame(&off, f);
+        }
+        assert!(
+            named(&plugin.on_frame(&frame(false), 60)),
+            "a genuine re-entrance after leaving the screen speaks again"
+        );
+    }
+
+    #[test]
     fn alttp_objective_tracks_the_quest_from_the_progress_bytes() {
         // The strategic "objective" command reads the quest-progress save bytes
         // (progress $7EF3C5, pendants $7EF374, crystals $7EF37A, sword $7EF359)
