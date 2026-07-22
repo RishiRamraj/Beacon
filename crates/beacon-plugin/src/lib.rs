@@ -795,4 +795,69 @@ mod tests {
             .expect("scenery within a block sounds");
         assert_eq!(minor.pitch, 0.5, "scenery sounds at its own low pitch");
     }
+
+    #[test]
+    fn alttp_a_wall_hides_an_enemy_from_the_callout_and_muffles_its_beacon() {
+        let r = Registry::builtin();
+
+        // A dungeon frame: Green Soldier (type 65) 60 px east of Link on the same
+        // row. `wall` drops a wall tile (attr 0x01) into the dungeon collision grid
+        // between them, on the straight line Link->enemy.
+        let frame = |wall: bool| -> Vec<u8> {
+            let mut ram = vec![0u8; 128 * 1024];
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0010, 0x07); // dungeon module (uses the $7F2000 tile grid)
+            set(0x7E0011, 0x00);
+            set(0x7EF36C, 24);
+            set(0x7EF36D, 24);
+            set(0x7E0022, 0x00);
+            set(0x7E0023, 0x01); // Link X = 0x0100 -> tile 32
+            set(0x7E0020, 0x00);
+            set(0x7E0021, 0x01); // Link Y = 0x0100 -> tile 32
+            let ex = 0x0100u16 + 60; // enemy X tile 39, same row
+            set(0x7E0DD0, 0x09);
+            set(0x7E0E20, 65); // Green Soldier
+            set(0x7E0D10, (ex & 0xFF) as u8);
+            set(0x7E0D30, (ex >> 8) as u8);
+            set(0x7E0D00, 0x00);
+            set(0x7E0D20, 0x01); // enemy Y = 0x0100
+            if wall {
+                // Wall tile at (tx=35, ty=32), between Link and the enemy.
+                set(0x7F2000 + 32 * 64 + 35, 0x01);
+            }
+            ram
+        };
+        let named = |out: &[Intent]| out.iter().any(|i| i.text.contains("Green Soldier"));
+
+        // Clear line of sight: announced, and beaconed at full strength.
+        let mut open = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        open.on_frame(&frame(false), 0);
+        assert!(named(&open.on_frame(&frame(false), 1)), "seen enemy is announced");
+        let open_vol = open
+            .beacons()
+            .iter()
+            .find(|b| b.id == "enemy")
+            .expect("a beacon with a clear line")
+            .volume;
+
+        // Wall between: not announced, and the beacon is muffled — present but
+        // much quieter — rather than silenced.
+        let mut walled = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        walled.on_frame(&frame(true), 0);
+        assert!(
+            !named(&walled.on_frame(&frame(true), 1)),
+            "an enemy behind a wall is not announced"
+        );
+        let hidden = walled
+            .beacons()
+            .into_iter()
+            .find(|b| b.id == "enemy")
+            .expect("occluded beacon is muffled, not removed");
+        assert!(
+            hidden.volume < open_vol * 0.5,
+            "occluded beacon is muffled: {} vs open {}",
+            hidden.volume,
+            open_vol
+        );
+    }
 }
