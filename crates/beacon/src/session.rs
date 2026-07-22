@@ -75,6 +75,9 @@ pub struct Session {
     speech_log: VecDeque<String>,
     frames: u64,
     warned_slow: bool,
+    /// Underrun count captured after warmup, so the "too slow" warning ignores
+    /// the startup priming burst and measures only sustained starvation.
+    underrun_baseline: Option<u64>,
 }
 
 impl Session {
@@ -115,6 +118,7 @@ impl Session {
             speech_log: VecDeque::new(),
             frames: 0,
             warned_slow: false,
+            underrun_baseline: None,
         }
     }
 
@@ -146,9 +150,12 @@ impl Session {
             // buffer can be borrowed together.
             if self.settings.beacons.enabled {
                 let beacons = self.plugin.beacons();
-                let master = self.settings.beacons.volume;
-                self.beacon_mixer
-                    .mix(&beacons, &mut self.audio_scratch, master);
+                self.beacon_mixer.mix(
+                    &beacons,
+                    &mut self.audio_scratch,
+                    self.settings.beacons.volume_min,
+                    self.settings.beacons.volume_max,
+                );
             }
             let scratch = std::mem::take(&mut self.audio_scratch);
             self.audio.submit(&scratch);
@@ -188,13 +195,19 @@ impl Session {
             self.step_one_frame();
         }
 
-        if !self.timing_disturbed
-            && !self.warned_slow
-            && self.frames > 300
-            && self.audio.underruns() > 50
-        {
-            self.warned_slow = true;
-            self.say_now("Audio is struggling. This machine may be too slow for full speed.");
+        // The audio pipeline underruns while it primes at startup (window and
+        // stream setup, the plugin decoding its ROM tables); that is not the
+        // machine being slow. Measure from a baseline taken after a warmup, so
+        // only *sustained* starvation during play warns.
+        const WARMUP_FRAMES: u64 = 600;
+        if !self.timing_disturbed && !self.warned_slow && self.frames > WARMUP_FRAMES {
+            let baseline = *self
+                .underrun_baseline
+                .get_or_insert_with(|| self.audio.underruns());
+            if self.audio.underruns().saturating_sub(baseline) > 60 {
+                self.warned_slow = true;
+                self.say_now("Audio is struggling. This machine may be too slow for full speed.");
+            }
         }
     }
 
@@ -619,6 +632,11 @@ impl Session {
     /// The keys currently bound to an action id.
     pub fn keys_for_action(&self, action_id: &str) -> Vec<String> {
         self.settings.keymap.keys_for(action_id)
+    }
+
+    /// The plugin's active spatial-audio beacons, for diagnostics.
+    pub fn active_beacons(&self) -> Vec<beacon_plugin::BeaconState> {
+        self.plugin.beacons()
     }
 
     /// Binds an input to an action, refusing a game control, and persists.

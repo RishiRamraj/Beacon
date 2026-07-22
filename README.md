@@ -167,7 +167,8 @@ max_per_frame = 2
 
 [beacons]
 enabled = true     # spatial-audio tones for where things are
-volume = 0.3       # 0 to 1, sits under the game audio
+volume_max = 0.15  # 0 to 1, loudness when a source is closest
+volume_min = 0.0   # 0 to 1, loudness at the far edge of range
 ```
 
 ## Plugins

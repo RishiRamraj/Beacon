@@ -19,9 +19,6 @@ use beacon_plugin::BeaconState;
 
 /// The reference tone, an unobtrusive mid pitch. A beacon's `pitch` scales it.
 const BASE_FREQ: f32 = 330.0;
-/// Per-beacon headroom before the master volume, so several beacons plus the
-/// game audio have room before the final clamp.
-const BEACON_AMPLITUDE: f32 = 0.5;
 
 pub struct BeaconMixer {
     sample_rate: f32,
@@ -38,8 +35,12 @@ impl BeaconMixer {
     }
 
     /// Mixes the beacons into `out` (interleaved stereo), additively, then clamps
-    /// so the sum with the game audio cannot clip. `master` scales everything.
-    pub fn mix(&mut self, beacons: &[BeaconState], out: &mut [f32], master: f32) {
+    /// so the sum with the game audio cannot clip.
+    ///
+    /// A beacon's own `volume` (0 to 1, the plugin's distance curve) is mapped
+    /// into `[vol_min, vol_max]` — the player-set quietest and loudest levels — so
+    /// the far end and the near end are independently adjustable.
+    pub fn mix(&mut self, beacons: &[BeaconState], out: &mut [f32], vol_min: f32, vol_max: f32) {
         if beacons.is_empty() {
             self.phases.clear();
             return;
@@ -63,7 +64,7 @@ impl BeaconMixer {
             // the extremes.
             let angle = (pan + 1.0) * std::f32::consts::FRAC_PI_4;
             let (left_gain, right_gain) = (angle.cos(), angle.sin());
-            let amp = master * b.volume.clamp(0.0, 1.0) * BEACON_AMPLITUDE;
+            let amp = vol_min + (vol_max - vol_min) * b.volume.clamp(0.0, 1.0);
             let step = (BASE_FREQ * b.pitch) / self.sample_rate;
 
             let mut phase = self.phases.get(&b.id).copied().unwrap_or(0.0);
@@ -110,10 +111,11 @@ mod tests {
         (l, r)
     }
 
-    fn render(beacons: &[BeaconState], master: f32) -> Vec<f32> {
+    // Renders with the range [0, vol_max], so a beacon's own volume maps directly.
+    fn render(beacons: &[BeaconState], vol_max: f32) -> Vec<f32> {
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.0f32; 2 * 1024];
-        mixer.mix(beacons, &mut out, master);
+        mixer.mix(beacons, &mut out, 0.0, vol_max);
         out
     }
 
@@ -137,26 +139,33 @@ mod tests {
     }
 
     #[test]
-    fn volume_and_master_scale_the_output() {
+    fn beacon_volume_and_max_scale_the_output() {
         let full = energy(&render(&[beacon("e", 100.0, 0.0, 1.0)], 1.0)).1;
         let half_vol = energy(&render(&[beacon("e", 100.0, 0.0, 0.5)], 1.0)).1;
-        let half_master = energy(&render(&[beacon("e", 100.0, 0.0, 1.0)], 0.5)).1;
-        assert!(half_vol < full * 0.3, "half volume should be much quieter");
-        assert!(
-            half_master < full * 0.3,
-            "half master should be much quieter"
-        );
+        let half_max = energy(&render(&[beacon("e", 100.0, 0.0, 1.0)], 0.5)).1;
+        assert!(half_vol < full * 0.3, "half the beacon volume is much quieter");
+        assert!(half_max < full * 0.3, "half the max level is much quieter");
 
-        // Zero volume is silence.
+        // A beacon volume of zero, with a zero floor, is silence.
         let (l, r) = energy(&render(&[beacon("e", 100.0, 0.0, 0.0)], 1.0));
         assert_eq!((l, r), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_floor_keeps_a_far_beacon_audible() {
+        // A far beacon (volume 0) is silent with a zero floor, but audible when
+        // volume_min lifts the floor.
+        let mut mixer = BeaconMixer::new(48_000);
+        let mut floored = vec![0.0f32; 2 * 256];
+        mixer.mix(&[beacon("e", 100.0, 0.0, 0.0)], &mut floored, 0.1, 0.5);
+        assert!(floored.iter().any(|&s| s != 0.0), "min level makes it audible");
     }
 
     #[test]
     fn no_beacons_leaves_the_buffer_untouched() {
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.25f32; 8];
-        mixer.mix(&[], &mut out, 1.0);
+        mixer.mix(&[], &mut out, 0.0, 1.0);
         assert!(out.iter().all(|&s| s == 0.25));
     }
 
@@ -165,7 +174,7 @@ mod tests {
         // Loud game audio already near the rails, plus a beacon.
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.95f32; 2 * 512];
-        mixer.mix(&[beacon("e", 100.0, 0.0, 1.0)], &mut out, 1.0);
+        mixer.mix(&[beacon("e", 100.0, 0.0, 1.0)], &mut out, 0.0, 1.0);
         assert!(out.iter().all(|&s| (-1.0..=1.0).contains(&s)));
     }
 
@@ -177,8 +186,8 @@ mod tests {
         let b = [beacon("e", 0.0, 100.0, 1.0)];
         let mut a1 = vec![0.0f32; 2 * 64];
         let mut a2 = vec![0.0f32; 2 * 64];
-        mixer.mix(&b, &mut a1, 1.0);
-        mixer.mix(&b, &mut a2, 1.0);
+        mixer.mix(&b, &mut a1, 0.0, 1.0);
+        mixer.mix(&b, &mut a2, 0.0, 1.0);
         // The step between the last sample of a1 and the first of a2 is no larger
         // than the largest step within a single buffer.
         let max_internal = a1

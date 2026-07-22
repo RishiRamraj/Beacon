@@ -177,6 +177,17 @@ fn dispatch(s: &mut Session, name: &str, args: &Value) -> Result<Value, String> 
 
         "recent_speech" => Ok(json!({ "spoken": s.take_speech() })),
 
+        "get_beacons" => {
+            let beacons: Vec<Value> = s
+                .active_beacons()
+                .into_iter()
+                .map(|b| {
+                    json!({ "id": b.id, "dx": b.dx, "dy": b.dy, "pitch": b.pitch, "volume": b.volume })
+                })
+                .collect();
+            Ok(json!({ "beacons": beacons }))
+        }
+
         "reload_plugin" => {
             let message = s.reload_plugin()?;
             Ok(json!({ "message": message }))
@@ -397,6 +408,11 @@ fn tool_defs() -> Vec<ToolDef> {
         ToolDef::new(
             "recent_speech",
             "Drain and return the lines Beacon has spoken since the last read — what the player would have heard.",
+            none(),
+        ),
+        ToolDef::new(
+            "get_beacons",
+            "The plugin's active spatial-audio beacons (id, offset, pitch, volume) — what is currently sounding and where.",
             none(),
         ),
         ToolDef::new(
