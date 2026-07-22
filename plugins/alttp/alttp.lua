@@ -511,33 +511,64 @@ on_command("coordinates", function()
   end
 end)
 
--- Dungeon collision map. $7F2000 holds a 64x64 grid, one byte per 8-pixel tile,
--- describing what each tile *is* for collision — walls, doors, water, pits. It is
--- live WRAM, so it is the room's real shape, not a guess. Ported from alttp-navi's
--- map_renderer. The lower level of a two-level room lives 0x1000 further on.
+-- The map's collision colours. A tile attribute describes what a tile *is* for
+-- collision; only a few classes are worth drawing, and the rest is open floor,
+-- left as background. Ported from the tile classes in alttp-navi's map_renderer.
+local TILE_COLOR = {}
+do
+  local function fill(color, ids)
+    for _, a in ipairs(ids) do TILE_COLOR[a] = color end
+  end
+  fill(0x5A6478, { 0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F }) -- wall / cliff
+  fill(0x2C6AC0, { 0x08, 0x09, 0x4B })                                           -- water
+  fill(0x0A0E16, { 0x20 })                                                       -- hole / pit
+  fill(0x50A070, { 0x1C, 0x1D, 0x1E, 0x1F, 0x22, 0x28, 0x29, 0x2A, 0x2B })       -- ledge / stairs
+  fill(0xE0C040, { 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 })             -- door / passage
+  fill(0x9C6B3C, { 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56 })                   -- solid object
+end
+-- Indoors, attribute 0x04 (and the rest of the indoor-wall set, already walls
+-- above) is a wall; outdoors the same value is diggable ground. So it is folded
+-- in per-context, not into the shared table.
+local INDOOR_WALL_04 = 0x5A6478
+
+-- Dungeon collision map. $7F2000 holds a 64x64 grid, one byte per 8-pixel tile —
+-- live WRAM, so the room's real shape. The lower level of a two-level room lives
+-- 0x1000 further on.
 local DUNGEON_TILE_TABLE = 0x7F2000
 local LOWER_LEVEL = 0x7E00EE
 
--- Attribute id -> colour on the map. Anything absent is open floor, left as the
--- background. Only used indoors, so the indoor-wall attributes (0x04 among them)
--- are folded straight into the wall set.
-local DUNGEON_TILE_COLOR = {}
-do
-  local function fill(color, ids)
-    for _, a in ipairs(ids) do DUNGEON_TILE_COLOR[a] = color end
+-- Overworld collision map. The visible tiles are map16 indices in the $7E2000
+-- WRAM table; each index resolves through two ROM tables to a collision
+-- attribute. Loaded once here (the ROM does not change); ported from alttp-navi's
+-- rom parser. The whole-ROM `snes_to_rom` mapping is the one already used above
+-- for dialogue.
+local OW_MAP16_TO_MAP8 = rom.slice(snes_to_rom(0x8F8000), 3752 * 4 * 2) -- uint16 LE
+local OW_MAP8_TO_ATTR = rom.slice(snes_to_rom(0x8E9459), 512)           -- uint8
+
+-- Resolve a map16 tile index to its collision attribute. `x` is in 8-pixel tile
+-- units and `y` in pixels; their low bits pick which of the map16's four 8x8
+-- sub-tiles applies. Global so it can be checked with eval_lua against the
+-- reference decoder, like `dialog`.
+function ow_tile_attr(map16_index, x, y)
+  if #OW_MAP16_TO_MAP8 == 0 or #OW_MAP8_TO_ATTR == 0 then return 0 end
+  local t = (map16_index * 4) | ((y & 8) >> 2) | (x & 1)
+  local i = t * 2
+  if i < 0 or i + 2 > #OW_MAP16_TO_MAP8 then return 0 end
+  local map8 = string.byte(OW_MAP16_TO_MAP8, i + 1) | (string.byte(OW_MAP16_TO_MAP8, i + 2) << 8)
+  local idx = map8 & 0x1FF
+  if idx + 1 > #OW_MAP8_TO_ATTR then return 0 end
+  local rv = string.byte(OW_MAP8_TO_ATTR, idx + 1)
+  if rv >= 0x10 and rv < 0x1C then
+    rv = rv | ((map8 >> 14) & 1)
   end
-  fill(0x5A6478, { 0x01, 0x02, 0x03, 0x04, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F }) -- wall
-  fill(0x2C6AC0, { 0x08, 0x09 })                                                        -- water
-  fill(0x0A0E16, { 0x20 })                                                              -- pit / hole
-  fill(0x50A070, { 0x1D, 0x1E, 0x1F, 0x22 })                                            -- stairs
-  fill(0xE0C040, { 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 })                    -- door
+  return rv
 end
 
 -- Map mode: a schematic of what the plugin reads, for debugging and for sighted
--- assistance. In a dungeon it draws the room's actual shape from the collision
--- table; the overworld map (a ROM tile decode) is not read yet, so there it is
--- just the position/sprite overlay. Integer math throughout (// is floor
--- division) so coordinates stay whole for the canvas.
+-- assistance. In a dungeon or on the overworld it draws the area's actual shape
+-- from the collision map; elsewhere it is just the position/sprite overlay.
+-- Integer math throughout (// is floor division) so coordinates stay whole for
+-- the canvas.
 function on_draw(canvas)
   local w, h = canvas.width, canvas.height
   canvas:clear(0x101828)
@@ -579,22 +610,53 @@ function on_draw(canvas)
   canvas:line(fx + fw, fy, fx + fw, fy + fw, 0x304058)
 
   if in_play(s) then
-    -- The room's real shape first, under everything else. A 64x64 tile grid maps
+    -- The area's real shape first, under everything else. A 64x64 tile grid maps
     -- exactly onto the 512-pixel playfield the sprites are plotted in (64 tiles x
     -- 8 px = 512), so walls and doors line up with the objects standing on them.
-    -- Dungeons only; the overworld needs a ROM decode that is not ported yet.
+    local function cell(tx, ty, color)
+      local x0 = fx + tx * fw // 64
+      local y0 = fy + ty * fw // 64
+      canvas:rect(x0, y0, (fx + (tx + 1) * fw // 64) - x0,
+                  (fy + (ty + 1) * fw // 64) - y0, color)
+    end
+
     if s.module == 0x07 then
+      -- Dungeon: the 64x64 collision grid is read straight from WRAM.
       local base = DUNGEON_TILE_TABLE + (mem.u8(LOWER_LEVEL) == 1 and 0x1000 or 0)
       local data = mem.slice(base, 4096)
       if #data == 4096 then
         for ty = 0, 63 do
           for tx = 0, 63 do
-            local color = DUNGEON_TILE_COLOR[string.byte(data, ty * 64 + tx + 1)]
-            if color then
-              local x0 = fx + tx * fw // 64
-              local y0 = fy + ty * fw // 64
-              canvas:rect(x0, y0, (fx + (tx + 1) * fw // 64) - x0,
-                          (fy + (ty + 1) * fw // 64) - y0, color)
+            local attr = string.byte(data, ty * 64 + tx + 1)
+            local color = TILE_COLOR[attr] or (attr == 0x04 and INDOOR_WALL_04 or nil)
+            if color then cell(tx, ty, color) end
+          end
+        end
+      end
+    elseif s.module == 0x09 and #OW_MAP16_TO_MAP8 > 0 then
+      -- Overworld: each visible tile is a map16 index from the $7E2000 table,
+      -- addressed through the game's live scroll offsets, then resolved to a
+      -- collision attribute via the ROM tables. Drawn for the 512-pixel window
+      -- around Link, aligned to the same mod-512 grid the sprites use.
+      local mask_y = mem.u16(0x7E070A)
+      local mask_x = mem.u16(0x7E070E)
+      local ow = mem.slice(0x7E2000, 8192)
+      if mask_x ~= 0 and mask_y ~= 0 and #ow == 8192 then
+        local base_y = mem.u16(0x7E0708)
+        local base_x = mem.u16(0x7E070C)
+        local block_x = s.x - (s.x % 512)
+        local block_y = s.y - (s.y % 512)
+        for ty = 0, 63 do
+          for tx = 0, 63 do
+            local px = block_x + tx * 8
+            local py = block_y + ty * 8
+            local ow_tx = px >> 3
+            local t = (((py - base_y) & mask_y) * 8) | ((ow_tx - base_x) & mask_x)
+            local byte_off = (t >> 1) * 2
+            if byte_off >= 0 and byte_off + 2 <= 8192 then
+              local map16 = string.byte(ow, byte_off + 1) | (string.byte(ow, byte_off + 2) << 8)
+              local color = TILE_COLOR[ow_tile_attr(map16, ow_tx, py)]
+              if color then cell(tx, ty, color) end
             end
           end
         end
