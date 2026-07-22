@@ -575,6 +575,34 @@ impl Session {
         action::bindable_actions(self.plugin.as_ref())
     }
 
+    /// Applies the plugin's suggested default keys for its commands.
+    ///
+    /// A suggestion fills a gap: it is applied only if the command has no binding
+    /// and the key is free and not a game control. A user's own binding — of the
+    /// command or of the key — always wins. Not persisted; it is a runtime
+    /// default, re-applied each launch.
+    pub fn apply_plugin_default_keys(&mut self) {
+        // Collect first, so the plugin borrow ends before the keymap is touched.
+        let suggestions: Vec<(String, String)> = self
+            .plugin
+            .commands()
+            .iter()
+            .filter_map(|c| {
+                c.key
+                    .as_ref()
+                    .map(|k| (k.clone(), format!("command:{}", c.id)))
+            })
+            .collect();
+
+        for (key, action) in suggestions {
+            let command_unbound = self.settings.keymap.keys_for(&action).is_empty();
+            let key_free = self.settings.keymap.action_for(&key).is_none();
+            if command_unbound && key_free && !crate::input::is_game_input_name(&key) {
+                self.settings.keymap.bind(&key, &action);
+            }
+        }
+    }
+
     /// The keys currently bound to an action id.
     pub fn keys_for_action(&self, action_id: &str) -> Vec<String> {
         self.settings.keymap.keys_for(action_id)
