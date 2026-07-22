@@ -947,6 +947,42 @@ mod tests {
     }
 
     #[test]
+    fn alttp_scan_groups_and_counts_same_enemies() {
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        let mut ram = vec![0u8; 128 * 1024];
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0010, 0x09);
+            set(0x7E0011, 0x00);
+            set(0x7EF36C, 24);
+            set(0x7EF36D, 24);
+            set(0x7E0022, 0x00);
+            set(0x7E0023, 0x01); // Link X = 0x0100
+            set(0x7E0020, 0x00);
+            set(0x7E0021, 0x01); // Link Y = 0x0100
+            // Two Green Soldiers (type 65), both east of Link.
+            for (slot, dx) in [(0u32, 60u16), (1u32, 80u16)] {
+                let ex = 0x0100u16 + dx;
+                set(0x7E0DD0 + slot, 0x09);
+                set(0x7E0E20 + slot, 65);
+                set(0x7E0D10 + slot, (ex & 0xFF) as u8);
+                set(0x7E0D30 + slot, (ex >> 8) as u8);
+                set(0x7E0D00 + slot, 0x00);
+                set(0x7E0D20 + slot, 0x01); // Y = 0x0100
+            }
+        }
+        plugin.on_frame(&ram, 0); // scan reads `prev`, set by a frame first
+        let out = plugin.command("scan", &ram);
+        let texts: Vec<&String> = out.iter().map(|i| &i.text).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Two Green Soldiers") && t.contains("east")),
+            "two of a kind are grouped and counted: {texts:?}"
+        );
+    }
+
+    #[test]
     fn alttp_marker_guides_back_to_where_it_was_dropped() {
         let r = Registry::builtin();
         let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();

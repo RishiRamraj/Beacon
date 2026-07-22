@@ -886,8 +886,37 @@ on_command("where", function()
   end
 end)
 
--- "Scan" — describe the objects and enemies around Link, nearest first. This is
--- the standard scan command; the host binds it to a key (c by default).
+-- Small natural-language helpers so a scan can say "Two Green Soldiers" rather
+-- than listing each one. Counts one to ten read as words; more as digits.
+local NUMBER_WORDS = {
+  "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+}
+local function count_word(n) return NUMBER_WORDS[n] or tostring(n) end
+
+local function article(name)
+  return name:sub(1, 1):match("[AEIOUaeiou]") and "An" or "A"
+end
+
+-- Plural of a name: "enemy" -> "enemies", otherwise just add s. Good enough for
+-- the sprite names in play; a full rule set is not worth it.
+local function pluralize(name)
+  if name:sub(-1) == "y" and not name:sub(-2, -2):match("[AEIOUaeiou]") then
+    return name:sub(1, -2) .. "ies"
+  end
+  return name .. "s"
+end
+
+-- "A Green Soldier to the north, close." / "Two Green Soldiers to the east, nearby."
+local function group_phrase(count, name, dir, prox)
+  if count == 1 then
+    return string.format("%s %s to the %s, %s.", article(name), name, dir, prox)
+  end
+  return string.format("%s %s to the %s, %s.", count_word(count), pluralize(name), dir, prox)
+end
+
+-- "Scan" — describe the objects and enemies around Link, grouped so a busy room
+-- reads as "Two Green Soldiers to the east" instead of one line per sprite. The
+-- host binds it to a key (c by default).
 on_command("scan", function()
   if not (prev ~= nil and in_play(prev)) then
     say("Not in play.", { priority = "navigation", category = "on-demand" })
@@ -899,18 +928,30 @@ on_command("scan", function()
     return
   end
 
-  say(
-    string.format("%d nearby.", #list),
-    { priority = "navigation", category = "on-demand" }
-  )
-  -- Describe up to the three nearest, so a busy room does not become a monologue.
-  -- Enemies are named as enemies (a damageable sprite is a threat even if the
-  -- type table would call it something else); the rest by their object name.
-  for i = 1, math.min(3, #list) do
-    local sp = list[i]
+  -- Group by name and direction; `list` is nearest-first, so a group's first
+  -- sighting is its nearest member, which fixes both the ordering and the
+  -- distance word. Enemies are named as enemies (a damageable sprite is a threat
+  -- even if the type table would call it something else); the rest by object name.
+  local groups, order = {}, {}
+  for _, sp in ipairs(list) do
     local nm = is_enemy(sp) and enemy_name(sp) or (SPRITE_NAMES[sp.kind] or "object")
+    local dir = direction(sp.dx, sp.dy)
+    local key = nm .. "\0" .. dir
+    local g = groups[key]
+    if g == nil then
+      g = { name = nm, dir = dir, count = 0, dist = sp.dist }
+      groups[key] = g
+      order[#order + 1] = key
+    end
+    g.count = g.count + 1
+  end
+
+  say(string.format("%d nearby.", #list), { priority = "navigation", category = "on-demand" })
+  -- Up to four groups, nearest first, so it stays a summary rather than a list.
+  for i = 1, math.min(4, #order) do
+    local g = groups[order[i]]
     say(
-      string.format("%s, %s, %s.", nm, direction(sp.dx, sp.dy), proximity(sp.dist)),
+      group_phrase(g.count, g.name, g.dir, proximity(g.dist)),
       { priority = "navigation", category = "on-demand" }
     )
   end
