@@ -384,10 +384,13 @@ function on_frame(frame)
       end
     end
     if nearest and nearest.dist < BEACON_RANGE then
+      -- Quadratic falloff: quieter at a distance, ramping up steeply as the
+      -- enemy closes, rather than a flat linear fade.
+      local t = 1 - nearest.dist / BEACON_RANGE
       beacon.set("enemy", {
         x = nearest.dx,
         y = nearest.dy,
-        volume = 1 - nearest.dist / BEACON_RANGE,
+        volume = t * t,
       })
     else
       beacon.clear("enemy")
