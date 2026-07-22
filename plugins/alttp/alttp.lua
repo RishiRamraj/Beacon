@@ -168,8 +168,37 @@ local function proximity(dist)
   else return "in the distance" end
 end
 
--- Range within which the nearest enemy gets a spatial-audio beacon (pixels).
-local BEACON_RANGE = 224
+-- Beacon categories. Every visible object falls into one class, and the nearest
+-- of each class gets a spatial-audio tone — so the soundscape stays legible: one
+-- distinct pitch per class rather than a wall of sound. What matters carries
+-- further: enemies and things worth walking to (items, chests, people, switches)
+-- call from across the screen; incidental scenery only chirps when Link is right
+-- on top of it.
+--
+-- Types you collect or open. A bright, high tone.
+local ITEM_TYPES = { [47]=true, [64]=true, [123]=true, [216]=true, [217]=true, [218]=true, [219]=true, [220]=true, [221]=true, [222]=true, [223]=true, [224]=true, [225]=true, [226]=true, [227]=true, [228]=true, [229]=true, [232]=true, [233]=true }
+-- People to talk to and switches to act on — interactable, but not picked up.
+local NPC_TYPES = { [22]=true, [23]=true, [27]=true, [30]=true, [31]=true, [33]=true, [37]=true, [40]=true, [44]=true, [112]=true, [113]=true, [114]=true, [115]=true, [116]=true, [118]=true, [126]=true, [235]=true, [237]=true, [242]=true, [244]=true, [245]=true, [247]=true, [249]=true }
+
+-- Per-class tone and reach. `pitch` scales the 330 Hz base tone (higher is
+-- brighter); enemies keep the original 1.0. `range` is Manhattan pixels — about
+-- 16 to a tile, so 24 is "within a block", the near-only reach for scenery.
+local BEACON_KINDS = {
+  enemy = { pitch = 1.0, range = 224 },
+  item  = { pitch = 2.0, range = 224 },
+  npc   = { pitch = 1.5, range = 224 },
+  minor = { pitch = 0.5, range = 24 },
+}
+
+-- Which beacon class a sprite belongs to. Enemies first (a damageable sprite is a
+-- threat whatever the type table calls it), then the interactable classes, and
+-- everything else is incidental scenery.
+local function category(sp)
+  if is_enemy(sp) then return "enemy"
+  elseif ITEM_TYPES[sp.kind] then return "item"
+  elseif NPC_TYPES[sp.kind] then return "npc"
+  else return "minor" end
+end
 
 -- Game text: decode ALttP's compressed dialogue table from the ROM once at load,
 -- then read the current message by id at runtime. Ported from the alttp-navi
@@ -374,29 +403,30 @@ function on_frame(frame)
       end
     end
 
-    -- Spatial-audio beacon on the nearest enemy: it pans toward the enemy and
-    -- grows louder as it closes. Cleared when nothing is in range.
-    local nearest = nil
+    -- Spatial-audio beacons: one tone per class, on the nearest sprite of that
+    -- class within its reach. It pans toward the source and grows louder as it
+    -- closes. `list` is sorted nearest-first, so the first sprite seen for a
+    -- class is its closest one.
+    local nearest = {}
     for _, sp in ipairs(list) do
-      if is_enemy(sp) then
-        nearest = sp
-        break
+      local c = category(sp)
+      if nearest[c] == nil then nearest[c] = sp end
+    end
+    for name, kind in pairs(BEACON_KINDS) do
+      local sp = nearest[name]
+      if sp and sp.dist < kind.range then
+        -- Quadratic falloff: quieter at a distance, ramping up steeply as the
+        -- source closes, rather than a flat linear fade.
+        local t = 1 - sp.dist / kind.range
+        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = t * t })
+      else
+        beacon.clear(name)
       end
     end
-    if nearest and nearest.dist < BEACON_RANGE then
-      -- Quadratic falloff: quieter at a distance, ramping up steeply as the
-      -- enemy closes, rather than a flat linear fade.
-      local t = 1 - nearest.dist / BEACON_RANGE
-      beacon.set("enemy", {
-        x = nearest.dx,
-        y = nearest.dy,
-        volume = t * t,
-      })
-    else
-      beacon.clear("enemy")
-    end
   else
-    beacon.clear("enemy") -- no tone in menus or transitions
+    for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
+      beacon.clear(name)
+    end
     for i = 0, 15 do
       announced[i] = false
     end
@@ -526,13 +556,18 @@ function on_draw(canvas)
   canvas:line(fx + fw, fy, fx + fw, fy + fw, 0x304058)
 
   if in_play(s) then
-    -- Sprites first, so Link's marker sits on top of them. Enemies (those with
-    -- health) in red, other objects in cyan.
+    -- Sprites first, so Link's marker sits on top of them. Coloured by beacon
+    -- class: enemies red, items yellow, people/switches green, scenery dim cyan.
+    local class_col = {
+      enemy = 0xF04040,
+      item  = 0xF0D040,
+      npc   = 0x40E060,
+      minor = 0x40C0F0,
+    }
     for _, sp in ipairs(sprites()) do
       local px = fx + (sp.x % 512) * fw // 512
       local py = fy + (sp.y % 512) * fw // 512
-      local col = (sp.hp ~= nil and sp.hp > 0) and 0xF04040 or 0x40C0F0
-      canvas:rect(px - 1, py - 1, 3, 3, col)
+      canvas:rect(px - 1, py - 1, 3, 3, class_col[category(sp)])
     end
 
     local lx = fx + (s.x % 512) * fw // 512
