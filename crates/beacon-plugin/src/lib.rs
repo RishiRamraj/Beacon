@@ -623,11 +623,12 @@ mod tests {
     }
 
     #[test]
-    fn alttp_enemy_proximity_speaks_on_approach_not_every_frame() {
+    fn alttp_enemy_announced_once_as_it_enters_the_screen() {
         let r = Registry::builtin();
         let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
-        // An in-play frame with one enemy (health > 0) `dx` pixels east of Link.
+        // An in-play frame with a Green Soldier (type 65) `dx` pixels east of Link.
+        // On screen is |dx| <= 128; dx 200 is off screen, dx 60 is on.
         let frame = |dx: u16| -> Vec<u8> {
             let mut ram = vec![0u8; 128 * 1024];
             let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
@@ -640,28 +641,32 @@ mod tests {
             set(0x7E0020, 0x00);
             set(0x7E0021, 0x01); // Link Y = 0x0100
             let ex = 0x0100u16 + dx;
-            set(0x7E0DD0, 0x09); // active
+            set(0x7E0DD0, 0x09); // slot 0 active
+            set(0x7E0E20, 65); // type: Green Soldier
             set(0x7E0D10, (ex & 0xFF) as u8);
             set(0x7E0D30, (ex >> 8) as u8);
             set(0x7E0D00, 0x00);
             set(0x7E0D20, 0x01); // enemy Y = 0x0100
-            set(0x7E0E50, 4); // health -> enemy
             ram
         };
-        let announces = |out: &[Intent]| out.iter().any(|i| i.text.starts_with("Enemy"));
+        let soldier = |out: &[Intent]| {
+            out.iter()
+                .any(|i| i.text.contains("Green Soldier") && i.text.contains("east"))
+        };
 
-        plugin.on_frame(&frame(200), 0); // prime: enemy far (past "nearby")
+        plugin.on_frame(&frame(200), 0); // prime prev; enemy off screen
         assert!(
-            announces(&plugin.on_frame(&frame(100), 1)),
-            "should speak when the enemy enters the near ring"
+            soldier(&plugin.on_frame(&frame(60), 1)),
+            "names the enemy and direction as it enters the screen"
         );
         assert!(
-            !announces(&plugin.on_frame(&frame(100), 2)),
-            "should stay quiet while the enemy holds its ring"
+            !soldier(&plugin.on_frame(&frame(60), 2)),
+            "stays quiet while it remains on screen"
         );
+        plugin.on_frame(&frame(200), 3); // leaves the screen (latch resets)
         assert!(
-            announces(&plugin.on_frame(&frame(50), 3)),
-            "should speak again when the enemy gets closer"
+            soldier(&plugin.on_frame(&frame(60), 4)),
+            "announces again on re-entry"
         );
     }
 }
