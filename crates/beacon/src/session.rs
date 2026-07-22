@@ -357,6 +357,14 @@ impl Session {
         self.say_now(format!("Frame {}.", self.frames));
     }
 
+    /// Shows the map from the start, if the plugin draws one. For `--map`.
+    pub fn show_map_at_start(&mut self) {
+        if self.plugin.has_map() {
+            self.show_map = true;
+            self.render_map();
+        }
+    }
+
     /// Shows or hides the plugin's map view.
     fn toggle_map(&mut self) {
         if !self.plugin.has_map() {
