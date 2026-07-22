@@ -109,6 +109,10 @@ pub struct BeaconState {
     pub pitch: f32,
     /// Loudness, 0 to 1, set by the plugin (e.g. from distance).
     pub volume: f32,
+    /// Tremolo rate in Hz: the tone's amplitude pulses at this rate, so a class
+    /// can carry a rhythmic signature independent of its pitch. 0 is a steady
+    /// tone. The plugin uses faster pulsing for more dangerous things.
+    pub tremolo: f32,
 }
 
 /// A bindable command a plugin declares.

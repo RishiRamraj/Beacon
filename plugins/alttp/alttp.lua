@@ -267,15 +267,27 @@ local ITEM_TYPES = { [98]=true, [178]=true, [216]=true, [217]=true, [218]=true, 
 -- People to talk to and switches to act on — interactable, but not picked up.
 local NPC_TYPES = { [22]=true, [30]=true, [31]=true, [33]=true, [47]=true, [49]=true, [53]=true, [54]=true, [60]=true, [76]=true, [82]=true, [115]=true, [117]=true, [118]=true, [120]=true, [171]=true, [173]=true, [187]=true, [233]=true }
 
--- Per-class tone and reach. `pitch` scales the 330 Hz base tone (higher is
--- brighter); enemies keep the original 1.0. `range` is Manhattan pixels — about
--- 16 to a tile, so 24 is "within a block", the near-only reach for scenery.
+-- Per-class tone, reach, and pulse. `pitch` scales the 330 Hz base tone (higher
+-- is brighter); enemies keep the original 1.0. `range` is Manhattan pixels —
+-- about 16 to a tile, so 24 is "within a block", the near-only reach for scenery.
+-- `tremolo` is the amplitude-pulse rate in Hz: a rhythmic signature that tells
+-- the classes apart by ear even when they overlap. The rate rises with danger —
+-- scenery and pickups are calm or steady, enemies throb fast (and faster still
+-- the tougher they are, see the emission loop). The guide tone stays steady (no
+-- tremolo) so the thing you actively steer by is never mistaken for a threat.
 local BEACON_KINDS = {
-  enemy = { pitch = 1.0, range = 224 },
-  item  = { pitch = 2.0, range = 224 },
-  npc   = { pitch = 1.5, range = 224 },
-  minor = { pitch = 0.5, range = 24 },
+  enemy = { pitch = 1.0, range = 224, tremolo = 6.0 }, -- base; scaled by HP below
+  item  = { pitch = 2.0, range = 224, tremolo = 2.0 }, -- a calm "come and get me"
+  npc   = { pitch = 1.5, range = 224, tremolo = 3.5 }, -- gently active, but safe
+  minor = { pitch = 0.5, range = 24,  tremolo = 0.0 }, -- steady, incidental
 }
+
+-- Enemy pulse scales with toughness: the base rate plus a term in the sprite's
+-- health, so a stronger foe throbs faster and more urgently. Health is capped
+-- before scaling so a boss's huge HP does not run the rate off into a buzz.
+local ENEMY_TREMOLO_BASE = 6.0    -- Hz, a plain enemy with little or no health
+local ENEMY_TREMOLO_PER_HP = 0.06 -- added Hz per point of (capped) health
+local ENEMY_TREMOLO_HP_CAP = 160  -- health past this does not pulse any faster
 
 -- How much a wall between the player and a source dims its beacon: muffled, not
 -- silenced, so an occluded threat still registers.
@@ -926,7 +938,15 @@ function on_frame(frame)
         if sight_blocked(now, now.x, now.y, sp.x, sp.y) then
           vol = vol * BEACON_OCCLUDED_SCALE
         end
-        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol })
+        -- Enemies pulse faster the tougher they are; other classes use the
+        -- class's fixed rate.
+        local trem = kind.tremolo
+        if name == "enemy" then
+          local hp = sp.hp or 0
+          if hp > ENEMY_TREMOLO_HP_CAP then hp = ENEMY_TREMOLO_HP_CAP end
+          trem = ENEMY_TREMOLO_BASE + hp * ENEMY_TREMOLO_PER_HP
+        end
+        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol, tremolo = trem })
       else
         beacon.clear(name)
       end
