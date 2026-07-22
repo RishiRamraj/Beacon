@@ -1028,4 +1028,41 @@ mod tests {
             "explore starts guiding toward unexplored ground"
         );
     }
+
+    #[test]
+    fn alttp_objective_tracks_the_quest_from_the_progress_bytes() {
+        // The strategic "objective" command reads the quest-progress save bytes
+        // (progress $7EF3C5, pendants $7EF374, crystals $7EF37A, sword $7EF359)
+        // and reports the current critical-path milestone. A fresh save points at
+        // the very first step; partway through the pendant hunt it advances to the
+        // next unfinished dungeon.
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        // Fresh save: every progress byte zero -> objective is reaching Uncle.
+        let fresh = vec![0u8; 128 * 1024];
+        let out = plugin.command("objective", &fresh);
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Objective 1 of")
+                && t.to_lowercase().contains("uncle")),
+            "{texts:?}"
+        );
+
+        // Sanctuary reached (progress 2) and the Pendant of Courage taken from
+        // Eastern Palace (pendants bit 0): the next objective is Desert Palace.
+        let mut mid = vec![0u8; 128 * 1024];
+        mid[wram_offset(0x7EF3C5).unwrap()] = 2; // progress: Zelda at Sanctuary
+        mid[wram_offset(0x7EF374).unwrap()] = 0x01; // pendants: Courage
+        let out = plugin.command("objective", &mid);
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Desert Palace")),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("Eastern Palace")),
+            "the finished pendant dungeon is not re-suggested: {texts:?}"
+        );
+    }
 }

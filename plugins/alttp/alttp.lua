@@ -64,6 +64,89 @@ local function read_state()
   }
 end
 
+-- The game's critical path, as an ordered spine of objectives. The local guide
+-- (#28) navigates tactically within a room but has no idea where the player
+-- *should* be heading; this is the strategic layer that gives it a destination.
+-- Order and gating are cross-checked against a thorough walkthrough; each step's
+-- `done` predicate reads the quest-progress bytes so the current objective is
+-- inferred from the save, not tracked separately. `done` is evaluated in order
+-- and the first unfinished step is the current one.
+--
+-- The three pendants collectively gate the Master Sword and individually mark
+-- their dungeons (Courage=Eastern, Power=Desert, Wisdom=Hera); the seven
+-- crystals likewise mark the Dark World dungeons. The intro spine (grab the
+-- Lamp, reach Uncle, escort Zelda, beat Agahnim) rides on the $3C5 progress
+-- byte, which the game advances 0->1->2->3 at exactly those beats.
+local MILESTONES = {
+  { goal = "Reach your uncle for the sword",
+    hint = "Leave the house and head north into Hyrule Castle. Grab the Lamp on the way, find your dying uncle for the sword and shield, then free Princess Zelda in the cell below.",
+    done = function(v) return v.progress >= 1 end },
+  { goal = "Escort Zelda to the Sanctuary",
+    hint = "Take Zelda up through the castle and out the hidden north passage to the Sanctuary. Then seek out Sahasrahla to begin the hunt for the three Pendants.",
+    done = function(v) return v.progress >= 2 end },
+  { goal = "Eastern Palace, the first pendant",
+    hint = "The big green palace at the far east edge of the Light World. Clear it for the Bow and the Pendant of Courage; Sahasrahla then gives you the Pegasus Boots.",
+    done = function(v) return v.pendants & 0x01 ~= 0 end },
+  { goal = "Desert Palace, the second pendant",
+    hint = "The Desert of Mystery in the southwest. Read the stone tablet there with the Book of Mudora to open the way in. Clear it for the Power Glove and the Pendant of Power.",
+    done = function(v) return v.pendants & 0x04 ~= 0 end },
+  { goal = "Tower of Hera, the third pendant",
+    hint = "The summit of Death Mountain, to the north. Take the Magic Mirror from the old man on the climb and the Moon Pearl inside. Clear it for the Pendant of Wisdom.",
+    done = function(v) return v.pendants & 0x02 ~= 0 end },
+  { goal = "Claim the Master Sword",
+    hint = "Deep in the Lost Woods, northwest. With all three Pendants, pull the Master Sword from its pedestal in the grove.",
+    done = function(v) return v.sword >= 2 end },
+  { goal = "Hyrule Castle Tower, defeat Agahnim",
+    hint = "The Master Sword breaks the barrier around the castle's front tower. Climb to the top and defeat Agahnim; the fight casts you into the Dark World.",
+    done = function(v) return v.progress >= 3 end },
+  { goal = "Palace of Darkness, the first crystal",
+    hint = "Northeast Dark World, near the Pyramid. You need the Moon Pearl to stay human and the Bow. Clear it for the Magic Hammer.",
+    done = function(v) return v.crystals & 0x02 ~= 0 end },
+  { goal = "Swamp Palace, the second crystal",
+    hint = "The southern Dark World swamp. First open the dam in the Light World swamp to lower the water, then Mirror across. Clear it for the Hookshot.",
+    done = function(v) return v.crystals & 0x10 ~= 0 end },
+  { goal = "Skull Woods, the third crystal",
+    hint = "The northwest Dark World woods, the counterpart of the Lost Woods. Clear it for the Fire Rod.",
+    done = function(v) return v.crystals & 0x40 ~= 0 end },
+  { goal = "Thieves' Town, the fourth crystal",
+    hint = "The Village of Outcasts in the west Dark World. Clear it for the Titan's Mitt, which lifts the heavy dark rocks gating the last three dungeons.",
+    done = function(v) return v.crystals & 0x20 ~= 0 end },
+  { goal = "Ice Palace, the fifth crystal",
+    hint = "The island in the far southeast Dark World. Clear it for the Blue Mail.",
+    done = function(v) return v.crystals & 0x04 ~= 0 end },
+  { goal = "Misery Mire, the sixth crystal",
+    hint = "The southwest Dark World. Stand at the entrance and use the Ether Medallion to open it. Clear it for the Cane of Somaria.",
+    done = function(v) return v.crystals & 0x01 ~= 0 end },
+  { goal = "Turtle Rock, the seventh crystal",
+    hint = "The summit of the Dark World Death Mountain, east. Use the Quake Medallion at the Light World Lake of Ill Omen to open it. Clear it for the Mirror Shield.",
+    done = function(v) return v.crystals & 0x08 ~= 0 end },
+  { goal = "Ganon's Tower, then Ganon",
+    hint = "With all seven Crystals the seal on Ganon's Tower, atop the Dark World Death Mountain, lifts. Beat Agahnim again at the top, then finish Ganon at the Pyramid with the Silver Arrows.",
+    done = function(_) return false end },
+}
+
+-- The quest-progress bytes the objective logic reads. Kept separate from
+-- read_state's moment-to-moment fields since it is only consulted on demand.
+local function read_progress()
+  local p = mem.u8(A.progress.addr)
+  if p == nil then return nil end
+  return {
+    progress = p,
+    pendants = mem.u8(A.pendants.addr),
+    crystals = mem.u8(A.crystals.addr),
+    sword = mem.u8(A.sword.addr),
+  }
+end
+
+-- The first unfinished milestone: the player's current objective. Returns its
+-- index and record; the last is terminal (never "done") so this always yields.
+local function current_milestone(v)
+  for i, m in ipairs(MILESTONES) do
+    if not m.done(v) then return i, m end
+  end
+  return #MILESTONES, MILESTONES[#MILESTONES]
+end
+
 -- Whether the player is actually controlling Link, as opposed to sitting in a
 -- menu, a transition, or the intro.
 local function in_play(s)
@@ -981,6 +1064,23 @@ on_command("coordinates", function()
   else
     say("Not in play.", { priority = "navigation", category = "on-demand" })
   end
+end)
+
+-- "What should I be doing?" The strategic counterpart to the local guide: it
+-- reads the quest-progress bytes, finds the current critical-path milestone, and
+-- speaks the objective and where to head. Says how far along the spine the player
+-- is so the goal has a sense of scale.
+on_command("objective", function()
+  local v = read_progress()
+  if v == nil then
+    say("No game state yet.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  local idx, m = current_milestone(v)
+  say(
+    string.format("Objective %d of %d: %s. %s", idx, #MILESTONES, m.goal, m.hint),
+    { priority = "navigation", category = "on-demand" }
+  )
 end)
 
 -- "Guide me to the nearest door." A concrete use of the pathfinder: it scans the
