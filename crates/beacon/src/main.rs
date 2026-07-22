@@ -32,7 +32,8 @@ options:
   --rate <-100..100>    speech rate; overrides the saved setting
   --mcp                 no window; serve the MCP control protocol on stdio,
                         so an agent can drive setup and play (audio still runs)
-  --map                 start with the plugin's map view shown (toggle with m)
+  --map                 start with the plugin's map beside the game (toggle: m)
+  --map-only            show only the plugin's map, no game picture
 
 game controls (fixed):
   arrows                d-pad            enter    start
@@ -63,6 +64,7 @@ struct Args {
     rate: Option<i8>,
     mcp: bool,
     map: bool,
+    map_only: bool,
 }
 
 fn parse_args() -> Args {
@@ -75,6 +77,7 @@ fn parse_args() -> Args {
         rate: None,
         mcp: false,
         map: false,
+        map_only: false,
     };
 
     let mut it = std::env::args().skip(1);
@@ -91,6 +94,7 @@ fn parse_args() -> Args {
             "--quiet" => args.quiet = true,
             "--mcp" => args.mcp = true,
             "--map" => args.map = true,
+            "--map-only" => args.map_only = true,
             "--rate" => {
                 args.rate = Some(
                     it.next()
@@ -295,7 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         rom_id.as_deref().unwrap_or("unknown"),
     );
-    if args.map {
+    if args.map || args.map_only {
         session.show_map_at_start();
     }
 
@@ -306,7 +310,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return mcp::run(session);
     }
 
-    let mut app = app::App::new(session, input::Input::new());
+    let mut app = app::App::new(session, input::Input::new(), args.map_only);
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

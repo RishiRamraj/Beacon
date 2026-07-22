@@ -27,6 +27,8 @@ pub struct App {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     context: Option<softbuffer::Context<Rc<Window>>>,
+    /// Show only the map, no game picture (`--map-only`).
+    map_only: bool,
     /// Tracks the map's visibility so the window is resized when it toggles.
     map_shown: bool,
 }
@@ -35,10 +37,12 @@ pub struct App {
 const GAME_W: u32 = 256 * DEFAULT_SCALE;
 const GAME_H: u32 = 224 * DEFAULT_SCALE;
 
-/// The window size for a given map visibility: game alone, or game plus a square
-/// map panel to its right.
-fn window_size(map: bool) -> winit::dpi::LogicalSize<u32> {
-    if map {
+/// The window size for the current presentation: the map alone (square), the
+/// game plus a square map panel beside it, or the game alone.
+fn window_size(map_only: bool, map_beside: bool) -> winit::dpi::LogicalSize<u32> {
+    if map_only {
+        winit::dpi::LogicalSize::new(GAME_H, GAME_H)
+    } else if map_beside {
         winit::dpi::LogicalSize::new(GAME_W + GAME_H, GAME_H)
     } else {
         winit::dpi::LogicalSize::new(GAME_W, GAME_H)
@@ -74,13 +78,14 @@ fn blit(
 }
 
 impl App {
-    pub fn new(session: Session, input: Input) -> Self {
+    pub fn new(session: Session, input: Input, map_only: bool) -> Self {
         App {
             session,
             input,
             window: None,
             surface: None,
             context: None,
+            map_only,
             map_shown: false,
         }
     }
@@ -152,39 +157,49 @@ impl App {
         };
         buf.fill(0); // letterbox any area a panel does not cover
 
-        if let Some((mw, mh, mpix)) = map {
-            let map_side = win_h.min(win_w / 2);
-            let game_w = win_w - map_side;
-            blit(
-                &mut buf,
-                win_w,
-                0,
-                0,
-                game_w,
-                win_h,
-                game,
-                gw,
-                gh,
-                game_stride,
-            );
-            let map_y = (win_h - map_side) / 2;
-            let (mw, mh) = (mw as usize, mh as usize);
-            blit(
-                &mut buf, win_w, game_w, map_y, map_side, map_side, mpix, mw, mh, mw,
-            );
-        } else {
-            blit(
-                &mut buf,
-                win_w,
-                0,
-                0,
-                win_w,
-                win_h,
-                game,
-                gw,
-                gh,
-                game_stride,
-            );
+        match (self.map_only, map) {
+            // Map only: it fills the window; no game picture.
+            (true, Some((mw, mh, mpix))) => {
+                let (mw, mh) = (mw as usize, mh as usize);
+                blit(&mut buf, win_w, 0, 0, win_w, win_h, mpix, mw, mh, mw);
+            }
+            // Game with the map in a square panel to its right.
+            (false, Some((mw, mh, mpix))) => {
+                let map_side = win_h.min(win_w / 2);
+                let game_w = win_w - map_side;
+                blit(
+                    &mut buf,
+                    win_w,
+                    0,
+                    0,
+                    game_w,
+                    win_h,
+                    game,
+                    gw,
+                    gh,
+                    game_stride,
+                );
+                let map_y = (win_h - map_side) / 2;
+                let (mw, mh) = (mw as usize, mh as usize);
+                blit(
+                    &mut buf, win_w, game_w, map_y, map_side, map_side, mpix, mw, mh, mw,
+                );
+            }
+            // No map: the game fills the window.
+            (_, None) => {
+                blit(
+                    &mut buf,
+                    win_w,
+                    0,
+                    0,
+                    win_w,
+                    win_h,
+                    game,
+                    gw,
+                    gh,
+                    game_stride,
+                );
+            }
         }
 
         let _ = buf.present();
@@ -202,7 +217,7 @@ impl ApplicationHandler for App {
         self.map_shown = self.session.map_shown();
         let attrs = Window::default_attributes()
             .with_title("Beacon")
-            .with_inner_size(window_size(self.map_shown));
+            .with_inner_size(window_size(self.map_only, self.map_shown));
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
@@ -292,7 +307,8 @@ impl ApplicationHandler for App {
             let shown = self.session.map_shown();
             if shown != self.map_shown {
                 self.map_shown = shown;
-                let _ = window.request_inner_size(window_size(shown));
+                // In map-only mode the window stays square regardless.
+                let _ = window.request_inner_size(window_size(self.map_only, shown));
             }
             window.request_redraw();
         }
@@ -304,13 +320,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_grows_by_a_square_panel_for_the_map() {
-        let off = window_size(false);
-        let on = window_size(true);
-        assert_eq!((off.width, off.height), (GAME_W, GAME_H));
-        // The map panel is a square the height of the game panel, on the right.
-        assert_eq!(on.height, GAME_H);
-        assert_eq!(on.width, GAME_W + GAME_H);
+    fn window_sizes_match_the_presentation() {
+        let game = window_size(false, false);
+        assert_eq!((game.width, game.height), (GAME_W, GAME_H));
+
+        // Map beside: game plus a square panel the height of the game.
+        let beside = window_size(false, true);
+        assert_eq!((beside.width, beside.height), (GAME_W + GAME_H, GAME_H));
+
+        // Map only: a square, whatever the map-shown flag says.
+        let only = window_size(true, false);
+        assert_eq!((only.width, only.height), (GAME_H, GAME_H));
+        assert_eq!(window_size(true, true), only);
     }
 
     #[test]
