@@ -32,6 +32,7 @@ options:
   --rate <-100..100>    speech rate; overrides the saved setting
   --mcp                 no window; serve the MCP control protocol on stdio,
                         so an agent can drive setup and play (audio still runs)
+  --map                 start with the plugin's map view shown (toggle with m)
 
 game controls (fixed):
   arrows                d-pad            enter    start
@@ -61,6 +62,7 @@ struct Args {
     quiet: bool,
     rate: Option<i8>,
     mcp: bool,
+    map: bool,
 }
 
 fn parse_args() -> Args {
@@ -72,6 +74,7 @@ fn parse_args() -> Args {
         quiet: false,
         rate: None,
         mcp: false,
+        map: false,
     };
 
     let mut it = std::env::args().skip(1);
@@ -87,6 +90,7 @@ fn parse_args() -> Args {
             "--json" => args.json = true,
             "--quiet" => args.quiet = true,
             "--mcp" => args.mcp = true,
+            "--map" => args.map = true,
             "--rate" => {
                 args.rate = Some(
                     it.next()
@@ -281,7 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let audio = audio::Audio::new(beacon_emu::AUDIO_SAMPLE_RATE)?;
-    let session = session::Session::new(
+    let mut session = session::Session::new(
         emu,
         audio,
         arbiter,
@@ -291,6 +295,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         rom_id.as_deref().unwrap_or("unknown"),
     );
+    if args.map {
+        session.show_map_at_start();
+    }
 
     // MCP mode runs the same session with no window, driven by an agent over
     // stdio. Audio and speech still play, so a blind player hears the game while
