@@ -109,22 +109,28 @@ impl Default for Braille {
     }
 }
 
+// Not `deny_unknown_fields`: an older config may carry a now-removed `volume`
+// key, and it should be ignored on load rather than failing the whole file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Beacons {
     /// Spatial-audio beacons: positioned tones a plugin places so the player
     /// hears where things are. On by default, but easily silenced.
     pub enabled: bool,
-    /// Master loudness for beacons, 0 to 1. Deliberately modest so they sit under
-    /// the game audio rather than over it.
-    pub volume: f32,
+    /// Loudest a beacon gets, when whatever it marks is nearest. 0 to 1.
+    pub volume_max: f32,
+    /// Quietest a beacon gets, at the edge of its range. 0 to 1. A plugin's
+    /// distance curve is mapped into `[volume_min, volume_max]`.
+    pub volume_min: f32,
 }
 
 impl Default for Beacons {
     fn default() -> Self {
         Beacons {
             enabled: true,
-            volume: 0.3,
+            // Modest, so beacons sit under the game audio; fully tunable.
+            volume_max: 0.15,
+            volume_min: 0.0,
         }
     }
 }
@@ -319,7 +325,8 @@ impl Settings {
             "braille.enabled",
             "braille.verbosity",
             "beacons.enabled",
-            "beacons.volume",
+            "beacons.volume_max",
+            "beacons.volume_min",
         ]
     }
 
@@ -338,7 +345,8 @@ impl Settings {
             "braille.enabled" => self.braille.enabled.to_string(),
             "braille.verbosity" => self.braille.verbosity.to_string(),
             "beacons.enabled" => self.beacons.enabled.to_string(),
-            "beacons.volume" => self.beacons.volume.to_string(),
+            "beacons.volume_max" => self.beacons.volume_max.to_string(),
+            "beacons.volume_min" => self.beacons.volume_min.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
         })
     }
@@ -378,7 +386,12 @@ impl Settings {
             "braille.enabled" => self.braille.enabled = parse(key, value)?,
             "braille.verbosity" => self.braille.verbosity = parse::<u8>(key, value)?.min(3),
             "beacons.enabled" => self.beacons.enabled = parse(key, value)?,
-            "beacons.volume" => self.beacons.volume = parse::<f32>(key, value)?.clamp(0.0, 1.0),
+            "beacons.volume_max" => {
+                self.beacons.volume_max = parse::<f32>(key, value)?.clamp(0.0, 1.0)
+            }
+            "beacons.volume_min" => {
+                self.beacons.volume_min = parse::<f32>(key, value)?.clamp(0.0, 1.0)
+            }
             other => return Err(Error::UnknownKey(other.to_string())),
         }
         Ok(())

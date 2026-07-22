@@ -150,9 +150,12 @@ impl Session {
             // buffer can be borrowed together.
             if self.settings.beacons.enabled {
                 let beacons = self.plugin.beacons();
-                let master = self.settings.beacons.volume;
-                self.beacon_mixer
-                    .mix(&beacons, &mut self.audio_scratch, master);
+                self.beacon_mixer.mix(
+                    &beacons,
+                    &mut self.audio_scratch,
+                    self.settings.beacons.volume_min,
+                    self.settings.beacons.volume_max,
+                );
             }
             let scratch = std::mem::take(&mut self.audio_scratch);
             self.audio.submit(&scratch);
