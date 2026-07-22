@@ -49,3 +49,15 @@ label = "Guide to the nearest door"
 [[command]]
 id    = "pathfind_stop"
 label = "Stop guiding"
+
+[[command]]
+id    = "explore"
+label = "Guide to an unexplored spot"
+
+[[command]]
+id    = "mark"
+label = "Drop a waypoint marker"
+
+[[command]]
+id    = "guide_to_mark"
+label = "Guide back to the marker"

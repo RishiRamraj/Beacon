@@ -945,4 +945,50 @@ mod tests {
         );
         assert!(path_beacon(&plugin).is_none(), "guide beacon cleared on arrival");
     }
+
+    #[test]
+    fn alttp_marker_guides_back_to_where_it_was_dropped() {
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        // Drop a marker at (10,10), then walk east to (20,10) and ask to go back.
+        let start = dungeon_frame((10, 10), (63, 63), &[]);
+        plugin.on_frame(&start, 0);
+        plugin.command("mark", &start);
+
+        let moved = dungeon_frame((20, 10), (63, 63), &[]);
+        plugin.on_frame(&moved, 1);
+        plugin.command("guide_to_mark", &moved);
+        plugin.on_frame(&moved, 2);
+
+        let guide = path_beacon(&plugin).expect("a guide beacon back to the marker");
+        assert!(
+            guide.dx < 0.0,
+            "guide points west, back toward the marker (dx={})",
+            guide.dx
+        );
+    }
+
+    #[test]
+    fn alttp_explore_routes_toward_unwalked_ground() {
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        // An open room. After standing at (10,10) — which marks the tiles around
+        // Link explored — "explore" should route to nearer unwalked ground.
+        let room = dungeon_frame((10, 10), (63, 63), &[]);
+        plugin.on_frame(&room, 0);
+        plugin.on_frame(&room, 1); // marks the 3x3 around Link explored
+        let out = plugin.command("explore", &room);
+        plugin.on_frame(&room, 2);
+
+        assert!(
+            !out.iter().any(|i| i.text.contains("explored")),
+            "there is still unexplored ground to route to"
+        );
+        assert!(
+            path_beacon(&plugin).is_some(),
+            "explore starts guiding toward unexplored ground"
+        );
+    }
 }
