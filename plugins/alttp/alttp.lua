@@ -168,8 +168,37 @@ local function proximity(dist)
   else return "in the distance" end
 end
 
--- Range within which the nearest enemy gets a spatial-audio beacon (pixels).
-local BEACON_RANGE = 224
+-- Beacon categories. Every visible object falls into one class, and the nearest
+-- of each class gets a spatial-audio tone — so the soundscape stays legible: one
+-- distinct pitch per class rather than a wall of sound. What matters carries
+-- further: enemies and things worth walking to (items, chests, people, switches)
+-- call from across the screen; incidental scenery only chirps when Link is right
+-- on top of it.
+--
+-- Types you collect or open. A bright, high tone.
+local ITEM_TYPES = { [47]=true, [64]=true, [123]=true, [216]=true, [217]=true, [218]=true, [219]=true, [220]=true, [221]=true, [222]=true, [223]=true, [224]=true, [225]=true, [226]=true, [227]=true, [228]=true, [229]=true, [232]=true, [233]=true }
+-- People to talk to and switches to act on — interactable, but not picked up.
+local NPC_TYPES = { [22]=true, [23]=true, [27]=true, [30]=true, [31]=true, [33]=true, [37]=true, [40]=true, [44]=true, [112]=true, [113]=true, [114]=true, [115]=true, [116]=true, [118]=true, [126]=true, [235]=true, [237]=true, [242]=true, [244]=true, [245]=true, [247]=true, [249]=true }
+
+-- Per-class tone and reach. `pitch` scales the 330 Hz base tone (higher is
+-- brighter); enemies keep the original 1.0. `range` is Manhattan pixels — about
+-- 16 to a tile, so 24 is "within a block", the near-only reach for scenery.
+local BEACON_KINDS = {
+  enemy = { pitch = 1.0, range = 224 },
+  item  = { pitch = 2.0, range = 224 },
+  npc   = { pitch = 1.5, range = 224 },
+  minor = { pitch = 0.5, range = 24 },
+}
+
+-- Which beacon class a sprite belongs to. Enemies first (a damageable sprite is a
+-- threat whatever the type table calls it), then the interactable classes, and
+-- everything else is incidental scenery.
+local function category(sp)
+  if is_enemy(sp) then return "enemy"
+  elseif ITEM_TYPES[sp.kind] then return "item"
+  elseif NPC_TYPES[sp.kind] then return "npc"
+  else return "minor" end
+end
 
 -- Game text: decode ALttP's compressed dialogue table from the ROM once at load,
 -- then read the current message by id at runtime. Ported from the alttp-navi
@@ -374,29 +403,30 @@ function on_frame(frame)
       end
     end
 
-    -- Spatial-audio beacon on the nearest enemy: it pans toward the enemy and
-    -- grows louder as it closes. Cleared when nothing is in range.
-    local nearest = nil
+    -- Spatial-audio beacons: one tone per class, on the nearest sprite of that
+    -- class within its reach. It pans toward the source and grows louder as it
+    -- closes. `list` is sorted nearest-first, so the first sprite seen for a
+    -- class is its closest one.
+    local nearest = {}
     for _, sp in ipairs(list) do
-      if is_enemy(sp) then
-        nearest = sp
-        break
+      local c = category(sp)
+      if nearest[c] == nil then nearest[c] = sp end
+    end
+    for name, kind in pairs(BEACON_KINDS) do
+      local sp = nearest[name]
+      if sp and sp.dist < kind.range then
+        -- Quadratic falloff: quieter at a distance, ramping up steeply as the
+        -- source closes, rather than a flat linear fade.
+        local t = 1 - sp.dist / kind.range
+        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = t * t })
+      else
+        beacon.clear(name)
       end
     end
-    if nearest and nearest.dist < BEACON_RANGE then
-      -- Quadratic falloff: quieter at a distance, ramping up steeply as the
-      -- enemy closes, rather than a flat linear fade.
-      local t = 1 - nearest.dist / BEACON_RANGE
-      beacon.set("enemy", {
-        x = nearest.dx,
-        y = nearest.dy,
-        volume = t * t,
-      })
-    else
-      beacon.clear("enemy")
-    end
   else
-    beacon.clear("enemy") -- no tone in menus or transitions
+    for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
+      beacon.clear(name)
+    end
     for i = 0, 15 do
       announced[i] = false
     end
@@ -481,10 +511,64 @@ on_command("coordinates", function()
   end
 end)
 
+-- The map's collision colours. A tile attribute describes what a tile *is* for
+-- collision; only a few classes are worth drawing, and the rest is open floor,
+-- left as background. Ported from the tile classes in alttp-navi's map_renderer.
+local TILE_COLOR = {}
+do
+  local function fill(color, ids)
+    for _, a in ipairs(ids) do TILE_COLOR[a] = color end
+  end
+  fill(0x5A6478, { 0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F }) -- wall / cliff
+  fill(0x2C6AC0, { 0x08, 0x09, 0x4B })                                           -- water
+  fill(0x0A0E16, { 0x20 })                                                       -- hole / pit
+  fill(0x50A070, { 0x1C, 0x1D, 0x1E, 0x1F, 0x22, 0x28, 0x29, 0x2A, 0x2B })       -- ledge / stairs
+  fill(0xE0C040, { 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 })             -- door / passage
+  fill(0x9C6B3C, { 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56 })                   -- solid object
+end
+-- Indoors, attribute 0x04 (and the rest of the indoor-wall set, already walls
+-- above) is a wall; outdoors the same value is diggable ground. So it is folded
+-- in per-context, not into the shared table.
+local INDOOR_WALL_04 = 0x5A6478
+
+-- Dungeon collision map. $7F2000 holds a 64x64 grid, one byte per 8-pixel tile —
+-- live WRAM, so the room's real shape. The lower level of a two-level room lives
+-- 0x1000 further on.
+local DUNGEON_TILE_TABLE = 0x7F2000
+local LOWER_LEVEL = 0x7E00EE
+
+-- Overworld collision map. The visible tiles are map16 indices in the $7E2000
+-- WRAM table; each index resolves through two ROM tables to a collision
+-- attribute. Loaded once here (the ROM does not change); ported from alttp-navi's
+-- rom parser. The whole-ROM `snes_to_rom` mapping is the one already used above
+-- for dialogue.
+local OW_MAP16_TO_MAP8 = rom.slice(snes_to_rom(0x8F8000), 3752 * 4 * 2) -- uint16 LE
+local OW_MAP8_TO_ATTR = rom.slice(snes_to_rom(0x8E9459), 512)           -- uint8
+
+-- Resolve a map16 tile index to its collision attribute. `x` is in 8-pixel tile
+-- units and `y` in pixels; their low bits pick which of the map16's four 8x8
+-- sub-tiles applies. Global so it can be checked with eval_lua against the
+-- reference decoder, like `dialog`.
+function ow_tile_attr(map16_index, x, y)
+  if #OW_MAP16_TO_MAP8 == 0 or #OW_MAP8_TO_ATTR == 0 then return 0 end
+  local t = (map16_index * 4) | ((y & 8) >> 2) | (x & 1)
+  local i = t * 2
+  if i < 0 or i + 2 > #OW_MAP16_TO_MAP8 then return 0 end
+  local map8 = string.byte(OW_MAP16_TO_MAP8, i + 1) | (string.byte(OW_MAP16_TO_MAP8, i + 2) << 8)
+  local idx = map8 & 0x1FF
+  if idx + 1 > #OW_MAP8_TO_ATTR then return 0 end
+  local rv = string.byte(OW_MAP8_TO_ATTR, idx + 1)
+  if rv >= 0x10 and rv < 0x1C then
+    rv = rv | ((map8 >> 14) & 1)
+  end
+  return rv
+end
+
 -- Map mode: a schematic of what the plugin reads, for debugging and for sighted
--- assistance. Not the game's own map — a picture of Link's state as this plugin
--- understands it. Integer math throughout (// is floor division) so coordinates
--- stay whole for the canvas.
+-- assistance. In a dungeon or on the overworld it draws the area's actual shape
+-- from the collision map; elsewhere it is just the position/sprite overlay.
+-- Integer math throughout (// is floor division) so coordinates stay whole for
+-- the canvas.
 function on_draw(canvas)
   local w, h = canvas.width, canvas.height
   canvas:clear(0x101828)
@@ -526,13 +610,71 @@ function on_draw(canvas)
   canvas:line(fx + fw, fy, fx + fw, fy + fw, 0x304058)
 
   if in_play(s) then
-    -- Sprites first, so Link's marker sits on top of them. Enemies (those with
-    -- health) in red, other objects in cyan.
+    -- The area's real shape first, under everything else. A 64x64 tile grid maps
+    -- exactly onto the 512-pixel playfield the sprites are plotted in (64 tiles x
+    -- 8 px = 512), so walls and doors line up with the objects standing on them.
+    local function cell(tx, ty, color)
+      local x0 = fx + tx * fw // 64
+      local y0 = fy + ty * fw // 64
+      canvas:rect(x0, y0, (fx + (tx + 1) * fw // 64) - x0,
+                  (fy + (ty + 1) * fw // 64) - y0, color)
+    end
+
+    if s.module == 0x07 then
+      -- Dungeon: the 64x64 collision grid is read straight from WRAM.
+      local base = DUNGEON_TILE_TABLE + (mem.u8(LOWER_LEVEL) == 1 and 0x1000 or 0)
+      local data = mem.slice(base, 4096)
+      if #data == 4096 then
+        for ty = 0, 63 do
+          for tx = 0, 63 do
+            local attr = string.byte(data, ty * 64 + tx + 1)
+            local color = TILE_COLOR[attr] or (attr == 0x04 and INDOOR_WALL_04 or nil)
+            if color then cell(tx, ty, color) end
+          end
+        end
+      end
+    elseif s.module == 0x09 and #OW_MAP16_TO_MAP8 > 0 then
+      -- Overworld: each visible tile is a map16 index from the $7E2000 table,
+      -- addressed through the game's live scroll offsets, then resolved to a
+      -- collision attribute via the ROM tables. Drawn for the 512-pixel window
+      -- around Link, aligned to the same mod-512 grid the sprites use.
+      local mask_y = mem.u16(0x7E070A)
+      local mask_x = mem.u16(0x7E070E)
+      local ow = mem.slice(0x7E2000, 8192)
+      if mask_x ~= 0 and mask_y ~= 0 and #ow == 8192 then
+        local base_y = mem.u16(0x7E0708)
+        local base_x = mem.u16(0x7E070C)
+        local block_x = s.x - (s.x % 512)
+        local block_y = s.y - (s.y % 512)
+        for ty = 0, 63 do
+          for tx = 0, 63 do
+            local px = block_x + tx * 8
+            local py = block_y + ty * 8
+            local ow_tx = px >> 3
+            local t = (((py - base_y) & mask_y) * 8) | ((ow_tx - base_x) & mask_x)
+            local byte_off = (t >> 1) * 2
+            if byte_off >= 0 and byte_off + 2 <= 8192 then
+              local map16 = string.byte(ow, byte_off + 1) | (string.byte(ow, byte_off + 2) << 8)
+              local color = TILE_COLOR[ow_tile_attr(map16, ow_tx, py)]
+              if color then cell(tx, ty, color) end
+            end
+          end
+        end
+      end
+    end
+
+    -- Sprites next, so Link's marker sits on top of them. Coloured by beacon
+    -- class: enemies red, items yellow, people/switches green, scenery dim cyan.
+    local class_col = {
+      enemy = 0xF04040,
+      item  = 0xF0D040,
+      npc   = 0x40E060,
+      minor = 0x40C0F0,
+    }
     for _, sp in ipairs(sprites()) do
       local px = fx + (sp.x % 512) * fw // 512
       local py = fy + (sp.y % 512) * fw // 512
-      local col = (sp.hp ~= nil and sp.hp > 0) and 0xF04040 or 0x40C0F0
-      canvas:rect(px - 1, py - 1, 3, 3, col)
+      canvas:rect(px - 1, py - 1, 3, 3, class_col[category(sp)])
     end
 
     local lx = fx + (s.x % 512) * fw // 512

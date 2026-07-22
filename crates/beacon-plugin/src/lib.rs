@@ -725,4 +725,74 @@ mod tests {
             "a beacon is placed on it"
         );
     }
+
+    // A frame with a single sprite of `kind` (no health) `dx` pixels east of Link,
+    // in play. Shared by the category tests below.
+    fn frame_with_sprite(kind: u8, dx: u16) -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09);
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E0022, 0x00);
+        set(0x7E0023, 0x01); // Link X = 0x0100
+        set(0x7E0020, 0x00);
+        set(0x7E0021, 0x01); // Link Y = 0x0100
+        let ex = 0x0100u16 + dx;
+        set(0x7E0DD0, 0x09); // slot 0 active
+        set(0x7E0E20, kind);
+        set(0x7E0D10, (ex & 0xFF) as u8);
+        set(0x7E0D30, (ex >> 8) as u8);
+        set(0x7E0D00, 0x00);
+        set(0x7E0D20, 0x01); // Y = 0x0100
+        ram
+    }
+
+    #[test]
+    fn alttp_an_item_gets_its_own_tone_and_carries_across_the_screen() {
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        // A Heart (type 216) 90 pixels east — an item, not an enemy.
+        let ram = frame_with_sprite(216, 90);
+        plugin.on_frame(&ram, 0);
+        plugin.on_frame(&ram, 1);
+
+        let b = plugin.beacons();
+        let item = b.iter().find(|b| b.id == "item").expect("an item beacon");
+        assert_eq!(item.pitch, 2.0, "items sound at their own pitch");
+        assert!(item.dx > 0.0, "panned east toward the item");
+        assert!(
+            !b.iter().any(|b| b.id == "enemy"),
+            "an item is not an enemy tone"
+        );
+    }
+
+    #[test]
+    fn alttp_scenery_only_sounds_within_a_block() {
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        // A Weathervane (type 42) — non-interactable scenery, so a "minor" tone
+        // with a one-block reach. On screen but 60 px off (beyond a block): silent.
+        let far = frame_with_sprite(42, 60);
+        plugin.on_frame(&far, 0);
+        plugin.on_frame(&far, 1);
+        assert!(
+            !plugin.beacons().iter().any(|b| b.id == "minor"),
+            "scenery a block away stays silent"
+        );
+
+        // Right beside Link (10 px, within a block): now it chirps, low.
+        let near = frame_with_sprite(42, 10);
+        plugin.on_frame(&near, 2);
+        plugin.on_frame(&near, 3);
+        let minor = plugin
+            .beacons()
+            .into_iter()
+            .find(|b| b.id == "minor")
+            .expect("scenery within a block sounds");
+        assert_eq!(minor.pitch, 0.5, "scenery sounds at its own low pitch");
+    }
 }
