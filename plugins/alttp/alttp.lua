@@ -623,6 +623,82 @@ local function pathfind_update(s)
   })
 end
 
+-- ===========================================================================
+-- Exploration memory and user markers, built on the pathfinder above.
+-- ===========================================================================
+
+-- Tiles Link has been near, so "explore" can route somewhere he has not. Keyed
+-- by absolute world tile (unique per room / overworld area), so it persists
+-- correctly across areas. Global for inspection over MCP.
+explored = {}
+local function tile_key(wtx, wty) return wty * 4096 + wtx end
+
+local function mark_explored(s)
+  local tx, ty = s.x >> 3, s.y >> 3
+  for dy = -1, 1 do
+    for dx = -1, 1 do
+      explored[tile_key(tx + dx, ty + dy)] = true
+    end
+  end
+end
+
+-- Nearest passable tile in the current window Link has not yet been near, found
+-- by breadth-first search over passable tiles (so it is reachable), or nil if the
+-- whole reachable area has been explored.
+local function nearest_unexplored(s)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local slx, sly = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local q, head = { { slx, sly } }, 1
+  local seen = { [sly * 64 + slx] = true }
+  while head <= #q do
+    local c = q[head]; head = head + 1
+    local wtx, wty = ox + c[1], oy + c[2]
+    if not explored[tile_key(wtx, wty)] then return wtx, wty end
+    for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+      local nx, ny = c[1] + d[1], c[2] + d[2]
+      if nx >= 0 and nx <= 63 and ny >= 0 and ny <= 63 then
+        local k = ny * 64 + nx
+        if not seen[k] and tile_passable(s, ox + nx, oy + ny) then
+          seen[k] = true; q[#q + 1] = { nx, ny }
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- User waypoint markers: drop one at Link's tile, get guided back later. Keyed by
+-- slot; each records the area so guidance only offers markers in the current one
+-- (routing is within the loaded window). Global for MCP / multi-slot use.
+markers = {}
+
+function mark_set(slot)
+  local s = prev
+  if s == nil or not in_play(s) then return false end
+  markers[slot] = { area = area_id(s), tx = s.x >> 3, ty = s.y >> 3 }
+  return true
+end
+
+function mark_goto(slot)
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Cannot navigate now.", { priority = "navigation", category = "on-demand" })
+    return false
+  end
+  local m = markers[slot]
+  if m == nil then
+    say("No marker there.", { priority = "navigation", category = "on-demand" })
+    return false
+  end
+  if m.area ~= area_id(s) then
+    say("That marker is in another area.", { priority = "navigation", category = "on-demand" })
+    return false
+  end
+  return pathfind_to(m.tx * 8 + 4, m.ty * 8 + 4)
+end
+
+function mark_clear(slot) markers[slot] = nil end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -777,6 +853,9 @@ function on_frame(frame)
     end
   end
 
+  -- Remember where Link has been, for the explore command.
+  if in_play(now) then mark_explored(now) end
+
   -- Route guidance runs last, so its beacon coexists with the object beacons.
   pathfind_update(now)
 end
@@ -890,6 +969,36 @@ end)
 on_command("pathfind_stop", function()
   pathfind_stop()
   say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
+end)
+
+-- "Guide me somewhere I haven't been." Routes toward the nearest reachable tile
+-- in this area that Link has not yet walked near.
+on_command("explore", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  local tx, ty = nearest_unexplored(s)
+  if tx == nil then
+    say("This area is explored.", { priority = "navigation", category = "on-demand" })
+  else
+    pathfind_to(tx * 8 + 4, ty * 8 + 4)
+  end
+end)
+
+-- Drop a waypoint at Link's spot, and guide back to it later. Slot 1 from the
+-- keyboard; mark_set/mark_goto cover more slots over MCP.
+on_command("mark", function()
+  if mark_set(1) then
+    say("Marker set.", { priority = "navigation", category = "on-demand" })
+  else
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+  end
+end)
+
+on_command("guide_to_mark", function()
+  mark_goto(1) -- speaks its own outcome
 end)
 
 -- Map mode: a schematic of what the plugin reads, for debugging and for sighted
@@ -1021,6 +1130,16 @@ function on_draw(canvas)
       for i, wt in ipairs(pathfind_path) do
         local px, py = plot(wt)
         canvas:rect(px - 1, py - 1, 3, 3, (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
+      end
+    end
+
+    -- Dropped waypoint markers in this area, as small orange squares.
+    local here = area_id(s)
+    for _, m in pairs(markers) do
+      if m.area == here then
+        local px = fx + ((m.tx * 8 + 4) % 512) * fw // 512
+        local py = fy + ((m.ty * 8 + 4) % 512) * fw // 512
+        canvas:rect(px - 1, py - 1, 3, 3, 0xFF9020)
       end
     end
 
