@@ -40,3 +40,4 @@ label = "Report exact coordinates"
 [[command]]
 id    = "read_text"
 label = "Read the current text box"
+key   = "KeyD"                       # "d" for dialogue; rebindable

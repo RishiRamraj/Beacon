@@ -235,7 +235,13 @@ in the manifest with an `id` and a human `label`, and implement it with
 [[command]]
 id    = "coordinates"
 label = "Report exact coordinates"
+key   = "KeyD"                # optional: a default key, filled if still unbound
 ```
+
+The optional `key` is a *suggestion*: the host binds it only if that key and the
+command are both still unbound and the key is not a game control. A user's own
+binding always wins, and it is never persisted over their choices. Use the stable
+key names (`"KeyD"`, `"F5"`, …).
 
 ```lua
 on_command("coordinates", function()

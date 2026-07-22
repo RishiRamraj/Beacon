@@ -301,6 +301,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         sha1.as_deref().unwrap_or("unknown"),
     );
+    // Fill any keys the plugin suggests for its commands, without overriding the
+    // user's own bindings.
+    session.apply_plugin_default_keys();
     if args.map || args.map_only {
         session.show_map_at_start();
     }

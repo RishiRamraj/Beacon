@@ -96,6 +96,11 @@ pub trait Plugin {
 pub struct CommandDecl {
     pub id: String,
     pub label: String,
+    /// An optional default key the host binds if it and the command are both
+    /// still unbound, e.g. `"KeyD"`. A suggestion, not a claim: a user binding
+    /// always wins, and the key is refused if it drives the game.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// The three commands the host itself always offers, independent of any plugin.
@@ -481,12 +486,19 @@ mod tests {
             [[command]]
             id = "read_sign"
             label = "Read the current sign"
+            key = "KeyD"
+            [[command]]
+            id = "list_items"
+            label = "List inventory"
             "#,
         )
         .unwrap();
-        assert_eq!(m.commands.len(), 1);
+        assert_eq!(m.commands.len(), 2);
         assert_eq!(m.commands[0].id, "read_sign");
         assert_eq!(m.commands[0].label, "Read the current sign");
+        assert_eq!(m.commands[0].key.as_deref(), Some("KeyD"));
+        // The key is optional.
+        assert_eq!(m.commands[1].key, None);
     }
 
     #[test]
