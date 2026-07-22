@@ -1034,6 +1034,124 @@ mod tests {
     }
 
     #[test]
+    fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
+        // On the overworld, "advance" gives a compass heading toward the current
+        // milestone's area. A fresh save (progress 0) points at Hyrule Castle
+        // (area 0x1B, grid col 3). From Kakariko in the west (area 0x18, col 0)
+        // that is due east.
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        let mut ram = vec![0u8; 128 * 1024];
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0010, 0x09); // overworld module
+            set(0x7E0011, 0x00);
+            set(0x7EF36C, 24);
+            set(0x7EF36D, 24);
+            set(0x7E008A, 0x18); // current area: Kakariko (row 3, col 0)
+            // progress bytes all zero -> first milestone is Hyrule Castle (0x1B)
+        }
+        plugin.on_frame(&ram, 0);
+        plugin.on_frame(&ram, 1);
+        let out = plugin.command("advance", &ram);
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Head east")),
+            "sends the player east toward the castle: {texts:?}"
+        );
+
+        // Post-Agahnim: all three pendants, the Master Sword, Agahnim beaten, no
+        // crystals yet. The next milestone is Palace of Darkness (area 0x5E, Dark
+        // World). Standing in the Light World it should flag the other world.
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7EF374, 0x07); // all three pendants
+            set(0x7EF359, 2); // Master Sword
+            set(0x7EF3C5, 3); // Agahnim beaten
+            set(0x7E008A, 0x1B); // in the Light World castle area
+        }
+        plugin.on_frame(&ram, 2);
+        let out = plugin.command("advance", &ram);
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Dark World")),
+            "flags a Dark World destination: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn alttp_advance_names_the_next_canonical_dungeon_item() {
+        // In Eastern Palace without the Bow yet, "advance" names the Bow as the
+        // next thing to fetch. Once the Bow is held but the Big Key is not, it
+        // moves the goal on to the Big Key — the canonical dungeon spine.
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        let base = |bow: u8, room: u8| -> Vec<u8> {
+            let mut ram = dungeon_frame((10, 10), (20, 10), &[]);
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E040C, 0x04); // Eastern Palace
+            set(0x7E00A0, room); // current room
+            set(0x7EF340, bow); // Bow (0 = not yet, 1 = have)
+            ram
+        };
+
+        // No Bow, standing in some other room: names the Bow, not yet held.
+        let no_bow = base(0, 0x00);
+        plugin.on_frame(&no_bow, 0);
+        plugin.on_frame(&no_bow, 1);
+        let out = plugin.command("advance", &no_bow);
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Bow")),
+            "points at the Bow first: {texts:?}"
+        );
+
+        // Bow in hand, Big Key not: the goal advances to the Big Key.
+        let have_bow = base(1, 0x00);
+        plugin.on_frame(&have_bow, 2);
+        let out = plugin.command("advance", &have_bow);
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Big Key")),
+            "advances to the Big Key once the Bow is held: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn alttp_advance_in_a_cleared_dungeon_heads_for_the_exit() {
+        // The L-key "advance" guide, in a dungeon whose prize is already in hand,
+        // routes to the exit rather than hunting for more items. Eastern Palace
+        // (dungeon id 0x04) is cleared once the Pendant of Courage (pendants bit 0)
+        // is held. There is a door tile in the room to route toward.
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        let mut room = dungeon_frame((10, 10), (20, 10), &[]);
+        {
+            let mut set = |addr: u32, v: u8| room[wram_offset(addr).unwrap()] = v;
+            set(0x7E040C, 0x04); // in Eastern Palace
+            set(0x7EF374, 0x01); // Pendant of Courage -> Eastern cleared
+        }
+        plugin.on_frame(&room, 0);
+        plugin.on_frame(&room, 1);
+        let out = plugin.command("advance", &room);
+        plugin.on_frame(&room, 2); // pathfind_update emits the guide beacon
+
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.to_lowercase().contains("exit")
+                || t.to_lowercase().contains("cleared")),
+            "a cleared dungeon sends you to the exit: {texts:?}"
+        );
+        assert!(
+            path_beacon(&plugin).is_some(),
+            "and starts guiding there"
+        );
+    }
+
+    #[test]
     fn alttp_a_patrolling_enemy_weaving_out_of_sight_is_not_re_announced() {
         // The bug: a patrolling enemy that ducks behind cover and steps back into
         // line of sight was announced afresh each time it reappeared, so one enemy

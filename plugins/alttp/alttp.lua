@@ -61,6 +61,7 @@ local function read_state()
     dungeon_room = mem.u16(A.dungeon_room.addr),
     ow_screen = mem.u16(A.ow_screen.addr),
     world = mem.u8(A.world.addr),
+    dungeon_id = mem.u8(A.dungeon_id.addr),
   }
 end
 
@@ -146,6 +147,38 @@ local function current_milestone(v)
   end
   return #MILESTONES, MILESTONES[#MILESTONES]
 end
+
+-- Whether the dungeon Link is standing in has already been cleared, keyed by the
+-- $040C dungeon id. "Cleared" means its prize is in hand: the pendant for a Light
+-- World dungeon, the crystal for a Dark World one (same bitfields the milestone
+-- logic reads). Dungeons without a collectible prize (the castle, the sewer, the
+-- towers) are never "done" here — the milestone spine covers those. If the guide
+-- finds the current dungeon cleared, there is nothing left to fetch and it heads
+-- for the exit.
+local DUNGEON_DONE = {
+  [0x04] = function(v) return v.pendants & 0x01 ~= 0 end, -- Eastern  -> Courage
+  [0x06] = function(v) return v.pendants & 0x04 ~= 0 end, -- Desert   -> Power
+  [0x14] = function(v) return v.pendants & 0x02 ~= 0 end, -- Hera     -> Wisdom
+  [0x0C] = function(v) return v.crystals & 0x02 ~= 0 end, -- Dark Palace
+  [0x0A] = function(v) return v.crystals & 0x10 ~= 0 end, -- Swamp
+  [0x10] = function(v) return v.crystals & 0x40 ~= 0 end, -- Skull Woods
+  [0x16] = function(v) return v.crystals & 0x20 ~= 0 end, -- Thieves' (Gargoyle)
+  [0x12] = function(v) return v.crystals & 0x04 ~= 0 end, -- Ice
+  [0x0E] = function(v) return v.crystals & 0x01 ~= 0 end, -- Misery Mire
+  [0x18] = function(v) return v.crystals & 0x08 ~= 0 end, -- Turtle Rock
+}
+
+-- The SRAM room-data table: one 16-bit word per dungeon room at $7EF000 + room*2
+-- (room is the $00A0 value). Bit layout, high byte `dddd b k ck cr`, low byte
+-- `cccc qqqq`: bits 4-7 chests opened, bit 10 key/item taken, bit 11 boss beaten.
+-- Lets the guide tell which of a dungeon's chests and its boss are already done.
+local ROOM_DATA = 0x7EF000
+local function room_word(room)
+  return mem.u8(ROOM_DATA + room * 2) + mem.u8(ROOM_DATA + room * 2 + 1) * 256
+end
+local function room_chests_opened(room) return (room_word(room) >> 4) & 0x0F end
+local function room_item_taken(room) return room_word(room) & 0x0400 ~= 0 end
+local function room_boss_beaten(room) return room_word(room) & 0x0800 ~= 0 end
 
 -- Whether the player is actually controlling Link, as opposed to sitting in a
 -- menu, a transition, or the intro.
@@ -1109,15 +1142,10 @@ on_command("objective", function()
   )
 end)
 
--- "Guide me to the nearest door." A concrete use of the pathfinder: it scans the
--- current window for door tiles and routes to the nearest one. Other targets
--- (markers, unexplored frontier) can drive pathfind_to the same way.
-on_command("pathfind", function()
-  local s = prev
-  if s == nil or not in_play(s) then
-    say("Not in play.", { priority = "navigation", category = "on-demand" })
-    return
-  end
+-- The nearest door / passage tile in the current 64x64 window, as world pixel
+-- coordinates (centre of the tile), or nil if none is in view. Shared by the
+-- door guide and the dungeon exit-finder.
+local function nearest_door_tile(s)
   local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
   local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
   local best, best_d
@@ -1126,14 +1154,265 @@ on_command("pathfind", function()
       local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
       if attr and attr >= 0x30 and attr <= 0x37 then -- a door / passage tile
         local d = math.abs(x - ltx) + math.abs(y - lty)
-        if best_d == nil or d < best_d then best_d, best = d, { ox + x, oy + y } end
+        if best_d == nil or d < best_d then
+          best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+        end
       end
     end
   end
-  if best == nil then
+  return best
+end
+
+-- The nearest on-screen item pickup (a sprite in ITEM_TYPES), as world pixel
+-- coordinates, or nil. sprites() is sorted nearest-first, so the first match is
+-- the closest. Used by the dungeon guide to fetch a loose item in the room.
+local function nearest_item_sprite(s)
+  for _, sp in ipairs(sprites()) do
+    if ITEM_TYPES[sp.kind] then return { sp.x, sp.y } end
+  end
+  return nil
+end
+
+-- "Guide me to the nearest door." A concrete use of the pathfinder: it routes to
+-- the nearest door tile. Other targets (markers, frontier) drive pathfind_to too.
+on_command("pathfind", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  local d = nearest_door_tile(s)
+  if d == nil then
     say("No door nearby.", { priority = "navigation", category = "on-demand" })
   else
-    pathfind_to(best[1] * 8 + 4, best[2] * 8 + 4)
+    pathfind_to(d[1], d[2])
+  end
+end)
+
+-- ===========================================================================
+-- "Advance the quest" — the context-aware guide bound to the L key. It knows the
+-- game, not just the room: in a dungeon it heads for the next thing worth taking
+-- (or the exit, once the dungeon is cleared or you lack what it takes to finish);
+-- on the overworld it heads for the next place the main story wants you.
+--
+-- The destinations come from researched data, not guesses:
+--   * DUNGEON_NAV[dungeon_id] — each dungeon's signature item, Big Key and boss
+--     rooms, from a thorough walkthrough cross-checked against the randomizer's
+--     room table and the disassembly's underworld-room list.
+--   * MILESTONE_AREA[milestone] — the overworld area each story step sends you to.
+-- The pathfinder only navigates within the current room, and dungeon room ids
+-- stack floors in one grid, so a cross-room heading is a rough hint, not a path:
+-- the guide names the goal and points you the right way, guiding precisely only
+-- once you are in the room the target sits in.
+-- ===========================================================================
+local nav_say = function(text)
+  say(text, { priority = "navigation", category = "on-demand" })
+end
+
+-- Milestone index -> the overworld area its destination sits in. The area byte
+-- carries the +0x40 Dark World offset, so it doubles as the world marker. From
+-- the Archipelago randomizer entrance table, cross-checked against the
+-- disassembly's overworld-area names (both agree on every value).
+local MILESTONE_AREA = {
+  [1]  = 0x1B, -- Hyrule Castle (reach uncle, free Zelda)
+  [2]  = 0x13, -- Sanctuary
+  [3]  = 0x1E, -- Eastern Palace
+  [4]  = 0x30, -- Desert Palace
+  [5]  = 0x03, -- Tower of Hera (west Death Mountain)
+  [6]  = 0x00, -- Master Sword pedestal (Lost Woods)
+  [7]  = 0x1B, -- Hyrule Castle Tower (Agahnim)
+  [8]  = 0x5E, -- Palace of Darkness
+  [9]  = 0x7B, -- Swamp Palace
+  [10] = 0x40, -- Skull Woods
+  [11] = 0x58, -- Thieves' Town
+  [12] = 0x75, -- Ice Palace
+  [13] = 0x70, -- Misery Mire
+  [14] = 0x47, -- Turtle Rock
+  [15] = 0x43, -- Ganon's Tower
+}
+
+-- Compass heading from one overworld area to another on the 8-wide area grid. An
+-- area byte's low three bits are the column, the next three the row; the 0x40 bit
+-- is Light vs Dark world. Returns a direction word (nil if already in the target
+-- cell) and whether the destination lies in the other world.
+local function area_heading(from_area, to_area)
+  local fc, fr = from_area & 7, (from_area >> 3) & 7
+  local tc, tr = to_area & 7, (to_area >> 3) & 7
+  local other_world = (from_area & 0x40) ~= (to_area & 0x40)
+  if fc == tc and fr == tr then return nil, other_world end
+  return direction(tc - fc, tr - fr), other_world
+end
+
+-- Per-dungeon navigation data, keyed by $040C dungeon id. The canonical spine of
+-- a dungeon is: fetch its signature item, then the Big Key, then beat the boss.
+-- Each entry gives how to tell the signature item is in hand (an inventory read),
+-- the Big Key bit for this dungeon (in the $366/$367 big-key bitfields), and the
+-- room ids of the item, the Big Key, the boss, and the entrance. Room ids are the
+-- $00A0 value; all boss/entrance/chest room ids are confirmed against the
+-- randomizer chest table and the disassembly's underworld-room list. Small keys,
+-- map and compass are deliberately not tracked — they are not what a player is
+-- steered toward, and pot/enemy-drop keys have no stable room id.
+local DUNGEON_NAV = {
+  [0x04] = { name = "Eastern Palace",     item = "the Bow",
+             have = function() return mem.u8(0x7EF340) >= 1 end,
+             item_room = 0xA9, bk_byte = 0x7EF367, bk_bit = 0x20, bk_room = 0xB8,
+             boss_room = 0xC8, entrance_room = 0xC9 },
+  [0x06] = { name = "Desert Palace",      item = "the Power Glove",
+             have = function() return mem.u8(0x7EF354) >= 1 end,
+             item_room = 0x73, bk_byte = 0x7EF367, bk_bit = 0x10, bk_room = 0x75,
+             boss_room = 0x33, entrance_room = 0x84 },
+  [0x14] = { name = "Tower of Hera",      item = "the Moon Pearl",
+             have = function() return mem.u8(0x7EF357) >= 1 end,
+             item_room = 0x27, bk_byte = 0x7EF366, bk_bit = 0x20, bk_room = 0x87,
+             boss_room = 0x07, entrance_room = 0x77 },
+  [0x0C] = { name = "Palace of Darkness", item = "the Magic Hammer",
+             have = function() return mem.u8(0x7EF34B) >= 1 end,
+             item_room = 0x1A, bk_byte = 0x7EF367, bk_bit = 0x02, bk_room = 0x3A,
+             boss_room = 0x5A, entrance_room = 0x4A },
+  [0x0A] = { name = "Swamp Palace",       item = "the Hookshot",
+             have = function() return mem.u8(0x7EF342) >= 1 end,
+             item_room = 0x36, bk_byte = 0x7EF367, bk_bit = 0x04, bk_room = 0x35,
+             boss_room = 0x06, entrance_room = 0x28 },
+  [0x10] = { name = "Skull Woods",        item = "the Fire Rod",
+             have = function() return mem.u8(0x7EF345) >= 1 end,
+             item_room = 0x58, bk_byte = 0x7EF366, bk_bit = 0x80, bk_room = 0x57,
+             boss_room = 0x29, entrance_room = nil }, -- three overworld entrances
+  [0x16] = { name = "Thieves' Town",      item = "the Titan's Mitt",
+             have = function() return mem.u8(0x7EF354) >= 2 end,
+             item_room = 0x44, bk_byte = 0x7EF366, bk_bit = 0x10, bk_room = 0xDB,
+             boss_room = 0xAC, entrance_room = 0xDB },
+  [0x12] = { name = "Ice Palace",         item = "the Blue Mail",
+             have = function() return mem.u8(0x7EF35B) >= 1 end,
+             item_room = 0x9E, bk_byte = 0x7EF366, bk_bit = 0x40, bk_room = 0x1F,
+             boss_room = 0xDE, entrance_room = 0x0E },
+  [0x0E] = { name = "Misery Mire",        item = "the Cane of Somaria",
+             have = function() return mem.u8(0x7EF350) >= 1 end,
+             item_room = 0xC3, bk_byte = 0x7EF367, bk_bit = 0x01, bk_room = 0xD1,
+             boss_room = 0x90, entrance_room = 0x98 },
+  [0x18] = { name = "Turtle Rock",        item = "the Mirror Shield",
+             have = function() return mem.u8(0x7EF35A) >= 3 end,
+             item_room = 0x24, bk_byte = 0x7EF366, bk_bit = 0x08, bk_room = 0x14,
+             boss_room = 0xA4, entrance_room = 0xD6 },
+}
+
+-- The door/passage tile in the current window best aligned with a room-grid
+-- heading (ddx east, ddy south), tie-broken toward the nearer one. With no
+-- heading it is just the nearest door. Used to leave a room in roughly the right
+-- direction when the goal is in another room the local pathfinder cannot reach.
+local function door_toward(s, ddx, ddy)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local best, best_score
+  for y = 0, 63 do
+    for x = 0, 63 do
+      local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
+      if attr and attr >= 0x30 and attr <= 0x37 then
+        local rx, ry = x - ltx, y - lty
+        local dist = math.abs(rx) + math.abs(ry)
+        local score = (ddx == 0 and ddy == 0) and -dist or (rx * ddx + ry * ddy - dist * 0.01)
+        if best_score == nil or score > best_score then
+          best_score, best = score, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+        end
+      end
+    end
+  end
+  return best
+end
+
+-- Route toward a target room, given a spoken label for what is there. In the
+-- room already: guide to a loose item if one is visible, else to a door, and say
+-- it is here. In another room: name a rough heading (dungeon rooms are a 16-wide
+-- grid, id low nibble = column, high nibble = row) and head out the best-aligned
+-- door. Cross-floor headings are approximate, so the wording stays soft.
+local function route_to_room(s, target_room, label)
+  if target_room == nil then return false end
+  if s.dungeon_room == target_room then
+    local it = nearest_item_sprite(s)
+    local d = it or nearest_door_tile(s)
+    if it then pathfind_to(it[1], it[2]) elseif d then pathfind_to(d[1], d[2]) end
+    nav_say(label .. " It's in this room.")
+    return true
+  end
+  local ddx = (target_room & 0x0F) - (s.dungeon_room & 0x0F)
+  local ddy = (target_room >> 4) - (s.dungeon_room >> 4)
+  local d = door_toward(s, ddx, ddy)
+  if d then pathfind_to(d[1], d[2]) end
+  nav_say(string.format("%s Head roughly %s.", label, direction(ddx, ddy)))
+  return true
+end
+
+-- In a dungeon: cleared -> the exit; otherwise the next canonical target — the
+-- signature item, then the Big Key, then the boss.
+local function advance_dungeon(s, v)
+  local nav = DUNGEON_NAV[s.dungeon_id]
+  local done = DUNGEON_DONE[s.dungeon_id]
+  local cleared = (done and v and done(v)) or (nav and room_boss_beaten(nav.boss_room))
+  if cleared then
+    if not route_to_room(s, nav and nav.entrance_room, "Dungeon cleared. Heading for the exit.") then
+      local d = nearest_door_tile(s)
+      if d then pathfind_to(d[1], d[2]) end
+      nav_say("Dungeon cleared. Find the stairs out.")
+    end
+    return
+  end
+  if nav == nil then
+    -- No canonical spine for this place (sewer, castle, the towers): keep the
+    -- player moving — a loose item in the room, else into unexplored ground.
+    local it = nearest_item_sprite(s)
+    if it then pathfind_to(it[1], it[2]); nav_say("Guiding to an item in this room."); return end
+    local tx, ty = nearest_unexplored(s)
+    if tx then pathfind_to(tx * 8 + 4, ty * 8 + 4); nav_say("Guiding you deeper into the dungeon.")
+    else
+      local d = nearest_door_tile(s)
+      if d then pathfind_to(d[1], d[2]) end
+      nav_say("Heading for the next door.")
+    end
+    return
+  end
+  -- The canonical spine: signature item, then Big Key, then boss.
+  if not nav.have() then
+    route_to_room(s, nav.item_room, "Next: " .. nav.item .. ".")
+  elseif (mem.u8(nav.bk_byte) & nav.bk_bit) == 0 then
+    route_to_room(s, nav.bk_room, "Next: the Big Key.")
+  else
+    route_to_room(s, nav.boss_room, "Head for the boss.")
+  end
+end
+
+-- On the overworld: head for the current story milestone's destination — a
+-- compass heading across the area grid toward it, and a note when it is in the
+-- other world. If already in the target area, point at finding the entrance.
+local function advance_overworld(s, v)
+  if v == nil then nav_say("No game state yet."); return end
+  local idx, m = current_milestone(v)
+  local area = MILESTONE_AREA[idx]
+  if area == nil then
+    nav_say(string.format("Next: %s. %s", m.goal, m.hint))
+    return
+  end
+  local dir, other_world = area_heading(s.ow_screen, area)
+  local world_note = ""
+  if other_world then
+    world_note = (area & 0x40) ~= 0 and " It's in the Dark World." or " It's in the Light World."
+  end
+  if dir == nil then
+    nav_say(string.format("You're in the right area for %s. Find the entrance.%s", m.goal, world_note))
+  else
+    nav_say(string.format("Head %s toward %s.%s", dir, m.goal, world_note))
+  end
+end
+
+on_command("advance", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    nav_say("Not in play.")
+    return
+  end
+  local v = read_progress()
+  if s.module == 0x07 then
+    advance_dungeon(s, v)
+  else
+    advance_overworld(s, v)
   end
 end)
 
