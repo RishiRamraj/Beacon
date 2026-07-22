@@ -36,8 +36,10 @@ use std::time::Duration;
 use beacon_output::{Intent, Priority};
 use mlua::{Function, Lua, Table, Value};
 
+use std::collections::BTreeMap;
+
 use crate::canvas::{self, Canvas};
-use crate::{CommandDecl, Error, Manifest, Plugin, PluginSpec};
+use crate::{BeaconState, CommandDecl, Error, Manifest, Plugin, PluginSpec};
 
 /// Work RAM is 128 KiB: bank $7E is the first 64 KiB, $7F the second.
 const WRAM_LEN: usize = 128 * 1024;
@@ -48,6 +50,9 @@ use crate::wram_offset;
 type Ram = Rc<RefCell<Vec<u8>>>;
 /// Where `say` deposits proposed intents until the host drains them.
 type Intents = Rc<RefCell<Vec<Intent>>>;
+/// The plugin's live spatial-audio beacons, keyed by id. Ordered so the host
+/// reads them deterministically.
+type Beacons = Rc<RefCell<BTreeMap<String, BeaconState>>>;
 
 /// A loaded Lua plugin.
 pub struct LuaPlugin {
@@ -58,6 +63,7 @@ pub struct LuaPlugin {
     commands: Vec<CommandDecl>,
     canvas: Canvas,
     has_draw: bool,
+    beacons: Beacons,
 }
 
 impl LuaPlugin {
@@ -82,6 +88,8 @@ impl LuaPlugin {
         install_watch(&lua, &spec.manifest)?;
         install_canvas(&lua, &canvas)?;
         install_rom(&lua, rom)?;
+        let beacons: Beacons = Rc::new(RefCell::new(BTreeMap::new()));
+        install_beacon(&lua, &beacons)?;
 
         // Running the chunk defines on_frame and registers commands. A syntax or
         // load-time error is a broken plugin; report it with the chunk name so
@@ -102,6 +110,7 @@ impl LuaPlugin {
             commands: spec.manifest.commands.clone(),
             canvas,
             has_draw,
+            beacons,
         })
     }
 
@@ -191,6 +200,10 @@ impl Plugin for LuaPlugin {
 
         self.canvas.copy_into(out);
         Some((canvas::WIDTH, canvas::HEIGHT))
+    }
+
+    fn beacons(&self) -> Vec<BeaconState> {
+        self.beacons.borrow().values().cloned().collect()
     }
 
     fn eval(&mut self, code: &str, ram: &[u8]) -> Result<String, String> {
@@ -486,6 +499,51 @@ fn install_rom(lua: &Lua, rom: Rc<Vec<u8>>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Installs the `beacon` table: positioned spatial-audio tones.
+///
+/// `beacon.set(id, opts)` adds or updates a tone; `beacon.clear(id)` removes it.
+/// A plugin re-sets its beacons each frame with fresh offsets as things move; the
+/// host reads the live set and renders the sound. `opts`: `x`/`y` (rightward and
+/// forward offset, for pan direction), `pitch` (default 1), `volume` (0-1,
+/// default 1 — the plugin sets this from distance).
+fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
+    let table = lua.create_table()?;
+
+    let store = beacons.clone();
+    table.set(
+        "set",
+        lua.create_function(move |_, (id, opts): (String, Table)| {
+            let dx = opts.get::<Option<f64>>("x")?.unwrap_or(0.0) as f32;
+            let dy = opts.get::<Option<f64>>("y")?.unwrap_or(0.0) as f32;
+            let pitch = opts.get::<Option<f64>>("pitch")?.unwrap_or(1.0) as f32;
+            let volume = opts.get::<Option<f64>>("volume")?.unwrap_or(1.0) as f32;
+            store.borrow_mut().insert(
+                id.clone(),
+                BeaconState {
+                    id,
+                    dx,
+                    dy,
+                    pitch,
+                    volume: volume.clamp(0.0, 1.0),
+                },
+            );
+            Ok(())
+        })?,
+    )?;
+
+    let store = beacons.clone();
+    table.set(
+        "clear",
+        lua.create_function(move |_, id: String| {
+            store.borrow_mut().remove(&id);
+            Ok(())
+        })?,
+    )?;
+
+    lua.globals().set("beacon", table)?;
+    Ok(())
+}
+
 /// Exposes the manifest's named watches to Lua as a `watch` table.
 fn install_watch(lua: &Lua, manifest: &Manifest) -> Result<(), Error> {
     let watch = lua.create_table()?;
@@ -683,6 +741,37 @@ mod tests {
             vec![1, 2, 3],
         );
         assert_eq!(p.on_frame(&vec![0u8; WRAM_LEN], 0)[0].text, "nil");
+    }
+
+    #[test]
+    fn beacons_are_set_cleared_and_read_back() {
+        let mut p = plugin_from(
+            r#"
+            function on_frame(frame)
+              if frame == 0 then
+                beacon.set("enemy", { x = 40, y = -10, volume = 0.5 })
+                beacon.set("goal", { x = -8, pitch = 2.0 })
+              else
+                beacon.clear("enemy")
+              end
+            end
+            "#,
+        );
+        p.on_frame(&vec![0u8; WRAM_LEN], 0);
+        let mut b = p.beacons();
+        b.sort_by(|a, c| a.id.cmp(&c.id));
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].id, "enemy");
+        assert_eq!(b[0].dx, 40.0);
+        assert_eq!(b[0].volume, 0.5);
+        assert_eq!(b[1].id, "goal");
+        assert_eq!(b[1].pitch, 2.0);
+        assert_eq!(b[1].volume, 1.0); // default
+
+        p.on_frame(&vec![0u8; WRAM_LEN], 1);
+        let b = p.beacons();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].id, "goal"); // enemy cleared
     }
 
     #[test]

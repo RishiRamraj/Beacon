@@ -137,6 +137,9 @@ local function proximity(dist)
   else return "in the distance" end
 end
 
+-- Range within which the nearest enemy gets a spatial-audio beacon (pixels).
+local BEACON_RANGE = 224
+
 -- The proximity ring an enemy is in, smaller being nearer, or nil past "nearby".
 -- Used to speak only when an enemy crosses into a closer ring.
 local function enemy_ring(dist)
@@ -344,6 +347,22 @@ function on_frame(frame)
       )
     end
     nearest_enemy_ring = ring
+
+    -- A spatial-audio beacon on the nearest enemy: it pans toward the enemy and
+    -- grows louder as it closes, a continuous sense of where the threat is to
+    -- complement the spoken cue. Cleared when nothing is in range.
+    if nearest and nearest.dist < BEACON_RANGE then
+      beacon.set("enemy", {
+        x = nearest.dx,
+        y = nearest.dy,
+        volume = 1 - nearest.dist / BEACON_RANGE,
+      })
+    else
+      beacon.clear("enemy")
+    end
+  else
+    nearest_enemy_ring = nil
+    beacon.clear("enemy") -- no tone in menus or transitions
   end
 end
 

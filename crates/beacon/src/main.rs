@@ -3,6 +3,7 @@
 mod action;
 mod app;
 mod audio;
+mod beacons;
 mod config_modal;
 mod image;
 mod input;

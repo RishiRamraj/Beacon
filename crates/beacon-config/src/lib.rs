@@ -27,6 +27,7 @@ pub struct Settings {
     pub speech: Speech,
     pub arbiter: ArbiterSettings,
     pub braille: Braille,
+    pub beacons: Beacons,
     /// Key bindings. Serialized as `[keys]`; the field is `keymap` to avoid
     /// colliding with [`Settings::keys`], the list of scalar setting names.
     #[serde(rename = "keys")]
@@ -104,6 +105,26 @@ impl Default for Braille {
         Braille {
             enabled: false,
             verbosity: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Beacons {
+    /// Spatial-audio beacons: positioned tones a plugin places so the player
+    /// hears where things are. On by default, but easily silenced.
+    pub enabled: bool,
+    /// Master loudness for beacons, 0 to 1. Deliberately modest so they sit under
+    /// the game audio rather than over it.
+    pub volume: f32,
+}
+
+impl Default for Beacons {
+    fn default() -> Self {
+        Beacons {
+            enabled: true,
+            volume: 0.3,
         }
     }
 }
@@ -297,6 +318,8 @@ impl Settings {
             "arbiter.bucket_refill_per_sec",
             "braille.enabled",
             "braille.verbosity",
+            "beacons.enabled",
+            "beacons.volume",
         ]
     }
 
@@ -314,6 +337,8 @@ impl Settings {
             "arbiter.bucket_refill_per_sec" => self.arbiter.bucket_refill_per_sec.to_string(),
             "braille.enabled" => self.braille.enabled.to_string(),
             "braille.verbosity" => self.braille.verbosity.to_string(),
+            "beacons.enabled" => self.beacons.enabled.to_string(),
+            "beacons.volume" => self.beacons.volume.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
         })
     }
@@ -352,6 +377,8 @@ impl Settings {
             }
             "braille.enabled" => self.braille.enabled = parse(key, value)?,
             "braille.verbosity" => self.braille.verbosity = parse::<u8>(key, value)?.min(3),
+            "beacons.enabled" => self.beacons.enabled = parse(key, value)?,
+            "beacons.volume" => self.beacons.volume = parse::<f32>(key, value)?.clamp(0.0, 1.0),
             other => return Err(Error::UnknownKey(other.to_string())),
         }
         Ok(())

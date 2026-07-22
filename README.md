@@ -155,6 +155,10 @@ rate = 60          # -100 slowest, 100 fastest
 [arbiter]
 verbosity = 2      # 0 critical only, 3 everything
 max_per_frame = 2
+
+[beacons]
+enabled = true     # spatial-audio tones for where things are
+volume = 0.3       # 0 to 1, sits under the game audio
 ```
 
 ## Plugins

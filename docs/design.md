@@ -713,6 +713,12 @@ unchanged.
   ([ADR 0020](decisions/0020-rom-access-and-game-text.md)): plugins gained read-only `rom`
   access, and the alttp plugin decodes ALttP's dialogue table from the ROM at load, speaking a
   message when its box opens (dialogue and menus alike) with a `read_text` command to re-read.
+  **Spatial-audio beacons** have landed too
+  ([ADR 0021](decisions/0021-spatial-audio-beacons.md)): a plugin places positioned tones
+  (`beacon.set`/`clear`) and the host renders them with constant-power stereo panning, mixed into
+  the game audio. The alttp plugin puts a tone on the nearest enemy that pans toward it and grows
+  louder as it closes. This is the simple first step — HRTF (Steam Audio) is a later upgrade
+  behind the same interface, per the start-simple-and-iterate approach.
 - **Phase 4 — proof of generality.** A second SNES game plugin, chosen specifically to
   stress the plugin API against something structurally different from ALttP. Packaging,
   documentation, ROM hash database.

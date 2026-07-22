@@ -260,6 +260,30 @@ binding works.
 `log("info", "loaded 42 rooms")` or `log("something happened")`. Routed to stderr,
 never to the stdout JSON stream, so it is safe to log freely.
 
+### `beacon` — spatial-audio cues (optional)
+
+Place a positioned tone the host pans and attenuates, so the player hears *where*
+something is — an enemy, a destination — continuously, without words.
+
+- `beacon.set(id, opts)` — add or update a beacon. `opts`: `x`/`y` (rightward and
+  forward offset; only their ratio matters, for left/right pan), `volume` (0-1,
+  which **you** set from distance), `pitch` (default 1). Re-set each frame with
+  fresh offsets as things move.
+- `beacon.clear(id)` — remove a beacon (e.g. when nothing is in range).
+
+```lua
+if enemy and enemy.dist < RANGE then
+  beacon.set("enemy", { x = enemy.dx, y = enemy.dy, volume = 1 - enemy.dist / RANGE })
+else
+  beacon.clear("enemy")
+end
+```
+
+The rendering is stereo panning for now (front and back sound alike — pair it with
+a spoken cue for that axis); an HRTF renderer can replace it behind the same API.
+Players control it with `beacons.enabled` and `beacons.volume`. See
+[ADR 0021](decisions/0021-spatial-audio-beacons.md).
+
 ### `on_draw(canvas)` — map mode (optional)
 
 Define `on_draw` and the player can toggle a **map view** (default key `m`) showing

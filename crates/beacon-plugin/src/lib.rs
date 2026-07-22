@@ -83,6 +83,32 @@ pub trait Plugin {
     fn eval(&mut self, _code: &str, _ram: &[u8]) -> Result<String, String> {
         Err("this plugin does not support eval".to_string())
     }
+
+    /// The plugin's active spatial-audio beacons — positioned tones the host
+    /// pans and attenuates so the player hears *where* something is. The plugin
+    /// keeps these current (re-setting each frame as things move); the host reads
+    /// them and mixes the sound.
+    fn beacons(&self) -> Vec<BeaconState> {
+        Vec::new()
+    }
+}
+
+/// A positioned tone the host renders. Offsets are the plugin's units, used only
+/// for the pan *direction* (their ratio), so the host makes no assumption about a
+/// game's scale; the plugin sets `volume` from distance in units it understands.
+#[derive(Debug, Clone)]
+pub struct BeaconState {
+    /// Identity, so the host can keep the tone's oscillator continuous between
+    /// frames and drop it when the plugin clears it.
+    pub id: String,
+    /// Rightward and forward offset from the player. Only `dx/dy`'s ratio matters
+    /// (for left/right pan); stereo cannot place front from back.
+    pub dx: f32,
+    pub dy: f32,
+    /// Base-frequency multiplier, 1.0 for the default tone.
+    pub pitch: f32,
+    /// Loudness, 0 to 1, set by the plugin (e.g. from distance).
+    pub volume: f32,
 }
 
 /// A bindable command a plugin declares.
