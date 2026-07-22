@@ -190,6 +190,10 @@ local BEACON_KINDS = {
   minor = { pitch = 0.5, range = 24 },
 }
 
+-- How much a wall between the player and a source dims its beacon: muffled, not
+-- silenced, so an occluded threat still registers.
+local BEACON_OCCLUDED_SCALE = 0.35
+
 -- Which beacon class a sprite belongs to. Enemies first (a damageable sprite is a
 -- threat whatever the type table calls it), then the interactable classes, and
 -- everything else is incidental scenery.
@@ -286,6 +290,114 @@ local function current_dialog_text()
   local text = dialog[did]
   if text and text ~= "" then return text end
   return nil
+end
+
+-- The map's collision colours. A tile attribute describes what a tile *is* for
+-- collision; only a few classes are worth drawing, and the rest is open floor,
+-- left as background. Ported from the tile classes in alttp-navi's map_renderer.
+local TILE_COLOR = {}
+do
+  local function fill(color, ids)
+    for _, a in ipairs(ids) do TILE_COLOR[a] = color end
+  end
+  fill(0x5A6478, { 0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F }) -- wall / cliff
+  fill(0x2C6AC0, { 0x08, 0x09, 0x4B })                                           -- water
+  fill(0x0A0E16, { 0x20 })                                                       -- hole / pit
+  fill(0x50A070, { 0x1C, 0x1D, 0x1E, 0x1F, 0x22, 0x28, 0x29, 0x2A, 0x2B })       -- ledge / stairs
+  fill(0xE0C040, { 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 })             -- door / passage
+  fill(0x9C6B3C, { 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56 })                   -- solid object
+end
+-- Indoors, attribute 0x04 (and the rest of the indoor-wall set, already walls
+-- above) is a wall; outdoors the same value is diggable ground. So it is folded
+-- in per-context, not into the shared table.
+local INDOOR_WALL_04 = 0x5A6478
+
+-- Walls and cliffs block line of sight; water, pits, doors, and floors do not.
+-- (Indoors, 0x04 is also a wall — handled per-context in sight_blocked.)
+local SIGHT_BLOCKERS = {}
+for _, a in ipairs({ 0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F }) do
+  SIGHT_BLOCKERS[a] = true
+end
+
+-- Dungeon collision map. $7F2000 holds a 64x64 grid, one byte per 8-pixel tile —
+-- live WRAM, so the room's real shape. The lower level of a two-level room lives
+-- 0x1000 further on.
+local DUNGEON_TILE_TABLE = 0x7F2000
+local LOWER_LEVEL = 0x7E00EE
+local OW_TILE_TABLE = 0x7E2000 -- overworld map16 indices, live WRAM
+
+-- Overworld collision map. The visible tiles are map16 indices in the $7E2000
+-- WRAM table; each index resolves through two ROM tables to a collision
+-- attribute. Loaded once here (the ROM does not change); ported from alttp-navi's
+-- rom parser. The whole-ROM `snes_to_rom` mapping is the one already used above
+-- for dialogue.
+local OW_MAP16_TO_MAP8 = rom.slice(snes_to_rom(0x8F8000), 3752 * 4 * 2) -- uint16 LE
+local OW_MAP8_TO_ATTR = rom.slice(snes_to_rom(0x8E9459), 512)           -- uint8
+
+-- Resolve a map16 tile index to its collision attribute. `x` is in 8-pixel tile
+-- units and `y` in pixels; their low bits pick which of the map16's four 8x8
+-- sub-tiles applies. Global so it can be checked with eval_lua against the
+-- reference decoder, like `dialog`.
+function ow_tile_attr(map16_index, x, y)
+  if #OW_MAP16_TO_MAP8 == 0 or #OW_MAP8_TO_ATTR == 0 then return 0 end
+  local t = (map16_index * 4) | ((y & 8) >> 2) | (x & 1)
+  local i = t * 2
+  if i < 0 or i + 2 > #OW_MAP16_TO_MAP8 then return 0 end
+  local map8 = string.byte(OW_MAP16_TO_MAP8, i + 1) | (string.byte(OW_MAP16_TO_MAP8, i + 2) << 8)
+  local idx = map8 & 0x1FF
+  if idx + 1 > #OW_MAP8_TO_ATTR then return 0 end
+  local rv = string.byte(OW_MAP8_TO_ATTR, idx + 1)
+  if rv >= 0x10 and rv < 0x1C then
+    rv = rv | ((map8 >> 14) & 1)
+  end
+  return rv
+end
+
+-- The collision attribute of the tile containing world pixel (px, py) in the
+-- current area, or nil if it cannot be read. Dungeons index the WRAM grid
+-- directly; the overworld goes through the same scroll-offset + ROM decode the
+-- map render uses.
+local function tile_attr_at(s, px, py)
+  if s.module == 0x07 then
+    local base = DUNGEON_TILE_TABLE + (mem.u8(LOWER_LEVEL) == 1 and 0x1000 or 0)
+    return mem.u8(base + ((py >> 3) & 63) * 64 + ((px >> 3) & 63))
+  elseif s.module == 0x09 and #OW_MAP16_TO_MAP8 > 0 then
+    local mask_y, mask_x = mem.u16(0x7E070A), mem.u16(0x7E070E)
+    if mask_x == 0 or mask_y == 0 then return nil end
+    local ow_tx = px >> 3
+    local t = (((py - mem.u16(0x7E0708)) & mask_y) * 8) | ((ow_tx - mem.u16(0x7E070C)) & mask_x)
+    local byte_off = (t >> 1) * 2
+    local lo, hi = mem.u8(OW_TILE_TABLE + byte_off), mem.u8(OW_TILE_TABLE + byte_off + 1)
+    if lo == nil or hi == nil then return nil end
+    return ow_tile_attr(lo | (hi << 8), ow_tx, py)
+  end
+  return nil
+end
+
+-- Whether a wall lies on the straight line between two world points, so a sprite
+-- behind it is out of sight. Walks the 8-pixel tiles the segment crosses
+-- (Bresenham), skipping the two endpoint tiles — Link's own tile and the
+-- sprite's never count as occluders. Unknown tiles do not block.
+local function sight_blocked(s, x0, y0, x1, y1)
+  local indoors = (s.module == 0x07)
+  local tx0, ty0, tx1, ty1 = x0 >> 3, y0 >> 3, x1 >> 3, y1 >> 3
+  local dx, dy = math.abs(tx1 - tx0), -math.abs(ty1 - ty0)
+  local sx = tx0 < tx1 and 1 or -1
+  local sy = ty0 < ty1 and 1 or -1
+  local err = dx + dy
+  local cx, cy = tx0, ty0
+  while not (cx == tx1 and cy == ty1) do
+    local e2 = 2 * err
+    if e2 >= dy then err = err + dy; cx = cx + sx end
+    if e2 <= dx then err = err + dx; cy = cy + sy end
+    if not (cx == tx1 and cy == ty1) then
+      local attr = tile_attr_at(s, cx << 3, cy << 3)
+      if attr and (SIGHT_BLOCKERS[attr] or (indoors and attr == 0x04)) then
+        return true
+      end
+    end
+  end
+  return false
 end
 
 function on_frame(frame)
@@ -391,7 +503,11 @@ function on_frame(frame)
     end
     for i = 0, 15 do
       local sp = active[i]
+      -- On screen, a threat, and not hidden behind a wall: a sprite the player
+      -- could actually see. Occluded enemies stay unannounced until they clear
+      -- the wall, so the callout matches what is really visible.
       local visible = sp ~= nil and is_enemy(sp) and on_screen(sp.dx, sp.dy)
+        and not sight_blocked(now, now.x, now.y, sp.x, sp.y)
       if visible and not announced[i] then
         say(
           string.format("%s, %s.", enemy_name(sp), direction(sp.dx, sp.dy)),
@@ -418,7 +534,13 @@ function on_frame(frame)
         -- Quadratic falloff: quieter at a distance, ramping up steeply as the
         -- source closes, rather than a flat linear fade.
         local t = 1 - sp.dist / kind.range
-        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = t * t })
+        local vol = t * t
+        -- Behind a wall: muffled rather than silent, so a close but occluded
+        -- source still registers without sounding like it is out in the open.
+        if sight_blocked(now, now.x, now.y, sp.x, sp.y) then
+          vol = vol * BEACON_OCCLUDED_SCALE
+        end
+        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol })
       else
         beacon.clear(name)
       end
@@ -510,59 +632,6 @@ on_command("coordinates", function()
     say("Not in play.", { priority = "navigation", category = "on-demand" })
   end
 end)
-
--- The map's collision colours. A tile attribute describes what a tile *is* for
--- collision; only a few classes are worth drawing, and the rest is open floor,
--- left as background. Ported from the tile classes in alttp-navi's map_renderer.
-local TILE_COLOR = {}
-do
-  local function fill(color, ids)
-    for _, a in ipairs(ids) do TILE_COLOR[a] = color end
-  end
-  fill(0x5A6478, { 0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F }) -- wall / cliff
-  fill(0x2C6AC0, { 0x08, 0x09, 0x4B })                                           -- water
-  fill(0x0A0E16, { 0x20 })                                                       -- hole / pit
-  fill(0x50A070, { 0x1C, 0x1D, 0x1E, 0x1F, 0x22, 0x28, 0x29, 0x2A, 0x2B })       -- ledge / stairs
-  fill(0xE0C040, { 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 })             -- door / passage
-  fill(0x9C6B3C, { 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56 })                   -- solid object
-end
--- Indoors, attribute 0x04 (and the rest of the indoor-wall set, already walls
--- above) is a wall; outdoors the same value is diggable ground. So it is folded
--- in per-context, not into the shared table.
-local INDOOR_WALL_04 = 0x5A6478
-
--- Dungeon collision map. $7F2000 holds a 64x64 grid, one byte per 8-pixel tile —
--- live WRAM, so the room's real shape. The lower level of a two-level room lives
--- 0x1000 further on.
-local DUNGEON_TILE_TABLE = 0x7F2000
-local LOWER_LEVEL = 0x7E00EE
-
--- Overworld collision map. The visible tiles are map16 indices in the $7E2000
--- WRAM table; each index resolves through two ROM tables to a collision
--- attribute. Loaded once here (the ROM does not change); ported from alttp-navi's
--- rom parser. The whole-ROM `snes_to_rom` mapping is the one already used above
--- for dialogue.
-local OW_MAP16_TO_MAP8 = rom.slice(snes_to_rom(0x8F8000), 3752 * 4 * 2) -- uint16 LE
-local OW_MAP8_TO_ATTR = rom.slice(snes_to_rom(0x8E9459), 512)           -- uint8
-
--- Resolve a map16 tile index to its collision attribute. `x` is in 8-pixel tile
--- units and `y` in pixels; their low bits pick which of the map16's four 8x8
--- sub-tiles applies. Global so it can be checked with eval_lua against the
--- reference decoder, like `dialog`.
-function ow_tile_attr(map16_index, x, y)
-  if #OW_MAP16_TO_MAP8 == 0 or #OW_MAP8_TO_ATTR == 0 then return 0 end
-  local t = (map16_index * 4) | ((y & 8) >> 2) | (x & 1)
-  local i = t * 2
-  if i < 0 or i + 2 > #OW_MAP16_TO_MAP8 then return 0 end
-  local map8 = string.byte(OW_MAP16_TO_MAP8, i + 1) | (string.byte(OW_MAP16_TO_MAP8, i + 2) << 8)
-  local idx = map8 & 0x1FF
-  if idx + 1 > #OW_MAP8_TO_ATTR then return 0 end
-  local rv = string.byte(OW_MAP8_TO_ATTR, idx + 1)
-  if rv >= 0x10 and rv < 0x1C then
-    rv = rv | ((map8 >> 14) & 1)
-  end
-  return rv
-end
 
 -- Map mode: a schematic of what the plugin reads, for debugging and for sighted
 -- assistance. In a dungeon or on the overworld it draws the area's actual shape
