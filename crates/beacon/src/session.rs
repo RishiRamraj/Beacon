@@ -406,6 +406,11 @@ impl Session {
         }
     }
 
+    /// Whether the map is currently shown, so the window can size for it.
+    pub fn map_shown(&self) -> bool {
+        self.show_map
+    }
+
     /// The last rendered map pixels, for encoding by the MCP server.
     pub fn map_pixels(&self) -> &[u32] {
         &self.map_buffer
