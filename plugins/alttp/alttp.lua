@@ -511,10 +511,33 @@ on_command("coordinates", function()
   end
 end)
 
+-- Dungeon collision map. $7F2000 holds a 64x64 grid, one byte per 8-pixel tile,
+-- describing what each tile *is* for collision — walls, doors, water, pits. It is
+-- live WRAM, so it is the room's real shape, not a guess. Ported from alttp-navi's
+-- map_renderer. The lower level of a two-level room lives 0x1000 further on.
+local DUNGEON_TILE_TABLE = 0x7F2000
+local LOWER_LEVEL = 0x7E00EE
+
+-- Attribute id -> colour on the map. Anything absent is open floor, left as the
+-- background. Only used indoors, so the indoor-wall attributes (0x04 among them)
+-- are folded straight into the wall set.
+local DUNGEON_TILE_COLOR = {}
+do
+  local function fill(color, ids)
+    for _, a in ipairs(ids) do DUNGEON_TILE_COLOR[a] = color end
+  end
+  fill(0x5A6478, { 0x01, 0x02, 0x03, 0x04, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F }) -- wall
+  fill(0x2C6AC0, { 0x08, 0x09 })                                                        -- water
+  fill(0x0A0E16, { 0x20 })                                                              -- pit / hole
+  fill(0x50A070, { 0x1D, 0x1E, 0x1F, 0x22 })                                            -- stairs
+  fill(0xE0C040, { 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 })                    -- door
+end
+
 -- Map mode: a schematic of what the plugin reads, for debugging and for sighted
--- assistance. Not the game's own map — a picture of Link's state as this plugin
--- understands it. Integer math throughout (// is floor division) so coordinates
--- stay whole for the canvas.
+-- assistance. In a dungeon it draws the room's actual shape from the collision
+-- table; the overworld map (a ROM tile decode) is not read yet, so there it is
+-- just the position/sprite overlay. Integer math throughout (// is floor
+-- division) so coordinates stay whole for the canvas.
 function on_draw(canvas)
   local w, h = canvas.width, canvas.height
   canvas:clear(0x101828)
@@ -556,7 +579,29 @@ function on_draw(canvas)
   canvas:line(fx + fw, fy, fx + fw, fy + fw, 0x304058)
 
   if in_play(s) then
-    -- Sprites first, so Link's marker sits on top of them. Coloured by beacon
+    -- The room's real shape first, under everything else. A 64x64 tile grid maps
+    -- exactly onto the 512-pixel playfield the sprites are plotted in (64 tiles x
+    -- 8 px = 512), so walls and doors line up with the objects standing on them.
+    -- Dungeons only; the overworld needs a ROM decode that is not ported yet.
+    if s.module == 0x07 then
+      local base = DUNGEON_TILE_TABLE + (mem.u8(LOWER_LEVEL) == 1 and 0x1000 or 0)
+      local data = mem.slice(base, 4096)
+      if #data == 4096 then
+        for ty = 0, 63 do
+          for tx = 0, 63 do
+            local color = DUNGEON_TILE_COLOR[string.byte(data, ty * 64 + tx + 1)]
+            if color then
+              local x0 = fx + tx * fw // 64
+              local y0 = fy + ty * fw // 64
+              canvas:rect(x0, y0, (fx + (tx + 1) * fw // 64) - x0,
+                          (fy + (ty + 1) * fw // 64) - y0, color)
+            end
+          end
+        end
+      end
+    end
+
+    -- Sprites next, so Link's marker sits on top of them. Coloured by beacon
     -- class: enemies red, items yellow, people/switches green, scenery dim cyan.
     local class_col = {
       enemy = 0xF04040,
