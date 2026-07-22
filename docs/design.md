@@ -696,13 +696,15 @@ unchanged.
   and `eval_lua` runs a snippet in the plugin's environment against the current frame. With
   these the debug-mode tool surface is complete; the only deferred item is a socket transport
   for attaching to a live windowed session ([ADR 0018](decisions/0018-mcp-debug-server.md)).
-- **Phase 3 — navigation. _Begun._** The first slice has landed: an on-demand **scan** in the
-  alttp plugin that describes the nearest active sprites — objects and enemies from the
-  game's sprite table — by compass direction and rough distance, and draws them on the map
-  ([ADR 0019](decisions/0019-scan-nearest-first.md)). The sprite addresses were verified
-  against the running game through the MCP tools before being built on. Still ahead, on top of
-  that sprite reading: automatic proximity awareness (tuned with real players), spatial-audio
-  beacons and arrival tones, a destination menu, soft targeting, and pathfinding. **Start from
+- **Phase 3 — navigation. _Begun._** Two slices have landed on a verified sprite reading
+  ([ADR 0019](decisions/0019-scan-nearest-first.md)): an on-demand **scan** describing the
+  nearest active sprites by compass direction and rough distance (and drawing them on the map),
+  and **automatic enemy proximity** — the plugin speaks when the nearest enemy crosses into a
+  closer ring ("Enemy north, close"), hysteresis-gated so it announces on approach, not every
+  frame, and rate-limited by the arbiter. The sprite addresses were verified against the running
+  game through the MCP tools before being built on. Still ahead, on top of that same reading:
+  spatial-audio beacons and arrival tones, a destination menu, soft targeting, a sprite-type
+  naming table, and pathfinding. **Start from
   navi's existing spatial model** — the two-ring proximity zones and forward cone scan — and
   get it into community hands before building anything more ambitious. Pathfinding comes
   *after* real players report what the existing model actually fails at (§10.3). This is the

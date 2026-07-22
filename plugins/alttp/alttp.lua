@@ -78,6 +78,9 @@ local LOW_HEALTH_FRACTION = 0.3
 local prev = nil
 -- Latched so the warning fires on crossing the threshold, not every frame below.
 local low_health_warned = false
+-- The ring the nearest enemy was last in, so proximity speaks on approach rather
+-- than every frame. nil when no enemy is near.
+local nearest_enemy_ring = nil
 
 -- Sprite table: 16 slots of active objects and enemies. Addresses from the
 -- well-documented ALttP RAM map, verified against the running game. Each slot's
@@ -132,6 +135,15 @@ local function proximity(dist)
   elseif dist < 64 then return "close"
   elseif dist < 160 then return "nearby"
   else return "in the distance" end
+end
+
+-- The proximity ring an enemy is in, smaller being nearer, or nil past "nearby".
+-- Used to speak only when an enemy crosses into a closer ring.
+local function enemy_ring(dist)
+  if dist < 24 then return 0
+  elseif dist < 64 then return 1
+  elseif dist < 160 then return 2
+  else return nil end
 end
 
 function on_frame(frame)
@@ -212,6 +224,29 @@ function on_frame(frame)
         { priority = "navigation", category = "area", collapse_key = "area-change", distance = 0 }
       )
     end
+  end
+
+  -- Automatic enemy proximity. Hysteresis by ring, so it speaks when the nearest
+  -- enemy crosses into a closer ring, not every frame; it resets once none is
+  -- near, so a fresh approach speaks again. The thresholds are a starting point
+  -- for players to tune, and the arbiter rate-limits the "proximity" category
+  -- regardless. Interaction priority, so a low-verbosity player can silence it.
+  if in_play(now) then
+    local nearest = nil
+    for _, sp in ipairs(sprites()) do
+      if sp.hp ~= nil and sp.hp > 0 then
+        nearest = sp
+        break
+      end
+    end
+    local ring = nearest and enemy_ring(nearest.dist) or nil
+    if ring ~= nil and (nearest_enemy_ring == nil or ring < nearest_enemy_ring) then
+      say(
+        string.format("Enemy %s, %s.", direction(nearest.dx, nearest.dy), proximity(nearest.dist)),
+        { priority = "interaction", category = "proximity", rate_limit = "1500ms" }
+      )
+    end
+    nearest_enemy_ring = ring
   end
 end
 
