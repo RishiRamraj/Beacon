@@ -78,9 +78,9 @@ local LOW_HEALTH_FRACTION = 0.3
 local prev = nil
 -- Latched so the warning fires on crossing the threshold, not every frame below.
 local low_health_warned = false
--- The ring the nearest enemy was last in, so proximity speaks on approach rather
--- than every frame. nil when no enemy is near.
-local nearest_enemy_ring = nil
+-- Whether each sprite slot's enemy has already been announced since it entered
+-- the visible screen, so each entrance speaks once. Reset when it leaves.
+local announced = {}
 
 -- Sprite table: 16 slots of active objects and enemies. Addresses from the
 -- well-documented ALttP RAM map, verified against the running game. Each slot's
@@ -95,8 +95,17 @@ local SPRITE = {
   hp    = 0x7E0E50,
 }
 
--- Reads the active sprites, nearest first, each as a table of absolute position,
--- offset from Link, Manhattan distance, type, and health.
+-- Sprite type id -> name, and which type ids are enemies. Generated from the
+-- alttp-navi tables (SPRITE_TYPE_NAMES + ENEMY_NAMES); do not hand-edit.
+local SPRITE_NAMES = { [1]="Raven", [2]="Vulture", [8]="Octorok", [9]="Octorok", [10]="Cucco", [12]="Buzzblob", [13]="Snapdragon", [14]="Octoballoon", [15]="Octoballoon baby", [16]="Hinox", [17]="Moblin", [18]="Mini Helmasaur", [19]="Thieves' Town Grate", [21]="Antifairy", [22]="Elder", [23]="Hylian villager", [24]="Mini Moldorm", [25]="Poe", [26]="Leever", [27]="Arrow target", [28]="Statue pullable", [30]="Crystal switch", [31]="Sick Kid", [32]="Sluggula", [33]="Water switch", [34]="Ropa", [35]="Red Bari", [36]="Blue Bari", [37]="Talking tree", [38]="Hardhat Beetle", [39]="Deadrock", [40]="Storyteller", [41]="Zora", [42]="Weathervane", [43]="Pikit", [44]="Maiden at sanctuary", [45]="Apple tree", [47]="Master Sword", [48]="Devalant (non-shooter)", [49]="Devalant (shooter)", [51]="Rupee crab", [53]="Toppo", [55]="Popo", [56]="Popo (2)", [57]="Cane of Byrna spark", [59]="Hylian guard", [61]="Bush hoarder", [62]="Bombable guard", [63]="Whirlpool", [64]="open chest", [65]="Green Soldier", [66]="Blue Soldier", [67]="Red Soldier", [68]="Red Soldier", [69]="Blue Archer", [70]="Green Archer", [71]="Blue Soldier", [72]="Red Soldier", [73]="Red Bomb Soldier", [74]="Green Bomb Soldier", [75]="lantern", [83]="Armos", [84]="Armos Knight", [85]="Lanmola", [86]="Fireball Zora", [87]="Walking Zora", [88]="Crab", [89]="Lost Woods Bird", [91]="Spark (clockwise)", [92]="Spark (counterclockwise)", [93]="Roller (vertical)", [94]="Roller (horizontal)", [96]="Roller (diagonal)", [97]="Beamos", [99]="Debirando", [100]="Debirando (falling)", [102]="Wall cannon (vertical)", [103]="Wall cannon (horizontal)", [104]="Ball and Chain Trooper", [105]="Cannon Soldier", [106]="Ball and Chain Trooper", [107]="Rat", [108]="Rope", [109]="Keese", [110]="Helmasaur King Fireball", [111]="Leever", [112]="Fairy activation", [113]="Uncle / Priest", [114]="Running Man", [115]="Bottle Vendor", [116]="Princess Zelda", [118]="Zelda", [119]="Pipe Down", [120]="Pipe Up", [121]="Pipe Right", [122]="Pipe Left", [123]="Good Bee", [124]="Hylian inscription", [125]="Thief hoarder", [126]="Bug-catching Kid", [128]="Moldorm (Eye)", [129]="Moldorm", [130]="Telepathic tile", [131]="Green Eyegore", [132]="Red Eyegore", [133]="Stalfos", [134]="Kodongo", [135]="Kodongo fire", [136]="Mothula", [137]="Mothula beam", [138]="Spike Trap", [139]="Spike Trap", [140]="Arrghus", [141]="Arrghus spawn", [142]="Terrorpin", [143]="Blob", [144]="Wallmaster", [145]="Stalfos Knight", [146]="Helmasaur King", [147]="Bumper", [149]="Laser Eye (right)", [150]="Laser Eye (left)", [151]="Laser Eye (down)", [152]="Laser Eye (up)", [153]="Pengator", [154]="Kyameron", [155]="Wizzrobe", [160]="Babasu", [161]="Babusu", [162]="Haunted grove hopper", [163]="Lumberjack tree pull", [164]="Teleport bug", [165]="Firesnake", [166]="Hover", [167]="Water Tektite", [168]="Antifairy Circle", [169]="Green Eyegore (mimic)", [170]="Red Eyegore (mimic)", [171]="Yellow Stalfos", [172]="Kodongo", [173]="Flames", [174]="Mothula platform", [177]="Four-way fireball", [178]="Guruguru Bar (clockwise)", [179]="Guruguru Bar (counterclockwise)", [180]="Winder", [181]="Draw bridge", [182]="Rupee pull", [185]="Red Rupee Crab", [186]="Red Bari", [187]="Blue Bari", [188]="Tektite", [200]="Blind", [201]="Blind laser", [203]="Blind", [204]="Kholdstare shell", [206]="Vitreous", [207]="Vitreous (small)", [208]="Viterous lightning", [209]="Catfish", [210]="Agahnim teleport", [211]="Bully / Pink Ball", [212]="Whirlpool", [214]="Ganon", [215]="Agahnim", [216]="Heart", [217]="Green Rupee", [218]="Blue Rupee", [219]="Red Rupee", [220]="Bombs (1)", [221]="Bombs (4)", [222]="Bombs (8)", [223]="Small Magic Jar", [224]="Large Magic Jar", [225]="Arrows (5)", [226]="Arrows (10)", [227]="Fairy", [228]="Small Key", [229]="Big Key", [232]="Mushroom", [233]="Fake Master Sword", [235]="Shopkeeper", [237]="Maiden", [242]="Chest game guy", [244]="Sahasrahla", [245]="Old Man on mountain", [247]="Witch", [249]="Waterfall fairy" }
+local ENEMY_TYPES = { [1]=true, [2]=true, [8]=true, [9]=true, [12]=true, [13]=true, [14]=true, [15]=true, [16]=true, [17]=true, [18]=true, [21]=true, [24]=true, [25]=true, [26]=true, [32]=true, [34]=true, [35]=true, [36]=true, [38]=true, [39]=true, [41]=true, [43]=true, [48]=true, [49]=true, [51]=true, [53]=true, [55]=true, [56]=true, [61]=true, [65]=true, [66]=true, [67]=true, [68]=true, [69]=true, [70]=true, [71]=true, [72]=true, [73]=true, [74]=true, [83]=true, [84]=true, [85]=true, [86]=true, [87]=true, [88]=true, [89]=true, [99]=true, [100]=true, [104]=true, [105]=true, [106]=true, [107]=true, [108]=true, [109]=true, [111]=true, [131]=true, [132]=true, [133]=true, [134]=true, [136]=true, [139]=true, [142]=true, [143]=true, [144]=true, [145]=true, [146]=true, [153]=true, [154]=true, [155]=true, [160]=true, [162]=true, [165]=true, [167]=true, [169]=true, [170]=true, [171]=true, [172]=true, [180]=true, [185]=true, [186]=true, [187]=true, [188]=true, [203]=true, [206]=true, [211]=true, [214]=true, [215]=true }
+
+local function sprite_name(kind)
+  return SPRITE_NAMES[kind] or (ENEMY_TYPES[kind] and "enemy" or "object")
+end
+
+-- Reads the active sprites, nearest first, each with slot, position, offset from
+-- Link, Manhattan distance, type, and health.
 local function sprites()
   local s = prev
   if s == nil or not in_play(s) then return {} end
@@ -108,6 +117,7 @@ local function sprites()
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
       local dx, dy = sx - s.x, sy - s.y
       out[#out + 1] = {
+        slot = i,
         x = sx, y = sy, dx = dx, dy = dy,
         dist = math.abs(dx) + math.abs(dy),
         kind = mem.u8(SPRITE.kind + i),
@@ -119,6 +129,11 @@ local function sprites()
   return out
 end
 
+-- Whether an offset falls within the visible screen (256x224, Link near centre).
+local function on_screen(dx, dy)
+  return math.abs(dx) <= 128 and math.abs(dy) <= 116
+end
+
 -- A compass direction from an offset. y decreases upward on the SNES.
 local function direction(dx, dy)
   local ax, ay = math.abs(dx), math.abs(dy)
@@ -126,7 +141,7 @@ local function direction(dx, dy)
   local ew = dx < 0 and "west" or "east"
   if ax > 2 * ay then return ew
   elseif ay > 2 * ax then return ns
-  else return ns .. ew end
+  else return ns .. "-" .. ew end
 end
 
 -- A rough distance word. Roughly 16 pixels to a tile.
@@ -139,15 +154,6 @@ end
 
 -- Range within which the nearest enemy gets a spatial-audio beacon (pixels).
 local BEACON_RANGE = 224
-
--- The proximity ring an enemy is in, smaller being nearer, or nil past "nearby".
--- Used to speak only when an enemy crosses into a closer ring.
-local function enemy_ring(dist)
-  if dist < 24 then return 0
-  elseif dist < 64 then return 1
-  elseif dist < 160 then return 2
-  else return nil end
-end
 
 -- Game text: decode ALttP's compressed dialogue table from the ROM once at load,
 -- then read the current message by id at runtime. Ported from the alttp-navi
@@ -326,31 +332,41 @@ function on_frame(frame)
     end
   end
 
-  -- Automatic enemy proximity. Hysteresis by ring, so it speaks when the nearest
-  -- enemy crosses into a closer ring, not every frame; it resets once none is
-  -- near, so a fresh approach speaks again. The thresholds are a starting point
-  -- for players to tune, and the arbiter rate-limits the "proximity" category
-  -- regardless. Interaction priority, so a low-verbosity player can silence it.
+  -- Enemies. Announce each by name and direction as it enters the visible screen
+  -- ("Green Soldier, north-east."), once per entrance — the spatial-audio beacon
+  -- gives the continuous sense of where the nearest one is.
   if in_play(now) then
+    local list = sprites()
+
+    -- Speak an enemy as it appears on screen; reset the latch once it leaves, so
+    -- a re-entrance speaks again. The arbiter rate-limits a busy room.
+    local active = {}
+    for _, sp in ipairs(list) do
+      active[sp.slot] = sp
+    end
+    for i = 0, 15 do
+      local sp = active[i]
+      local visible = sp ~= nil and ENEMY_TYPES[sp.kind] and on_screen(sp.dx, sp.dy)
+      if visible and not announced[i] then
+        say(
+          string.format("%s, %s.", sprite_name(sp.kind), direction(sp.dx, sp.dy)),
+          { priority = "interaction", category = "enemy" }
+        )
+        announced[i] = true
+      elseif not visible then
+        announced[i] = false
+      end
+    end
+
+    -- Spatial-audio beacon on the nearest enemy: it pans toward the enemy and
+    -- grows louder as it closes. Cleared when nothing is in range.
     local nearest = nil
-    for _, sp in ipairs(sprites()) do
-      if sp.hp ~= nil and sp.hp > 0 then
+    for _, sp in ipairs(list) do
+      if ENEMY_TYPES[sp.kind] then
         nearest = sp
         break
       end
     end
-    local ring = nearest and enemy_ring(nearest.dist) or nil
-    if ring ~= nil and (nearest_enemy_ring == nil or ring < nearest_enemy_ring) then
-      say(
-        string.format("Enemy %s, %s.", direction(nearest.dx, nearest.dy), proximity(nearest.dist)),
-        { priority = "interaction", category = "proximity", rate_limit = "1500ms" }
-      )
-    end
-    nearest_enemy_ring = ring
-
-    -- A spatial-audio beacon on the nearest enemy: it pans toward the enemy and
-    -- grows louder as it closes, a continuous sense of where the threat is to
-    -- complement the spoken cue. Cleared when nothing is in range.
     if nearest and nearest.dist < BEACON_RANGE then
       beacon.set("enemy", {
         x = nearest.dx,
@@ -361,8 +377,10 @@ function on_frame(frame)
       beacon.clear("enemy")
     end
   else
-    nearest_enemy_ring = nil
     beacon.clear("enemy") -- no tone in menus or transitions
+    for i = 0, 15 do
+      announced[i] = false
+    end
   end
 end
 
@@ -412,9 +430,8 @@ on_command("scan", function()
   -- Describe up to the three nearest, so a busy room does not become a monologue.
   for i = 1, math.min(3, #list) do
     local sp = list[i]
-    local kind = (sp.hp ~= nil and sp.hp > 0) and "enemy" or "object"
     say(
-      string.format("%s, %s, %s.", kind, direction(sp.dx, sp.dy), proximity(sp.dist)),
+      string.format("%s, %s, %s.", sprite_name(sp.kind), direction(sp.dx, sp.dy), proximity(sp.dist)),
       { priority = "navigation", category = "on-demand" }
     )
   end

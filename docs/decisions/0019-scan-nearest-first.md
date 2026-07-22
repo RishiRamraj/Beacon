@@ -47,16 +47,21 @@ sprites, and draw those sprites on the map.
 - The enemy/object heuristic and the distance thresholds are tuning knobs, expected to change
   once players use them.
 
-## Update — conservative automatic proximity (2026-07-21)
+## Update — automatic proximity, then screen-entry callouts (2026-07-21)
 
-Automatic enemy proximity now follows scan, built the careful way. The plugin tracks the nearest
-enemy's proximity *ring* and speaks only when it crosses into a closer one ("Enemy north, close"),
-resetting once no enemy is near so a fresh approach speaks again. It is Interaction priority (a
-low-verbosity player silences it), its own rate-limited `proximity` category, and hysteresis by
-ring rather than raw distance — so it announces on approach, not every frame. The thresholds are a
-starting point for players to tune. This is the in-plugin form of navi's zone state machine;
-[ADR 0005](0005-event-arbitration-in-host.md) §5.4 anticipates promoting that hysteresis to a host
-primitive once a second game wants it.
+Automatic enemy awareness first shipped as a ring-based proximity cue (speak when the nearest
+enemy crosses into a closer ring). In play that proved too chatty. It was replaced, on player
+feedback, with a quieter rule: **announce each enemy once, by name and direction, as it enters the
+visible screen** ("Green Soldier, north-east"). A per-slot latch speaks the entrance once and
+resets when the enemy leaves, so it stays quiet while an enemy is simply present, and the arbiter's
+`enemy` category rate-limits a room that fills at once. The enemy's *type* comes from a sprite-type
+→ name table and an enemy classification ported from alttp-navi, and the same table now names
+sprites in `scan`.
+
+The continuous **spatial-audio beacon** ([ADR 0021](0021-spatial-audio-beacons.md)) on the nearest
+enemy carries the ongoing "where is it" sense, so speech no longer needs to. That division — speech
+for discrete events (an enemy *appearing*), audio for continuous position — is the intended
+"sonify timing, speak content" split ([ADR 0006](0006-sonify-timing-speak-content.md)).
 
 ## Alternatives considered
 
