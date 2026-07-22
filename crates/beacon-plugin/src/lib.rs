@@ -659,8 +659,8 @@ mod tests {
             soldier(&plugin.on_frame(&frame(60), 1)),
             "names the enemy and direction as it enters the screen"
         );
-        // The nearest enemy also gets a spatial-audio beacon, at an audible
-        // (floored) volume, panned toward it.
+        // The nearest enemy also gets a spatial-audio beacon, panned toward it,
+        // louder the nearer it is.
         let b = plugin.beacons();
         let enemy = b
             .iter()
@@ -668,7 +668,7 @@ mod tests {
             .expect("a beacon on the enemy");
         assert!(enemy.dx > 0.0, "panned east");
         assert!(
-            (0.5..=1.0).contains(&enemy.volume),
+            enemy.volume > 0.0 && enemy.volume <= 1.0,
             "audible volume, got {}",
             enemy.volume
         );

@@ -19,9 +19,9 @@ use beacon_plugin::BeaconState;
 
 /// The reference tone, an unobtrusive mid pitch. A beacon's `pitch` scales it.
 const BASE_FREQ: f32 = 330.0;
-/// Per-beacon amplitude before the master volume. High enough to sit clearly over
-/// the game audio; the final clamp keeps the mix from clipping.
-const BEACON_AMPLITUDE: f32 = 0.9;
+/// Per-beacon amplitude before the master volume, leaving headroom for several
+/// beacons plus the game audio before the final clamp.
+const BEACON_AMPLITUDE: f32 = 0.5;
 
 pub struct BeaconMixer {
     sample_rate: f32,

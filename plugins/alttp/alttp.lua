@@ -168,9 +168,8 @@ local function proximity(dist)
   else return "in the distance" end
 end
 
--- Euclidean range within which the nearest enemy gets a spatial-audio beacon,
--- a little beyond one screen so it fades in before the enemy is fully visible.
-local BEACON_RANGE = 300
+-- Range within which the nearest enemy gets a spatial-audio beacon (pixels).
+local BEACON_RANGE = 224
 
 -- Game text: decode ALttP's compressed dialogue table from the ROM once at load,
 -- then read the current message by id at runtime. Ported from the alttp-navi
@@ -384,14 +383,11 @@ function on_frame(frame)
         break
       end
     end
-    local ed = nearest and math.sqrt(nearest.dx * nearest.dx + nearest.dy * nearest.dy)
-    if nearest and ed < BEACON_RANGE then
-      -- Floor the volume so the tone is clearly audible whenever an enemy is in
-      -- range, and louder as it closes.
+    if nearest and nearest.dist < BEACON_RANGE then
       beacon.set("enemy", {
         x = nearest.dx,
         y = nearest.dy,
-        volume = 0.5 + 0.5 * (1 - ed / BEACON_RANGE),
+        volume = 1 - nearest.dist / BEACON_RANGE,
       })
     else
       beacon.clear("enemy")
