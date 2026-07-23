@@ -1120,6 +1120,52 @@ mod tests {
     }
 
     #[test]
+    fn alttp_advance_follows_a_learned_cross_room_route() {
+        // Cross-room routing learns a dungeon's connectivity as Link walks it.
+        // After observing a walk from one room into the Bow's room, "advance" from
+        // the first room follows that learned edge ("Following the route") instead
+        // of falling back to a rough compass heading.
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        // Eastern Palace (Bow in room 0xA9, still un-held). An open room, so the
+        // local planner can always reach a learned exit spot.
+        let frame = |room: u8, tx: u16, ty: u16| -> Vec<u8> {
+            let mut ram = dungeon_frame((tx, ty), (5, 5), &[]);
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E040C, 0x04); // Eastern Palace
+            set(0x7E00A0, room); // current room id
+            ram
+        };
+
+        // Walk from room 0x00 into the Bow room 0xA9 (records edge 0x00 -> 0xA9),
+        // then step back into 0x00. The first on_frame only primes `prev`, so the
+        // transition-recording walk starts on the second frame.
+        plugin.on_frame(&frame(0x00, 40, 40), 0); // prime
+        plugin.on_frame(&frame(0x00, 40, 40), 1); // last spot in room 0x00
+        plugin.on_frame(&frame(0xA9, 10, 10), 2); // -> records 0x00 -> 0xA9
+        plugin.on_frame(&frame(0x00, 32, 32), 3); // back in 0x00
+
+        let out = plugin.command("advance", &frame(0x00, 32, 32));
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Following the route")),
+            "uses the learned graph to route across rooms: {texts:?}"
+        );
+
+        // Without any learned edge, a fresh plugin can only give a rough heading.
+        let mut naive = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        naive.on_frame(&frame(0x00, 32, 32), 0);
+        naive.on_frame(&frame(0x00, 32, 32), 1);
+        let out = naive.command("advance", &frame(0x00, 32, 32));
+        let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("roughly")),
+            "falls back to a heading with no learned route: {texts:?}"
+        );
+    }
+
+    #[test]
     fn alttp_advance_in_a_cleared_dungeon_heads_for_the_exit() {
         // The L-key "advance" guide, in a dungeon whose prize is already in hand,
         // routes to the exit rather than hunting for more items. Eastern Palace

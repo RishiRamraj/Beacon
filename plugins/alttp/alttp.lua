@@ -758,6 +758,130 @@ local function pathfind_update(s)
   })
 end
 
+-- The nearest door / passage tile in the current 64x64 window, as world pixel
+-- coordinates (centre of the tile), or nil if none is in view. Shared by the
+-- door guide and the dungeon exit-finder.
+local function nearest_door_tile(s)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local best, best_d
+  for y = 0, 63 do
+    for x = 0, 63 do
+      local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
+      if attr and attr >= 0x30 and attr <= 0x37 then -- a door / passage tile
+        local d = math.abs(x - ltx) + math.abs(y - lty)
+        if best_d == nil or d < best_d then
+          best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+        end
+      end
+    end
+  end
+  return best
+end
+
+-- The nearest on-screen item pickup (a sprite in ITEM_TYPES), as world pixel
+-- coordinates, or nil. sprites() is sorted nearest-first, so the first match is
+-- the closest. Used by the dungeon guide to fetch a loose item in the room.
+local function nearest_item_sprite(s)
+  for _, sp in ipairs(sprites()) do
+    if ITEM_TYPES[sp.kind] then return { sp.x, sp.y } end
+  end
+  return nil
+end
+
+-- ===========================================================================
+-- Cross-room dungeon routing: a room-to-room guide layered over the local
+-- pathfinder, which only reaches within the current room. Rather than decode the
+-- ROM's door tables, the plugin *learns* a dungeon's connectivity as Link walks
+-- it: each room transition records a directed edge and the spot in the room he
+-- left from. A breadth-first search over that learned graph gives the next room
+-- to head for, and the local pathfinder is aimed at the door that leaves toward
+-- it, re-aimed at every room boundary. Rooms not yet walked simply are not in the
+-- graph; guidance falls back to a compass heading until exploration connects them.
+-- ===========================================================================
+
+-- Learned graph: from_room -> { to_room -> {x, y} }, the absolute pixel spot in
+-- from_room where the walk into to_room happened (so aiming Link back at it
+-- re-triggers the same transition — works for doors, stairs, and holes alike).
+-- Room ids are globally unique, so one graph spans every dungeon. Global for MCP.
+room_graph = {}
+local rg_last_room = nil -- last stable dungeon room
+local rg_last_pos = nil  -- Link's pixel spot on the previous in-play frame
+
+-- Grow the graph by observing room transitions. Runs every frame.
+local function record_room_transition(s)
+  if s.module ~= 0x07 or not in_play(s) then rg_last_room = nil; return end
+  local room = s.dungeon_room
+  if rg_last_room ~= nil and rg_last_room ~= room and rg_last_pos ~= nil then
+    local g = room_graph[rg_last_room]
+    if g == nil then g = {}; room_graph[rg_last_room] = g end
+    g[room] = { rg_last_pos[1], rg_last_pos[2] }
+  end
+  rg_last_room = room
+  rg_last_pos = { s.x, s.y }
+end
+
+-- Breadth-first search over learned edges: the ordered list of rooms after
+-- `from`, ending at `to`, or nil if the graph does not yet connect them.
+local function room_path(from, to)
+  if from == to then return {} end
+  local prev, queue, head = { [from] = false }, { from }, 1
+  while head <= #queue do
+    local r = queue[head]; head = head + 1
+    for nr in pairs(room_graph[r] or {}) do
+      if prev[nr] == nil then
+        prev[nr] = r
+        if nr == to then
+          local path, c = { to }, r
+          while c ~= from do table.insert(path, 1, c); c = prev[c] end
+          return path
+        end
+        queue[#queue + 1] = nr
+      end
+    end
+  end
+  return nil
+end
+
+-- Aim the local pathfinder at a world-pixel spot, quietly (no per-room chatter).
+local function route_set_goal(s, wx, wy)
+  pathfind_goal = { wx >> 3, wy >> 3 }
+  if pathfind_replan(s) then pathfind_active = true; return true end
+  return false
+end
+
+-- The active cross-room target room, and the room we last re-aimed from. Global
+-- target for MCP inspection.
+route_room = nil
+local rr_last_room = nil
+
+local function room_route_stop() route_room = nil; rr_last_room = nil end
+
+-- Re-aim the local pathfinder at each room boundary toward the target room. Only
+-- acts when the room actually changes, so the local follower runs undisturbed
+-- between rooms.
+local function room_route_update(s)
+  if route_room == nil then return end
+  if s.module ~= 0x07 or not in_play(s) then return end
+  if s.dungeon_room == rr_last_room then return end
+  rr_last_room = s.dungeon_room
+  if s.dungeon_room == route_room then
+    -- Arrived at the target room: hand off to local guidance (a loose item here,
+    -- else a door) and end the cross-room route.
+    room_route_stop()
+    local it = nearest_item_sprite(s)
+    local d = it or nearest_door_tile(s)
+    if d then route_set_goal(s, d[1], d[2]) end
+    say("You've reached the room.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  local path = room_path(s.dungeon_room, route_room)
+  local hop = path and path[1]
+  local exit = hop and room_graph[s.dungeon_room] and room_graph[s.dungeon_room][hop]
+  if exit then route_set_goal(s, exit[1], exit[2]) end
+  -- else: the graph has no next hop from here yet; leave the local goal in place.
+end
+
 -- ===========================================================================
 -- Exploration memory and user markers, built on the pathfinder above.
 -- ===========================================================================
@@ -1002,6 +1126,11 @@ function on_frame(frame)
   -- Remember where Link has been, for the explore command.
   if in_play(now) then mark_explored(now) end
 
+  -- Learn the dungeon's room connectivity as Link walks, and re-aim any active
+  -- cross-room route at each room boundary, before the local follower runs.
+  record_room_transition(now)
+  room_route_update(now)
+
   -- Route guidance runs last, so its beacon coexists with the object beacons.
   pathfind_update(now)
 end
@@ -1141,37 +1270,6 @@ on_command("objective", function()
     { priority = "navigation", category = "on-demand" }
   )
 end)
-
--- The nearest door / passage tile in the current 64x64 window, as world pixel
--- coordinates (centre of the tile), or nil if none is in view. Shared by the
--- door guide and the dungeon exit-finder.
-local function nearest_door_tile(s)
-  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
-  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
-  local best, best_d
-  for y = 0, 63 do
-    for x = 0, 63 do
-      local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
-      if attr and attr >= 0x30 and attr <= 0x37 then -- a door / passage tile
-        local d = math.abs(x - ltx) + math.abs(y - lty)
-        if best_d == nil or d < best_d then
-          best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
-        end
-      end
-    end
-  end
-  return best
-end
-
--- The nearest on-screen item pickup (a sprite in ITEM_TYPES), as world pixel
--- coordinates, or nil. sprites() is sorted nearest-first, so the first match is
--- the closest. Used by the dungeon guide to fetch a loose item in the room.
-local function nearest_item_sprite(s)
-  for _, sp in ipairs(sprites()) do
-    if ITEM_TYPES[sp.kind] then return { sp.x, sp.y } end
-  end
-  return nil
-end
 
 -- "Guide me to the nearest door." A concrete use of the pathfinder: it routes to
 -- the nearest door tile. Other targets (markers, frontier) drive pathfind_to too.
@@ -1319,25 +1417,39 @@ local function door_toward(s, ddx, ddy)
   return best
 end
 
--- Route toward a target room, given a spoken label for what is there. In the
--- room already: guide to a loose item if one is visible, else to a door, and say
--- it is here. In another room: name a rough heading (dungeon rooms are a 16-wide
--- grid, id low nibble = column, high nibble = row) and head out the best-aligned
--- door. Cross-floor headings are approximate, so the wording stays soft.
+-- Route toward a target room, given a spoken label for what is there. Already in
+-- the room: guide to a loose item if visible, else a door, and say it is here.
+-- Elsewhere: start a cross-room route. If the learned graph already connects the
+-- rooms, aim precisely at the door that leaves toward the target and follow the
+-- chain room by room; if not, set a rough heading (dungeon rooms are a 16-wide
+-- grid, id low nibble = column, high nibble = row) and let the route lock on as
+-- exploration fills the graph in. Cross-floor headings are approximate, so the
+-- fallback wording stays soft.
 local function route_to_room(s, target_room, label)
   if target_room == nil then return false end
   if s.dungeon_room == target_room then
+    room_route_stop()
     local it = nearest_item_sprite(s)
     local d = it or nearest_door_tile(s)
-    if it then pathfind_to(it[1], it[2]) elseif d then pathfind_to(d[1], d[2]) end
+    if d then pathfind_to(d[1], d[2]) end
     nav_say(label .. " It's in this room.")
     return true
   end
-  local ddx = (target_room & 0x0F) - (s.dungeon_room & 0x0F)
-  local ddy = (target_room >> 4) - (s.dungeon_room >> 4)
-  local d = door_toward(s, ddx, ddy)
-  if d then pathfind_to(d[1], d[2]) end
-  nav_say(string.format("%s Head roughly %s.", label, direction(ddx, ddy)))
+  route_room = target_room
+  rr_last_room = s.dungeon_room
+  local path = room_path(s.dungeon_room, target_room)
+  local hop = path and path[1]
+  local exit = hop and room_graph[s.dungeon_room] and room_graph[s.dungeon_room][hop]
+  if exit then
+    route_set_goal(s, exit[1], exit[2])
+    nav_say(label .. " Following the route.")
+  else
+    local ddx = (target_room & 0x0F) - (s.dungeon_room & 0x0F)
+    local ddy = (target_room >> 4) - (s.dungeon_room >> 4)
+    local d = door_toward(s, ddx, ddy)
+    if d then route_set_goal(s, d[1], d[2]) end
+    nav_say(string.format("%s Head roughly %s; I'll route you once the way is known.", label, direction(ddx, ddy)))
+  end
   return true
 end
 
@@ -1383,6 +1495,7 @@ end
 -- compass heading across the area grid toward it, and a note when it is in the
 -- other world. If already in the target area, point at finding the entrance.
 local function advance_overworld(s, v)
+  room_route_stop() -- drop any stale dungeon route when out on the overworld
   if v == nil then nav_say("No game state yet."); return end
   local idx, m = current_milestone(v)
   local area = MILESTONE_AREA[idx]
@@ -1417,6 +1530,7 @@ on_command("advance", function()
 end)
 
 on_command("pathfind_stop", function()
+  room_route_stop()
   pathfind_stop()
   say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
 end)
