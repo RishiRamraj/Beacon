@@ -1137,15 +1137,24 @@ mod tests {
             ram
         };
 
-        // Prime in a menu, then cross into the overworld, then into a dungeon.
+        // Booting into the intro (module 0x00) is not narrated either.
         plugin.on_frame(&frame(0x01, 0), 0); // file select (primes prev)
-        let ow = plugin.on_frame(&frame(0x09, 0x1B), 1);
+        let intro = plugin.on_frame(&frame(0x00, 0), 1);
+        assert!(
+            !intro.iter().any(|i| i.text.to_lowercase() == "intro"),
+            "the intro is not narrated: {:?}",
+            intro.iter().map(|i| &i.text).collect::<Vec<_>>()
+        );
+
+        // Prime in a menu, then cross into the overworld, then into a dungeon.
+        plugin.on_frame(&frame(0x01, 0), 2); // file select
+        let ow = plugin.on_frame(&frame(0x09, 0x1B), 3);
         assert!(
             !ow.iter().any(|i| i.text.to_lowercase() == "overworld"),
             "entering the overworld is not narrated: {:?}",
             ow.iter().map(|i| &i.text).collect::<Vec<_>>()
         );
-        let dg = plugin.on_frame(&frame(0x07, 0), 2);
+        let dg = plugin.on_frame(&frame(0x07, 0), 4);
         assert!(
             !dg.iter().any(|i| i.text.to_lowercase() == "dungeon"),
             "entering the dungeon is not narrated: {:?}",

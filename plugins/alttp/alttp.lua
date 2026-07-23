@@ -36,6 +36,17 @@ local function module_name(m)
   return names[m] or "unknown"
 end
 
+-- Modules whose entry is not announced by the generic module-change callout:
+-- the text box (spoken separately), the two in-play modules (obvious, and the
+-- room/area callout covers location), and the non-interactive title screens.
+local MODULE_SILENT = {
+  [0x00] = true, -- intro
+  [0x07] = true, -- dungeon (in play)
+  [0x09] = true, -- overworld (in play)
+  [0x0e] = true, -- text box
+  [0x14] = true, -- attract mode
+}
+
 local function facing(direction)
   if direction == 0 then return "north"
   elseif direction == 2 then return "south"
@@ -1018,13 +1029,13 @@ function on_frame(frame)
     end
   end
 
-  -- Top level state changes: file select, entering a dungeon, and so on. The
-  -- text module (0x0E) is handled just above, so it is not also announced
-  -- generically. The dungeon (0x07) and overworld (0x09) modules are skipped too:
-  -- being in one is obvious, and the room / area callout just below already says
-  -- where — narrating "dungeon" / "overworld" on top is just noise.
-  if now.module ~= was.module and now.module ~= 0x0E
-      and now.module ~= 0x07 and now.module ~= 0x09 then
+  -- Top level state changes: file select, entering a dungeon, and so on. Some
+  -- modules are deliberately silent: the text module (0x0E, handled just above),
+  -- the dungeon (0x07) and overworld (0x09) — being in one is obvious and the
+  -- room / area callout below already says where — and the non-interactive title
+  -- screens, intro (0x00) and attract mode (0x14), which the player never chose
+  -- to enter. Announcing any of these is just noise.
+  if now.module ~= was.module and not MODULE_SILENT[now.module] then
     say(module_name(now.module), { priority = "navigation", category = "area" })
   end
 
