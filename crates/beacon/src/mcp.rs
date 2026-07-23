@@ -125,6 +125,11 @@ pub(crate) fn control_socket_path() -> PathBuf {
 /// MCP client that only speaks stdio (an agent harness) can drive the live
 /// windowed session the player is looking at, rather than a headless one of its
 /// own. Waits briefly for the socket, in case the window is still starting up.
+///
+/// Exits the whole process the moment either side closes — crucially when the
+/// window is restarted and the socket drops — so the MCP client sees the server
+/// die and respawns it, and the fresh bridge reattaches to the new window. Left
+/// hanging instead, a window restart would silently strand the connection.
 pub(crate) fn connect_bridge() -> std::io::Result<()> {
     use std::os::unix::net::UnixStream;
 
@@ -148,17 +153,18 @@ pub(crate) fn connect_bridge() -> std::io::Result<()> {
         )
     })?;
 
-    // socket -> stdout on a thread; stdin -> socket on this one. When stdin
-    // closes (the client disconnects) we shut the socket, ending the reader.
+    // socket -> stdout on a thread; stdin -> socket on this one. Whichever ends
+    // first ends the process: the reader exits on socket EOF (window gone), and
+    // the main thread exits when stdin closes (client gone). Exiting on socket
+    // loss is what lets the client respawn us against the next window.
     let mut to_sock = stream.try_clone()?;
     let mut from_sock = stream;
-    let reader = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let _ = std::io::copy(&mut from_sock, &mut std::io::stdout());
+        std::process::exit(0);
     });
     let _ = std::io::copy(&mut std::io::stdin(), &mut to_sock);
-    let _ = to_sock.shutdown(std::net::Shutdown::Both);
-    let _ = reader.join();
-    Ok(())
+    std::process::exit(0);
 }
 
 /// Serves the MCP protocol on a Unix socket, returning the channel the main
