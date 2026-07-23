@@ -466,10 +466,10 @@ fn alttp_explore_routes_toward_unwalked_ground() {
 
 #[test]
 fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
-    // On the overworld, "advance" gives a compass heading toward the current
-    // milestone's area. A fresh save (progress 0) points at Hyrule Castle
-    // (area 0x1B, grid col 3). From Kakariko in the west (area 0x18, col 0)
-    // that is due east.
+    // On the overworld, "advance" starts a route toward the current milestone's
+    // area when it is in the same world, and flags the other world otherwise.
+    // A fresh save (progress 0) points at Hyrule Castle (area 0x1B), same (Light)
+    // world as the player, so it announces that it is routing there.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -488,8 +488,8 @@ fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
     let out = plugin.command("advance", &ram);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
-        texts.iter().any(|t| t.contains("Head east")),
-        "sends the player east toward the castle: {texts:?}"
+        texts.iter().any(|t| t.contains("Routing to")),
+        "starts routing toward the castle: {texts:?}"
     );
 
     // Post-Agahnim: all three pendants, the Master Sword, Agahnim beaten, no

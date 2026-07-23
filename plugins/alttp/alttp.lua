@@ -520,6 +520,77 @@ local function tile_attr_at(s, px, py)
   return nil
 end
 
+-- ===========================================================================
+-- Full-overworld collision from ROM. The live $7E2000 table only holds the
+-- loaded screens, so to route to a distant objective we decode any area's map16
+-- layout straight from the cartridge: two LZ2-compressed blobs per area -> 256
+-- map32 indices -> map16 via the corner tables -> the same map16->map8->attr
+-- decode ow_tile_attr already does. Verified byte-for-byte against the live
+-- $7E2000 table (1022/1024 cells; the 2 diffs were a runtime door overlay).
+-- Areas are decoded on first use and cached; the whole ROM is sliced lazily,
+-- since a player who never routes on the overworld need not pay for it.
+-- ===========================================================================
+local OW_ROM = nil                              -- whole cart (compressed blobs are scattered)
+local OW_PTR_HI, OW_PTR_LO = 0x1794D, 0x17B2D   -- map32 blob pointer tables (PC), 3-byte SNES ptrs
+local OW_CORNER = { 0x18000, 0x1B400, 0x20000, 0x23400 } -- map32->map16 corner tables TL TR BL BR (PC)
+local ow_area_cache = {}
+
+local function ow_rb(o) return string.byte(OW_ROM, o + 1) end
+
+-- The overworld LZ2 variant (command 4's back-reference is a big-endian absolute
+-- index into the output). Terminator 0xFF; header top 3 bits command, low 5 bits
+-- length-1, with the 111 escape carrying a 10-bit length.
+local function ow_lz2(p)
+  local out = {}
+  while true do
+    local h = ow_rb(p); if h == 0xFF then break end
+    local c = h >> 5; local l = h & 0x1F
+    if c == 7 then c = (h >> 2) & 7; l = ((h & 3) << 8) | ow_rb(p + 1); p = p + 1 end
+    l = l + 1
+    if c == 0 then for j = 0, l - 1 do out[#out + 1] = ow_rb(p + 1 + j) end; p = p + l + 1
+    elseif c == 1 then local v = ow_rb(p + 1); for j = 0, l - 1 do out[#out + 1] = v end; p = p + 2
+    elseif c == 2 then local a, b2 = ow_rb(p + 1), ow_rb(p + 2); for j = 0, l - 1 do out[#out + 1] = (j % 2 == 0) and a or b2 end; p = p + 3
+    elseif c == 3 then local v = ow_rb(p + 1); for j = 0, l - 1 do out[#out + 1] = (v + j) & 0xFF end; p = p + 2
+    elseif c == 4 then local f = (ow_rb(p + 1) << 8) | ow_rb(p + 2); for j = 0, l - 1 do out[#out + 1] = out[f + 1 + j] end; p = p + 3
+    else return nil end
+    if #out > 4096 then return nil end
+  end
+  return out
+end
+
+-- Expand a map32 index into one of its four map16 corners (cn: 1 TL, 2 TR, 3 BL,
+-- 4 BR). Six ROM bytes encode four map32s: four low bytes then two packed nibbles.
+local function ow_map16(t, cn)
+  local C = OW_CORNER[cn]; local g = t >> 2; local k = t & 3; local bs = C + g * 6
+  local lo = ow_rb(bs + k); local hib = ow_rb(bs + 4 + (k >> 1))
+  local hn = ((k & 1) == 0) and ((hib >> 4) & 0xF) or (hib & 0xF)
+  return lo | (hn << 8)
+end
+
+-- The 256 map32 indices (a 16x16 grid) of one overworld area, decoded and cached.
+local function ow_area(area)
+  local cached = ow_area_cache[area]; if cached then return cached end
+  if OW_ROM == nil then OW_ROM = rom.slice(0, 0x100000) end
+  local function r24(o) return ow_rb(o) | (ow_rb(o + 1) << 8) | (ow_rb(o + 2) << 16) end
+  local hi = ow_lz2(snes_to_rom(r24(OW_PTR_HI + 3 * area)))
+  local lo = ow_lz2(snes_to_rom(r24(OW_PTR_LO + 3 * area)))
+  if hi == nil or lo == nil then return nil end
+  local m = {}
+  for n = 0, 255 do m[n] = ((hi[n + 1] or 0) << 8) | (lo[n + 1] or 0) end
+  ow_area_cache[area] = m
+  return m
+end
+
+-- Collision attribute at absolute overworld pixel (px, py) in world w (0 light, 1
+-- dark), decoded from ROM — the cross-screen counterpart of tile_attr_at.
+local function ow_rom_attr(w, px, py)
+  local area = w * 0x40 + (py >> 9) * 8 + (px >> 9)
+  local m = ow_area(area); if m == nil then return nil end
+  local lx, ly = (px & 0x1FF) >> 4, (py & 0x1FF) >> 4
+  local n = (ly >> 1) * 16 + (lx >> 1); local cn = 1 + (lx & 1) + ((ly & 1) << 1)
+  return ow_tile_attr(ow_map16(m[n], cn), px >> 3, py)
+end
+
 -- Whether a wall lies on the straight line between two world points, so a sprite
 -- behind it is out of sight. Walks the 8-pixel tiles the segment crosses
 -- (Bresenham), skipping the two endpoint tiles — Link's own tile and the
@@ -666,6 +737,121 @@ local function simplify(s, tiles)
     end
   end
   out[#out + 1] = tiles[#tiles]
+  return out
+end
+
+-- ===========================================================================
+-- Overworld cross-screen routing: A* over the ROM-decoded collision of the whole
+-- world, not just the loaded window, so a route can span screens to a distant
+-- objective. Same 8-pixel grid the local planner uses; the collision comes from
+-- ow_rom_attr instead of the live table. Measured a few hundred nodes for a
+-- cross-field route — fast enough to replan while walking.
+-- ===========================================================================
+local function ow_walk(w, tx, ty)
+  if tx < 0 or tx > 511 or ty < 0 or ty > 511 then return false end
+  local a = ow_rom_attr(w, tx * 8 + 4, ty * 8 + 4)
+  return a ~= nil and not IMPASSABLE[a]
+end
+
+-- The nearest walkable tile to (tx,ty), spiralling out — Link's $0020/$0022 is his
+-- head, often inside a wall attribute, so a route must seed from real footing.
+local function ow_nearest_walk(w, tx, ty)
+  for r = 0, 12 do
+    for dy = -r, r do
+      for dx = -r, r do
+        if math.max(math.abs(dx), math.abs(dy)) == r and ow_walk(w, tx + dx, ty + dy) then
+          return tx + dx, ty + dy
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- Whether the straight line between two world tiles stays walkable (string-pull).
+local function ow_line(w, x0, y0, x1, y1)
+  local dx, dy = math.abs(x1 - x0), -math.abs(y1 - y0)
+  local sx = x0 < x1 and 1 or -1
+  local sy = y0 < y1 and 1 or -1
+  local err = dx + dy
+  local x, y = x0, y0
+  while true do
+    if not ow_walk(w, x, y) then return false end
+    if x == x1 and y == y1 then return true end
+    local e2 = 2 * err
+    if e2 >= dy then err = err + dy; x = x + sx end
+    if e2 <= dx then err = err + dx; y = y + sy end
+  end
+end
+
+local OW_ASTAR_CAP = 40000 -- node budget; bounds a worst-case mazey route
+
+-- A* over 8-pixel world tiles from Link's footing toward (gx,gy). If `goal_area`
+-- (a 0..0x3F within-world area index) is given, the goal is any reachable tile in
+-- that area — so it stops at the screen boundary rather than a possibly-walled
+-- centre — and (gx,gy) is only the heuristic aim point. Returns a string-pulled
+-- list of world tiles {tx,ty}, or nil if unreachable / off the map.
+local function ow_plan_path(s, gx, gy, goal_area)
+  local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
+  local sx, sy = ow_nearest_walk(w, s.x >> 3, s.y >> 3)
+  if goal_area == nil then gx, gy = ow_nearest_walk(w, gx, gy) end
+  if sx == nil or gx == nil then return nil end
+  local function key(x, y) return y * 512 + x end
+  local function heur(x, y) return math.abs(x - gx) + math.abs(y - gy) end
+  local function is_goal(n)
+    if goal_area == nil then return n == key(gx, gy) end
+    local nx, ny = n % 512, n // 512
+    return (ny >> 6) * 8 + (nx >> 6) == goal_area
+  end
+  local g, came, closed, heap = { [key(sx, sy)] = 0 }, {}, {}, {}
+  local function push(n, f)
+    heap[#heap + 1] = { n, f }
+    local i = #heap
+    while i > 1 and heap[i >> 1][2] > heap[i][2] do heap[i], heap[i >> 1] = heap[i >> 1], heap[i]; i = i >> 1 end
+  end
+  local function pop()
+    local top = heap[1][1]
+    heap[1] = heap[#heap]; heap[#heap] = nil
+    local i, n = 1, #heap
+    while true do
+      local l, r, m = i * 2, i * 2 + 1, i
+      if l <= n and heap[l][2] < heap[m][2] then m = l end
+      if r <= n and heap[r][2] < heap[m][2] then m = r end
+      if m == i then break end
+      heap[i], heap[m] = heap[m], heap[i]; i = m
+    end
+    return top
+  end
+  push(key(sx, sy), heur(sx, sy))
+  local reached, expanded = nil, 0
+  while #heap > 0 and expanded < OW_ASTAR_CAP do
+    local n = pop()
+    if is_goal(n) then reached = n; break end
+    if not closed[n] then
+      closed[n] = true; expanded = expanded + 1
+      local nx, ny = n % 512, n // 512
+      for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+        local cx, cy = nx + d[1], ny + d[2]
+        if ow_walk(w, cx, cy) then
+          local c = key(cx, cy); local ng = g[n] + 1
+          if g[c] == nil or ng < g[c] then g[c] = ng; came[c] = n; push(c, ng + heur(cx, cy)) end
+        end
+      end
+    end
+  end
+  if reached == nil then return nil end
+  local rev, c = {}, reached
+  while c do rev[#rev + 1] = { c % 512, c // 512 }; c = came[c] end
+  local pts = {}
+  for i = #rev, 1, -1 do pts[#pts + 1] = rev[i] end
+  if #pts <= 2 then return pts end
+  local out, anchor = { pts[1] }, 1
+  for i = 2, #pts - 1 do
+    if not ow_line(w, pts[anchor][1], pts[anchor][2], pts[i + 1][1], pts[i + 1][2]) then
+      out[#out + 1] = pts[i]; anchor = i
+    end
+  end
+  out[#out + 1] = pts[#pts]
   return out
 end
 
@@ -969,6 +1155,84 @@ end
 
 function mark_clear(slot) markers[slot] = nil end
 
+-- ===========================================================================
+-- Overworld route follower: drives the guide beacon along a cross-screen path
+-- from ow_plan_path, replanning as Link walks, in the same style as the local
+-- pathfind follower. Only one router owns the "path" beacon at a time — the
+-- local pathfinder takes priority, and ow_route_to stops the others.
+-- ===========================================================================
+ow_route_goal = nil -- {tx, ty, area?} target; global so an agent can inspect it
+ow_route_path = nil -- string-pulled world-tile waypoints; global for inspection
+local ow_route_wp = 1
+local ow_replan_in = 0
+
+local function ow_route_stop()
+  ow_route_goal = nil
+  ow_route_path = nil
+end
+
+-- Begin a cross-screen route to a world pixel destination.
+function ow_route_to(wx, wy)
+  pathfind_stop() -- one router owns the beacon
+  room_route_stop()
+  ow_route_goal = { wx >> 3, wy >> 3 }
+  ow_route_path = nil
+  ow_replan_in = 0
+end
+
+-- Begin a cross-screen route to an overworld AREA (0..0x3F within the world):
+-- route to the nearest reachable tile on that screen, aiming at its centre. Best
+-- for a destination whose exact tile isn't known or is walled off (a building).
+function ow_route_to_area(area)
+  pathfind_stop()
+  room_route_stop()
+  local col, row = area & 7, (area >> 3) & 7
+  ow_route_goal = { col * 64 + 32, row * 64 + 32, area = area & 0x3F }
+  ow_route_path = nil
+  ow_replan_in = 0
+end
+
+local function ow_route_update(s)
+  if ow_route_goal == nil or pathfind_active then return end
+  if s.module ~= 0x09 or not in_play(s) then
+    beacon.clear("path"); return
+  end
+  ow_replan_in = ow_replan_in - 1
+  if ow_route_path == nil or ow_replan_in <= 0 then
+    -- ow_route_goal holds tile coordinates, which ow_plan_path expects directly.
+    ow_route_path = ow_plan_path(s, ow_route_goal[1], ow_route_goal[2], ow_route_goal.area)
+    ow_route_wp = 1
+    ow_replan_in = REPLAN_INTERVAL
+  end
+  local path = ow_route_path
+  if path == nil then beacon.clear("path"); return end
+  while ow_route_wp <= #path do
+    local w = path[ow_route_wp]
+    if math.abs(w[1] * 8 + 4 - s.x) + math.abs(w[2] * 8 + 4 - s.y) <= WAYPOINT_REACHED then
+      ow_route_wp = ow_route_wp + 1
+    else
+      break
+    end
+  end
+  if ow_route_wp > #path then
+    say("You have arrived.", { priority = "navigation", category = "on-demand" })
+    ow_route_stop(); beacon.clear("path"); return
+  end
+  local w = path[ow_route_wp]
+  local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
+  local on_course
+  if math.abs(dx) > math.abs(dy) then
+    on_course = (dx > 0 and s.direction == 6) or (dx < 0 and s.direction == 4)
+  else
+    on_course = (dy > 0 and s.direction == 2) or (dy < 0 and s.direction == 0)
+  end
+  beacon.set("path", {
+    x = dx, y = dy,
+    pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
+    volume = PATH_VOLUME,
+  })
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -1147,6 +1411,7 @@ function on_frame(frame)
   room_route_update(now)
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
+  ow_route_update(now)
   pathfind_update(now)
 end
 
@@ -1471,6 +1736,7 @@ end
 -- In a dungeon: cleared -> the exit; otherwise the next canonical target — the
 -- signature item, then the Big Key, then the boss.
 local function advance_dungeon(s, v)
+  ow_route_stop() -- drop any overworld route once inside a dungeon
   local nav = DUNGEON_NAV[s.dungeon_id]
   local done = DUNGEON_DONE[s.dungeon_id]
   local cleared = (done and v and done(v)) or (nav and room_boss_beaten(nav.boss_room))
@@ -1518,16 +1784,19 @@ local function advance_overworld(s, v)
     nav_say(string.format("Next: %s. %s", m.goal, m.hint))
     return
   end
-  local dir, other_world = area_heading(s.ow_screen, area)
-  local world_note = ""
+  -- If the destination is in the other world, we can't draw a path across the
+  -- mirror — name it and give a heading instead.
+  local other_world = (s.ow_screen & 0x40) ~= (area & 0x40)
   if other_world then
-    world_note = (area & 0x40) ~= 0 and " It's in the Dark World." or " It's in the Light World."
+    local dir = area_heading(s.ow_screen, area)
+    local which = (area & 0x40) ~= 0 and "Dark World" or "Light World"
+    nav_say(string.format("Next: %s. Head %s, then cross to the %s.", m.goal, dir or "toward it", which))
+    return
   end
-  if dir == nil then
-    nav_say(string.format("You're in the right area for %s. Find the entrance.%s", m.goal, world_note))
-  else
-    nav_say(string.format("Head %s toward %s.%s", dir, m.goal, world_note))
-  end
+  -- Same world: draw a path onto the destination screen (nearest reachable tile
+  -- there), rather than a possibly-walled centre.
+  ow_route_to_area(area)
+  nav_say(string.format("Routing to %s.", m.goal))
 end
 
 on_command("advance", function()
