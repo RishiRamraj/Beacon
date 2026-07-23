@@ -1784,26 +1784,35 @@ local function door_toward(s, ddx, ddy)
   return best
 end
 
--- The nearest spiral-staircase tile in the current window, as a world-pixel spot,
--- or nil. Staircases that change floor read as their own collision attributes,
--- distinct from the 0x30-0x37 in-plane doors; STAIR_ATTRS lists them.
-local STAIR_ATTRS = {}
-for _, a in ipairs({ 0x38, 0x39, 0x3D, 0x3E, 0x3F }) do STAIR_ATTRS[a] = true end
-local function nearest_stair_tile(s)
+-- The tile-types of a floor-changing spiral staircase, from the game's own tile
+-- detection (zelda3 tile_detect.c, TileDetect_ExecuteInner): north/up stairs read
+-- as 0x1D-0x1F, down stairs as 0x3D-0x3F. (The 0x30-0x37 the door finder keys on
+-- also count as stair tiles there, but they are the in-plane doorways; 0x38-0x3C
+-- are ordinary floor.) An Up hop wants the up set, a Down hop the down set.
+local STAIR_UP   = { [0x1D] = true, [0x1E] = true, [0x1F] = true }
+local STAIR_DOWN = { [0x3D] = true, [0x3E] = true, [0x3F] = true }
+
+-- The nearest staircase tile in the current window matching the wanted direction,
+-- as a world-pixel spot, or nil. Falls back to the other direction's set so a hop
+-- still lands on a staircase even if a room labels its stairs unexpectedly.
+local function nearest_stair_tile(s, want_up)
   local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
   local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
-  local best, best_d
-  for y = 0, 63 do
-    for x = 0, 63 do
-      if STAIR_ATTRS[tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)] then
-        local d = math.abs(x - ltx) + math.abs(y - lty)
-        if best_d == nil or d < best_d then
-          best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+  local function scan(set)
+    local best, best_d
+    for y = 0, 63 do
+      for x = 0, 63 do
+        if set[tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)] then
+          local d = math.abs(x - ltx) + math.abs(y - lty)
+          if best_d == nil or d < best_d then
+            best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+          end
         end
       end
     end
+    return best
   end
-  return best
+  return scan(want_up and STAIR_UP or STAIR_DOWN) or scan(want_up and STAIR_DOWN or STAIR_UP)
 end
 
 -- The middle of the current room's edge in a heading, as a world-pixel spot. Used
@@ -1831,7 +1840,7 @@ hop_goal = function(s, from, to)
   if side == nil then return nil, nil end
   local dir = SIDE_DIR[side]
   if dir == nil then -- Up/Dn: a spiral staircase
-    return nearest_stair_tile(s) or nearest_door_tile(s), side
+    return nearest_stair_tile(s, side == SIDE_UP) or nearest_door_tile(s), side
   end
   return door_toward(s, dir[1], dir[2]) or room_edge_goal(s, dir[1], dir[2]), side
 end
