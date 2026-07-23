@@ -2158,8 +2158,12 @@ function on_draw(canvas)
       end
     end
 
-    local lx = fx + (s.x % 512) * fw // 512
-    local ly = fy + (s.y % 512) * fw // 512
+    -- Link's marker at his sprite CENTRE, not the raw $0020/$0022 which is the
+    -- 16x16 sprite's top-left corner — often up in a wall tile a row or two above
+    -- where he visibly stands, so the raw point reads a tile off from the ground
+    -- (and the bush/entrance) beneath his feet.
+    local lx = fx + ((s.x + 8) % 512) * fw // 512
+    local ly = fy + ((s.y + 8) % 512) * fw // 512
     canvas:rect(lx - 2, ly - 2, 5, 5, 0x40FF60) -- Link
 
     -- A short line in the direction he faces.
