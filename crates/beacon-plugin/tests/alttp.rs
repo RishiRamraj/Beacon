@@ -640,6 +640,40 @@ fn alttp_advance_follows_a_learned_cross_room_route() {
 }
 
 #[test]
+fn alttp_advance_routes_through_unwalked_rooms_via_the_static_graph() {
+    // The whole point of the static graph: route through rooms Link has never
+    // walked. Standing at the Eastern Palace entrance (room 0xC9) with nothing
+    // learned, "advance" toward the Bow (room 0xA9) still finds the way — the
+    // baked graph knows 0xC9 -> 0xB9 -> 0xA9 leaves to the north — and names the
+    // direction ("Head north") rather than the un-connected "roughly" fallback.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Link low in the room, a door tile to the north to leave by.
+    let mut room = dungeon_frame((32, 40), (32, 10), &[]);
+    {
+        let mut set = |addr: u32, v: u8| room[wram_offset(addr).unwrap()] = v;
+        set(0x7E040C, 0x04); // Eastern Palace
+        set(0x7E00A0, 0xC9); // at the entrance room
+        set(0x7EF340, 0x00); // Bow not yet held
+    }
+    plugin.on_frame(&room, 0); // prime
+    plugin.on_frame(&room, 1);
+    let out = plugin.command("advance", &room);
+    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Head north")),
+        "static graph routes north through unwalked rooms: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("roughly")),
+        "and does not fall back to the un-connected heading: {texts:?}"
+    );
+    plugin.on_frame(&room, 2); // pathfind_update emits the guide beacon
+    assert!(path_beacon(&plugin).is_some(), "and starts guiding there");
+}
+
+#[test]
 fn alttp_advance_in_a_cleared_dungeon_heads_for_the_exit() {
     // The L-key "advance" guide, in a dungeon whose prize is already in hand,
     // routes to the exit rather than hunting for more items. Eastern Palace
