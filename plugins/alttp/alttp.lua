@@ -1019,8 +1019,12 @@ function on_frame(frame)
   end
 
   -- Top level state changes: file select, entering a dungeon, and so on. The
-  -- text module is handled just above, so it is not also announced generically.
-  if now.module ~= was.module and now.module ~= 0x0E then
+  -- text module (0x0E) is handled just above, so it is not also announced
+  -- generically. The dungeon (0x07) and overworld (0x09) modules are skipped too:
+  -- being in one is obvious, and the room / area callout just below already says
+  -- where — narrating "dungeon" / "overworld" on top is just noise.
+  if now.module ~= was.module and now.module ~= 0x0E
+      and now.module ~= 0x07 and now.module ~= 0x09 then
     say(module_name(now.module), { priority = "navigation", category = "area" })
   end
 

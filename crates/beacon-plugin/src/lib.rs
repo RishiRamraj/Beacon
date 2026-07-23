@@ -1120,6 +1120,40 @@ mod tests {
     }
 
     #[test]
+    fn alttp_entering_the_dungeon_or_overworld_is_not_narrated() {
+        // Crossing into the dungeon or overworld module should not speak
+        // "dungeon" / "overworld" — the room/area callout already says where.
+        let r = Registry::builtin();
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+        let frame = |module: u8, area: u8| -> Vec<u8> {
+            let mut ram = vec![0u8; 128 * 1024];
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0010, module);
+            set(0x7E0011, 0x00);
+            set(0x7EF36C, 24);
+            set(0x7EF36D, 24);
+            set(0x7E008A, area);
+            ram
+        };
+
+        // Prime in a menu, then cross into the overworld, then into a dungeon.
+        plugin.on_frame(&frame(0x01, 0), 0); // file select (primes prev)
+        let ow = plugin.on_frame(&frame(0x09, 0x1B), 1);
+        assert!(
+            !ow.iter().any(|i| i.text.to_lowercase() == "overworld"),
+            "entering the overworld is not narrated: {:?}",
+            ow.iter().map(|i| &i.text).collect::<Vec<_>>()
+        );
+        let dg = plugin.on_frame(&frame(0x07, 0), 2);
+        assert!(
+            !dg.iter().any(|i| i.text.to_lowercase() == "dungeon"),
+            "entering the dungeon is not narrated: {:?}",
+            dg.iter().map(|i| &i.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn alttp_advance_follows_a_learned_cross_room_route() {
         // Cross-room routing learns a dungeon's connectivity as Link walks it.
         // After observing a walk from one room into the Bow's room, "advance" from
