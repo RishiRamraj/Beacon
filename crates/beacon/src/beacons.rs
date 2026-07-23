@@ -49,11 +49,26 @@ impl BeaconMixer {
     /// A beacon's own `volume` (0 to 1, the plugin's distance curve) is mapped
     /// into `[vol_min, vol_max]` — the player-set quietest and loudest levels — so
     /// the far end and the near end are independently adjustable.
-    pub fn mix(&mut self, beacons: &[BeaconState], out: &mut [f32], vol_min: f32, vol_max: f32) {
+    pub fn mix(
+        &mut self,
+        beacons: &[BeaconState],
+        out: &mut [f32],
+        vol_min: f32,
+        vol_max: f32,
+        music_duck: f32,
+    ) {
         if beacons.is_empty() {
             self.phases.clear();
             self.trem_phases.clear();
             return;
+        }
+
+        // Dip the game audio while beacons are sounding, so the cues cut through
+        // the music rather than fighting it. Done before the tones are added.
+        if music_duck < 1.0 {
+            for s in out.iter_mut() {
+                *s *= music_duck;
+            }
         }
 
         // Forget oscillators the plugin has cleared.
@@ -145,7 +160,7 @@ mod tests {
     fn render(beacons: &[BeaconState], vol_max: f32) -> Vec<f32> {
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.0f32; 2 * 1024];
-        mixer.mix(beacons, &mut out, 0.0, vol_max);
+        mixer.mix(beacons, &mut out, 0.0, vol_max, 1.0);
         out
     }
 
@@ -187,15 +202,34 @@ mod tests {
         // volume_min lifts the floor.
         let mut mixer = BeaconMixer::new(48_000);
         let mut floored = vec![0.0f32; 2 * 256];
-        mixer.mix(&[beacon("e", 100.0, 0.0, 0.0)], &mut floored, 0.1, 0.5);
+        mixer.mix(&[beacon("e", 100.0, 0.0, 0.0)], &mut floored, 0.1, 0.5, 1.0);
         assert!(floored.iter().any(|&s| s != 0.0), "min level makes it audible");
+    }
+
+    #[test]
+    fn music_is_ducked_while_a_beacon_sounds() {
+        // The game audio in `out` is dipped by the duck factor before the beacon
+        // is added, so the cue cuts through. With no beacon, nothing is touched.
+        let mut mixer = BeaconMixer::new(48_000);
+        // A silent beacon (volume 0) adds nothing, so the buffer shows the duck
+        // alone: 1.0 game audio * 0.5 duck = 0.5.
+        let mut out = vec![1.0f32; 2 * 8];
+        mixer.mix(&[beacon("e", 100.0, 0.0, 0.0)], &mut out, 0.0, 1.0, 0.5);
+        assert!(
+            out.iter().all(|&s| (s - 0.5).abs() < 1e-6),
+            "game audio ducked to half: {out:?}"
+        );
+        // No beacon -> no ducking.
+        let mut out = vec![1.0f32; 4];
+        mixer.mix(&[], &mut out, 0.0, 1.0, 0.5);
+        assert!(out.iter().all(|&s| s == 1.0), "untouched with no beacon");
     }
 
     #[test]
     fn no_beacons_leaves_the_buffer_untouched() {
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.25f32; 8];
-        mixer.mix(&[], &mut out, 0.0, 1.0);
+        mixer.mix(&[], &mut out, 0.0, 1.0, 1.0);
         assert!(out.iter().all(|&s| s == 0.25));
     }
 
@@ -204,7 +238,7 @@ mod tests {
         // Loud game audio already near the rails, plus a beacon.
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.95f32; 2 * 512];
-        mixer.mix(&[beacon("e", 100.0, 0.0, 1.0)], &mut out, 0.0, 1.0);
+        mixer.mix(&[beacon("e", 100.0, 0.0, 1.0)], &mut out, 0.0, 1.0, 1.0);
         assert!(out.iter().all(|&s| (-1.0..=1.0).contains(&s)));
     }
 
@@ -221,7 +255,7 @@ mod tests {
             b.tremolo = tremolo;
             let mut mixer = BeaconMixer::new(48_000);
             let mut out = vec![0.0f32; 2 * 4800]; // 100 ms; a 30 Hz LFO = 3 cycles
-            mixer.mix(std::slice::from_ref(&b), &mut out, 0.0, 1.0);
+            mixer.mix(std::slice::from_ref(&b), &mut out, 0.0, 1.0, 1.0);
             let mono: Vec<f32> = out.chunks(2).map(|f| f[0]).collect();
             let mut lo = f32::MAX;
             let mut hi = 0.0f32;
@@ -255,8 +289,8 @@ mod tests {
         let bs = [b];
         let mut a1 = vec![0.0f32; 2 * 64];
         let mut a2 = vec![0.0f32; 2 * 64];
-        mixer.mix(&bs, &mut a1, 0.0, 1.0);
-        mixer.mix(&bs, &mut a2, 0.0, 1.0);
+        mixer.mix(&bs, &mut a1, 0.0, 1.0, 1.0);
+        mixer.mix(&bs, &mut a2, 0.0, 1.0, 1.0);
         // If the tremolo phase reset to 0 at the second call, the first sample of
         // a2 would use the same LFO value as the first sample of a1. Continuity
         // means the store advanced it; assert the mixer kept a tremolo phase.
@@ -276,8 +310,8 @@ mod tests {
         let b = [beacon("e", 0.0, 100.0, 1.0)];
         let mut a1 = vec![0.0f32; 2 * 64];
         let mut a2 = vec![0.0f32; 2 * 64];
-        mixer.mix(&b, &mut a1, 0.0, 1.0);
-        mixer.mix(&b, &mut a2, 0.0, 1.0);
+        mixer.mix(&b, &mut a1, 0.0, 1.0, 1.0);
+        mixer.mix(&b, &mut a2, 0.0, 1.0, 1.0);
         // The step between the last sample of a1 and the first of a2 is no larger
         // than the largest step within a single buffer.
         let max_internal = a1

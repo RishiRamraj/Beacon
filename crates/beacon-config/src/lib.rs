@@ -122,15 +122,22 @@ pub struct Beacons {
     /// Quietest a beacon gets, at the edge of its range. 0 to 1. A plugin's
     /// distance curve is mapped into `[volume_min, volume_max]`.
     pub volume_min: f32,
+    /// How far the game audio is dipped while any beacon is sounding, so the
+    /// cues cut through the music. 1.0 leaves the game at full volume; 0.5 is
+    /// roughly -6 dB. Applied to the game buffer before beacons are added.
+    pub music_duck: f32,
 }
 
 impl Default for Beacons {
     fn default() -> Self {
         Beacons {
             enabled: true,
-            // Modest, so beacons sit under the game audio; fully tunable.
-            volume_max: 0.15,
-            volume_min: 0.0,
+            // Loud enough to carry over the music, with a wide floor-to-peak
+            // range so a source audibly swells as the player closes on it.
+            volume_max: 0.5,
+            volume_min: 0.05,
+            // Dip the music ~6 dB while a beacon plays so the cue stays clear.
+            music_duck: 0.5,
         }
     }
 }
@@ -327,6 +334,7 @@ impl Settings {
             "beacons.enabled",
             "beacons.volume_max",
             "beacons.volume_min",
+            "beacons.music_duck",
         ]
     }
 
@@ -347,6 +355,7 @@ impl Settings {
             "beacons.enabled" => self.beacons.enabled.to_string(),
             "beacons.volume_max" => self.beacons.volume_max.to_string(),
             "beacons.volume_min" => self.beacons.volume_min.to_string(),
+            "beacons.music_duck" => self.beacons.music_duck.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
         })
     }
@@ -391,6 +400,9 @@ impl Settings {
             }
             "beacons.volume_min" => {
                 self.beacons.volume_min = parse::<f32>(key, value)?.clamp(0.0, 1.0)
+            }
+            "beacons.music_duck" => {
+                self.beacons.music_duck = parse::<f32>(key, value)?.clamp(0.0, 1.0)
             }
             other => return Err(Error::UnknownKey(other.to_string())),
         }
