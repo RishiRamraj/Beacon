@@ -784,6 +784,17 @@ local function ow_line(w, x0, y0, x1, y1)
   end
 end
 
+-- Large overworld areas (Hyrule Castle, Kakariko, ...) span a 2x2 block of cells
+-- that all share one "parent" id — the id the game reports in $008A. Routing must
+-- treat any cell of a large area as the same destination, else it drags Link to
+-- the parent's top-left cell when he is already on the screen. The parent table
+-- is indexed by the within-world cell (0-0x3F); the value is the parent cell.
+local OW_PARENT = nil
+local function ow_parent(cell)
+  if OW_PARENT == nil then OW_PARENT = rom.slice(0x125EC, 0x40) end
+  return (string.byte(OW_PARENT, (cell & 0x3F) + 1) or (cell & 0x3F)) & 0x3F
+end
+
 local OW_ASTAR_CAP = 40000 -- node budget; bounds a worst-case mazey route
 
 -- A* over 8-pixel world tiles from Link's footing toward (gx,gy). If `goal_area`
@@ -798,10 +809,11 @@ local function ow_plan_path(s, gx, gy, goal_area)
   if sx == nil or gx == nil then return nil end
   local function key(x, y) return y * 512 + x end
   local function heur(x, y) return math.abs(x - gx) + math.abs(y - gy) end
+  local goal_parent = ow_parent(goal_area or 0)
   local function is_goal(n)
     if goal_area == nil then return n == key(gx, gy) end
     local nx, ny = n % 512, n // 512
-    return (ny >> 6) * 8 + (nx >> 6) == goal_area
+    return ow_parent((ny >> 6) * 8 + (nx >> 6)) == goal_parent
   end
   local g, came, closed, heap = { [key(sx, sy)] = 0 }, {}, {}, {}
   local function push(n, f)
@@ -1793,8 +1805,16 @@ local function advance_overworld(s, v)
     nav_say(string.format("Next: %s. Head %s, then cross to the %s.", m.goal, dir or "toward it", which))
     return
   end
-  -- Same world: draw a path onto the destination screen (nearest reachable tile
-  -- there), rather than a possibly-walled centre.
+  -- Already on the destination screen (comparing parents, so a large 2x2 area
+  -- counts wherever Link stands in it): the objective is here, so stop routing
+  -- and hand off — the exact entrance is a per-objective waypoint, still to come.
+  if ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
+    ow_route_stop()
+    nav_say(string.format("You're at %s. Look for the entrance.", m.goal))
+    return
+  end
+  -- Same world, elsewhere: draw a path onto the destination screen (nearest
+  -- reachable tile there), rather than a possibly-walled centre.
   ow_route_to_area(area)
   nav_say(string.format("Routing to %s.", m.goal))
 end
