@@ -505,7 +505,8 @@ fn install_rom(lua: &Lua, rom: Rc<Vec<u8>>) -> Result<(), Error> {
 /// A plugin re-sets its beacons each frame with fresh offsets as things move; the
 /// host reads the live set and renders the sound. `opts`: `x`/`y` (rightward and
 /// forward offset, for pan direction), `pitch` (default 1), `volume` (0-1,
-/// default 1 — the plugin sets this from distance).
+/// default 1 — the plugin sets this from distance), `tremolo` (Hz, default 0 —
+/// the amplitude pulses at this rate, so a class can carry a rhythmic signature).
 fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
     let table = lua.create_table()?;
 
@@ -517,6 +518,7 @@ fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
             let dy = opts.get::<Option<f64>>("y")?.unwrap_or(0.0) as f32;
             let pitch = opts.get::<Option<f64>>("pitch")?.unwrap_or(1.0) as f32;
             let volume = opts.get::<Option<f64>>("volume")?.unwrap_or(1.0) as f32;
+            let tremolo = opts.get::<Option<f64>>("tremolo")?.unwrap_or(0.0) as f32;
             store.borrow_mut().insert(
                 id.clone(),
                 BeaconState {
@@ -525,6 +527,7 @@ fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
                     dy,
                     pitch,
                     volume: volume.clamp(0.0, 1.0),
+                    tremolo: tremolo.max(0.0),
                 },
             );
             Ok(())

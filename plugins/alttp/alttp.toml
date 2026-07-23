@@ -29,6 +29,22 @@ indoors     = { addr = 0x7E001B, size = 1 }
 dungeon_room = { addr = 0x7E00A0, size = 2 }
 ow_screen   = { addr = 0x7E008A, size = 2 }
 world       = { addr = 0x7E007B, size = 1 }
+# Quest progress, read for the strategic "objective" guidance. Offsets are the
+# SRAM save mirror in WRAM, from the disassembly's Zelda_3_SRM.log:
+#   progress $3C5 = 0 bed / 1 has sword / 2 Zelda at Sanctuary / 3 Agahnim beaten
+#   pendants $374 bitfield: 0x01 Courage, 0x02 Wisdom, 0x04 Power
+#   crystals $37A bitfield: 0x02 Dark Palace, 0x10 Swamp, 0x40 Skull Woods,
+#     0x20 Thieves' Town, 0x04 Ice, 0x01 Misery Mire, 0x08 Turtle Rock
+#   sword $359: 0 none / 1 Fighter / 2 Master / 3 Tempered / 4 Golden
+progress    = { addr = 0x7EF3C5, size = 1 }
+pendants    = { addr = 0x7EF374, size = 1 }
+crystals    = { addr = 0x7EF37A, size = 1 }
+sword       = { addr = 0x7EF359, size = 1 }
+# Which dungeon Link is in ($040C, the "map index"): the dungeon's intuitive
+# index times two. 0x02 Hyrule Castle, 0x04 Eastern, 0x06 Desert, 0x08 Castle
+# Tower, 0x0A Swamp, 0x0C Dark Palace, 0x0E Misery Mire, 0x10 Skull Woods,
+# 0x12 Ice, 0x14 Tower of Hera, 0x16 Thieves', 0x18 Turtle Rock, 0x1A Ganon's.
+dungeon_id  = { addr = 0x7E040C, size = 1 }
 
 # Custom commands this plugin provides, beyond the standard scan/where/status.
 # The user binds keys to these in the input configuration; the host reads the id
@@ -61,3 +77,12 @@ label = "Drop a waypoint marker"
 [[command]]
 id    = "guide_to_mark"
 label = "Guide back to the marker"
+
+[[command]]
+id    = "objective"
+label = "Say the current quest objective"
+
+[[command]]
+id    = "advance"
+label = "Guide to the next quest step"
+key   = "KeyL"                       # "L" for the lead/guide; rebindable

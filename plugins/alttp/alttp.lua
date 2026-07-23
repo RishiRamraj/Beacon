@@ -36,6 +36,17 @@ local function module_name(m)
   return names[m] or "unknown"
 end
 
+-- Modules whose entry is not announced by the generic module-change callout:
+-- the text box (spoken separately), the two in-play modules (obvious, and the
+-- room/area callout covers location), and the non-interactive title screens.
+local MODULE_SILENT = {
+  [0x00] = true, -- intro
+  [0x07] = true, -- dungeon (in play)
+  [0x09] = true, -- overworld (in play)
+  [0x0e] = true, -- text box
+  [0x14] = true, -- attract mode
+}
+
 local function facing(direction)
   if direction == 0 then return "north"
   elseif direction == 2 then return "south"
@@ -61,8 +72,124 @@ local function read_state()
     dungeon_room = mem.u16(A.dungeon_room.addr),
     ow_screen = mem.u16(A.ow_screen.addr),
     world = mem.u8(A.world.addr),
+    dungeon_id = mem.u8(A.dungeon_id.addr),
   }
 end
+
+-- The game's critical path, as an ordered spine of objectives. The local guide
+-- (#28) navigates tactically within a room but has no idea where the player
+-- *should* be heading; this is the strategic layer that gives it a destination.
+-- Order and gating are cross-checked against a thorough walkthrough; each step's
+-- `done` predicate reads the quest-progress bytes so the current objective is
+-- inferred from the save, not tracked separately. `done` is evaluated in order
+-- and the first unfinished step is the current one.
+--
+-- The three pendants collectively gate the Master Sword and individually mark
+-- their dungeons (Courage=Eastern, Power=Desert, Wisdom=Hera); the seven
+-- crystals likewise mark the Dark World dungeons. The intro spine (grab the
+-- Lamp, reach Uncle, escort Zelda, beat Agahnim) rides on the $3C5 progress
+-- byte, which the game advances 0->1->2->3 at exactly those beats.
+local MILESTONES = {
+  { goal = "Reach your uncle for the sword",
+    hint = "Leave the house and head north into Hyrule Castle. Grab the Lamp on the way, find your dying uncle for the sword and shield, then free Princess Zelda in the cell below.",
+    done = function(v) return v.progress >= 1 end },
+  { goal = "Escort Zelda to the Sanctuary",
+    hint = "Take Zelda up through the castle and out the hidden north passage to the Sanctuary. Then seek out Sahasrahla to begin the hunt for the three Pendants.",
+    done = function(v) return v.progress >= 2 end },
+  { goal = "Eastern Palace, the first pendant",
+    hint = "The big green palace at the far east edge of the Light World. Clear it for the Bow and the Pendant of Courage; Sahasrahla then gives you the Pegasus Boots.",
+    done = function(v) return v.pendants & 0x01 ~= 0 end },
+  { goal = "Desert Palace, the second pendant",
+    hint = "The Desert of Mystery in the southwest. Read the stone tablet there with the Book of Mudora to open the way in. Clear it for the Power Glove and the Pendant of Power.",
+    done = function(v) return v.pendants & 0x04 ~= 0 end },
+  { goal = "Tower of Hera, the third pendant",
+    hint = "The summit of Death Mountain, to the north. Take the Magic Mirror from the old man on the climb and the Moon Pearl inside. Clear it for the Pendant of Wisdom.",
+    done = function(v) return v.pendants & 0x02 ~= 0 end },
+  { goal = "Claim the Master Sword",
+    hint = "Deep in the Lost Woods, northwest. With all three Pendants, pull the Master Sword from its pedestal in the grove.",
+    done = function(v) return v.sword >= 2 end },
+  { goal = "Hyrule Castle Tower, defeat Agahnim",
+    hint = "The Master Sword breaks the barrier around the castle's front tower. Climb to the top and defeat Agahnim; the fight casts you into the Dark World.",
+    done = function(v) return v.progress >= 3 end },
+  { goal = "Palace of Darkness, the first crystal",
+    hint = "Northeast Dark World, near the Pyramid. You need the Moon Pearl to stay human and the Bow. Clear it for the Magic Hammer.",
+    done = function(v) return v.crystals & 0x02 ~= 0 end },
+  { goal = "Swamp Palace, the second crystal",
+    hint = "The southern Dark World swamp. First open the dam in the Light World swamp to lower the water, then Mirror across. Clear it for the Hookshot.",
+    done = function(v) return v.crystals & 0x10 ~= 0 end },
+  { goal = "Skull Woods, the third crystal",
+    hint = "The northwest Dark World woods, the counterpart of the Lost Woods. Clear it for the Fire Rod.",
+    done = function(v) return v.crystals & 0x40 ~= 0 end },
+  { goal = "Thieves' Town, the fourth crystal",
+    hint = "The Village of Outcasts in the west Dark World. Clear it for the Titan's Mitt, which lifts the heavy dark rocks gating the last three dungeons.",
+    done = function(v) return v.crystals & 0x20 ~= 0 end },
+  { goal = "Ice Palace, the fifth crystal",
+    hint = "The island in the far southeast Dark World. Clear it for the Blue Mail.",
+    done = function(v) return v.crystals & 0x04 ~= 0 end },
+  { goal = "Misery Mire, the sixth crystal",
+    hint = "The southwest Dark World. Stand at the entrance and use the Ether Medallion to open it. Clear it for the Cane of Somaria.",
+    done = function(v) return v.crystals & 0x01 ~= 0 end },
+  { goal = "Turtle Rock, the seventh crystal",
+    hint = "The summit of the Dark World Death Mountain, east. Use the Quake Medallion at the Light World Lake of Ill Omen to open it. Clear it for the Mirror Shield.",
+    done = function(v) return v.crystals & 0x08 ~= 0 end },
+  { goal = "Ganon's Tower, then Ganon",
+    hint = "With all seven Crystals the seal on Ganon's Tower, atop the Dark World Death Mountain, lifts. Beat Agahnim again at the top, then finish Ganon at the Pyramid with the Silver Arrows.",
+    done = function(_) return false end },
+}
+
+-- The quest-progress bytes the objective logic reads. Kept separate from
+-- read_state's moment-to-moment fields since it is only consulted on demand.
+local function read_progress()
+  local p = mem.u8(A.progress.addr)
+  if p == nil then return nil end
+  return {
+    progress = p,
+    pendants = mem.u8(A.pendants.addr),
+    crystals = mem.u8(A.crystals.addr),
+    sword = mem.u8(A.sword.addr),
+  }
+end
+
+-- The first unfinished milestone: the player's current objective. Returns its
+-- index and record; the last is terminal (never "done") so this always yields.
+local function current_milestone(v)
+  for i, m in ipairs(MILESTONES) do
+    if not m.done(v) then return i, m end
+  end
+  return #MILESTONES, MILESTONES[#MILESTONES]
+end
+
+-- Whether the dungeon Link is standing in has already been cleared, keyed by the
+-- $040C dungeon id. "Cleared" means its prize is in hand: the pendant for a Light
+-- World dungeon, the crystal for a Dark World one (same bitfields the milestone
+-- logic reads). Dungeons without a collectible prize (the castle, the sewer, the
+-- towers) are never "done" here — the milestone spine covers those. If the guide
+-- finds the current dungeon cleared, there is nothing left to fetch and it heads
+-- for the exit.
+local DUNGEON_DONE = {
+  [0x04] = function(v) return v.pendants & 0x01 ~= 0 end, -- Eastern  -> Courage
+  [0x06] = function(v) return v.pendants & 0x04 ~= 0 end, -- Desert   -> Power
+  [0x14] = function(v) return v.pendants & 0x02 ~= 0 end, -- Hera     -> Wisdom
+  [0x0C] = function(v) return v.crystals & 0x02 ~= 0 end, -- Dark Palace
+  [0x0A] = function(v) return v.crystals & 0x10 ~= 0 end, -- Swamp
+  [0x10] = function(v) return v.crystals & 0x40 ~= 0 end, -- Skull Woods
+  [0x16] = function(v) return v.crystals & 0x20 ~= 0 end, -- Thieves' (Gargoyle)
+  [0x12] = function(v) return v.crystals & 0x04 ~= 0 end, -- Ice
+  [0x0E] = function(v) return v.crystals & 0x01 ~= 0 end, -- Misery Mire
+  [0x18] = function(v) return v.crystals & 0x08 ~= 0 end, -- Turtle Rock
+}
+
+-- The SRAM room-data table: one 16-bit word per dungeon room at $7EF000 + room*2
+-- (room is the $00A0 value). Bit layout, high byte `dddd b k ck cr`, low byte
+-- `cccc qqqq`: bits 4-7 chests opened, bit 10 key/item taken, bit 11 boss beaten.
+-- Lets the guide tell which of a dungeon's chests and its boss are already done.
+local ROOM_DATA = 0x7EF000
+local function room_word(room)
+  return mem.u8(ROOM_DATA + room * 2) + mem.u8(ROOM_DATA + room * 2 + 1) * 256
+end
+local function room_chests_opened(room) return (room_word(room) >> 4) & 0x0F end
+local function room_item_taken(room) return room_word(room) & 0x0400 ~= 0 end
+local function room_boss_beaten(room) return room_word(room) & 0x0800 ~= 0 end
 
 -- Whether the player is actually controlling Link, as opposed to sitting in a
 -- menu, a transition, or the intro.
@@ -79,7 +206,10 @@ local prev = nil
 -- Latched so the warning fires on crossing the threshold, not every frame below.
 local low_health_warned = false
 -- Whether each sprite slot's enemy has already been announced since it entered
--- the visible screen, so each entrance speaks once. Reset when it leaves.
+-- the visible screen, so each entrance speaks once. Reset only once it has left
+-- the screen — not merely ducked out of line of sight, so a patrolling enemy
+-- weaving behind cover is not re-announced as a fresh enemy each time it steps
+-- back into view (which sounds like a whole sequence of enemies).
 local announced = {}
 
 -- Sprite table: 16 slots of active objects and enemies. Addresses from the
@@ -184,15 +314,27 @@ local ITEM_TYPES = { [98]=true, [178]=true, [216]=true, [217]=true, [218]=true, 
 -- People to talk to and switches to act on — interactable, but not picked up.
 local NPC_TYPES = { [22]=true, [30]=true, [31]=true, [33]=true, [47]=true, [49]=true, [53]=true, [54]=true, [60]=true, [76]=true, [82]=true, [115]=true, [117]=true, [118]=true, [120]=true, [171]=true, [173]=true, [187]=true, [233]=true }
 
--- Per-class tone and reach. `pitch` scales the 330 Hz base tone (higher is
--- brighter); enemies keep the original 1.0. `range` is Manhattan pixels — about
--- 16 to a tile, so 24 is "within a block", the near-only reach for scenery.
+-- Per-class tone, reach, and pulse. `pitch` scales the 330 Hz base tone (higher
+-- is brighter); enemies keep the original 1.0. `range` is Manhattan pixels —
+-- about 16 to a tile, so 24 is "within a block", the near-only reach for scenery.
+-- `tremolo` is the amplitude-pulse rate in Hz: a rhythmic signature that tells
+-- the classes apart by ear even when they overlap. The rate rises with danger —
+-- scenery and pickups are calm or steady, enemies throb fast (and faster still
+-- the tougher they are, see the emission loop). The guide tone stays steady (no
+-- tremolo) so the thing you actively steer by is never mistaken for a threat.
 local BEACON_KINDS = {
-  enemy = { pitch = 1.0, range = 224 },
-  item  = { pitch = 2.0, range = 224 },
-  npc   = { pitch = 1.5, range = 224 },
-  minor = { pitch = 0.5, range = 24 },
+  enemy = { pitch = 1.0, range = 224, tremolo = 6.0 }, -- base; scaled by HP below
+  item  = { pitch = 2.0, range = 224, tremolo = 2.0 }, -- a calm "come and get me"
+  npc   = { pitch = 1.5, range = 224, tremolo = 3.5 }, -- gently active, but safe
+  minor = { pitch = 0.5, range = 24,  tremolo = 0.0 }, -- steady, incidental
 }
+
+-- Enemy pulse scales with toughness: the base rate plus a term in the sprite's
+-- health, so a stronger foe throbs faster and more urgently. Health is capped
+-- before scaling so a boss's huge HP does not run the rate off into a buzz.
+local ENEMY_TREMOLO_BASE = 6.0    -- Hz, a plain enemy with little or no health
+local ENEMY_TREMOLO_PER_HP = 0.06 -- added Hz per point of (capped) health
+local ENEMY_TREMOLO_HP_CAP = 160  -- health past this does not pulse any faster
 
 -- How much a wall between the player and a source dims its beacon: muffled, not
 -- silenced, so an occluded threat still registers.
@@ -378,6 +520,77 @@ local function tile_attr_at(s, px, py)
   return nil
 end
 
+-- ===========================================================================
+-- Full-overworld collision from ROM. The live $7E2000 table only holds the
+-- loaded screens, so to route to a distant objective we decode any area's map16
+-- layout straight from the cartridge: two LZ2-compressed blobs per area -> 256
+-- map32 indices -> map16 via the corner tables -> the same map16->map8->attr
+-- decode ow_tile_attr already does. Verified byte-for-byte against the live
+-- $7E2000 table (1022/1024 cells; the 2 diffs were a runtime door overlay).
+-- Areas are decoded on first use and cached; the whole ROM is sliced lazily,
+-- since a player who never routes on the overworld need not pay for it.
+-- ===========================================================================
+local OW_ROM = nil                              -- whole cart (compressed blobs are scattered)
+local OW_PTR_HI, OW_PTR_LO = 0x1794D, 0x17B2D   -- map32 blob pointer tables (PC), 3-byte SNES ptrs
+local OW_CORNER = { 0x18000, 0x1B400, 0x20000, 0x23400 } -- map32->map16 corner tables TL TR BL BR (PC)
+local ow_area_cache = {}
+
+local function ow_rb(o) return string.byte(OW_ROM, o + 1) end
+
+-- The overworld LZ2 variant (command 4's back-reference is a big-endian absolute
+-- index into the output). Terminator 0xFF; header top 3 bits command, low 5 bits
+-- length-1, with the 111 escape carrying a 10-bit length.
+local function ow_lz2(p)
+  local out = {}
+  while true do
+    local h = ow_rb(p); if h == 0xFF then break end
+    local c = h >> 5; local l = h & 0x1F
+    if c == 7 then c = (h >> 2) & 7; l = ((h & 3) << 8) | ow_rb(p + 1); p = p + 1 end
+    l = l + 1
+    if c == 0 then for j = 0, l - 1 do out[#out + 1] = ow_rb(p + 1 + j) end; p = p + l + 1
+    elseif c == 1 then local v = ow_rb(p + 1); for j = 0, l - 1 do out[#out + 1] = v end; p = p + 2
+    elseif c == 2 then local a, b2 = ow_rb(p + 1), ow_rb(p + 2); for j = 0, l - 1 do out[#out + 1] = (j % 2 == 0) and a or b2 end; p = p + 3
+    elseif c == 3 then local v = ow_rb(p + 1); for j = 0, l - 1 do out[#out + 1] = (v + j) & 0xFF end; p = p + 2
+    elseif c == 4 then local f = (ow_rb(p + 1) << 8) | ow_rb(p + 2); for j = 0, l - 1 do out[#out + 1] = out[f + 1 + j] end; p = p + 3
+    else return nil end
+    if #out > 4096 then return nil end
+  end
+  return out
+end
+
+-- Expand a map32 index into one of its four map16 corners (cn: 1 TL, 2 TR, 3 BL,
+-- 4 BR). Six ROM bytes encode four map32s: four low bytes then two packed nibbles.
+local function ow_map16(t, cn)
+  local C = OW_CORNER[cn]; local g = t >> 2; local k = t & 3; local bs = C + g * 6
+  local lo = ow_rb(bs + k); local hib = ow_rb(bs + 4 + (k >> 1))
+  local hn = ((k & 1) == 0) and ((hib >> 4) & 0xF) or (hib & 0xF)
+  return lo | (hn << 8)
+end
+
+-- The 256 map32 indices (a 16x16 grid) of one overworld area, decoded and cached.
+local function ow_area(area)
+  local cached = ow_area_cache[area]; if cached then return cached end
+  if OW_ROM == nil then OW_ROM = rom.slice(0, 0x100000) end
+  local function r24(o) return ow_rb(o) | (ow_rb(o + 1) << 8) | (ow_rb(o + 2) << 16) end
+  local hi = ow_lz2(snes_to_rom(r24(OW_PTR_HI + 3 * area)))
+  local lo = ow_lz2(snes_to_rom(r24(OW_PTR_LO + 3 * area)))
+  if hi == nil or lo == nil then return nil end
+  local m = {}
+  for n = 0, 255 do m[n] = ((hi[n + 1] or 0) << 8) | (lo[n + 1] or 0) end
+  ow_area_cache[area] = m
+  return m
+end
+
+-- Collision attribute at absolute overworld pixel (px, py) in world w (0 light, 1
+-- dark), decoded from ROM — the cross-screen counterpart of tile_attr_at.
+local function ow_rom_attr(w, px, py)
+  local area = w * 0x40 + (py >> 9) * 8 + (px >> 9)
+  local m = ow_area(area); if m == nil then return nil end
+  local lx, ly = (px & 0x1FF) >> 4, (py & 0x1FF) >> 4
+  local n = (ly >> 1) * 16 + (lx >> 1); local cn = 1 + (lx & 1) + ((ly & 1) << 1)
+  return ow_tile_attr(ow_map16(m[n], cn), px >> 3, py)
+end
+
 -- Whether a wall lies on the straight line between two world points, so a sprite
 -- behind it is out of sight. Walks the 8-pixel tiles the segment crosses
 -- (Bresenham), skipping the two endpoint tiles — Link's own tile and the
@@ -527,6 +740,121 @@ local function simplify(s, tiles)
   return out
 end
 
+-- ===========================================================================
+-- Overworld cross-screen routing: A* over the ROM-decoded collision of the whole
+-- world, not just the loaded window, so a route can span screens to a distant
+-- objective. Same 8-pixel grid the local planner uses; the collision comes from
+-- ow_rom_attr instead of the live table. Measured a few hundred nodes for a
+-- cross-field route — fast enough to replan while walking.
+-- ===========================================================================
+local function ow_walk(w, tx, ty)
+  if tx < 0 or tx > 511 or ty < 0 or ty > 511 then return false end
+  local a = ow_rom_attr(w, tx * 8 + 4, ty * 8 + 4)
+  return a ~= nil and not IMPASSABLE[a]
+end
+
+-- The nearest walkable tile to (tx,ty), spiralling out — Link's $0020/$0022 is his
+-- head, often inside a wall attribute, so a route must seed from real footing.
+local function ow_nearest_walk(w, tx, ty)
+  for r = 0, 12 do
+    for dy = -r, r do
+      for dx = -r, r do
+        if math.max(math.abs(dx), math.abs(dy)) == r and ow_walk(w, tx + dx, ty + dy) then
+          return tx + dx, ty + dy
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- Whether the straight line between two world tiles stays walkable (string-pull).
+local function ow_line(w, x0, y0, x1, y1)
+  local dx, dy = math.abs(x1 - x0), -math.abs(y1 - y0)
+  local sx = x0 < x1 and 1 or -1
+  local sy = y0 < y1 and 1 or -1
+  local err = dx + dy
+  local x, y = x0, y0
+  while true do
+    if not ow_walk(w, x, y) then return false end
+    if x == x1 and y == y1 then return true end
+    local e2 = 2 * err
+    if e2 >= dy then err = err + dy; x = x + sx end
+    if e2 <= dx then err = err + dx; y = y + sy end
+  end
+end
+
+local OW_ASTAR_CAP = 40000 -- node budget; bounds a worst-case mazey route
+
+-- A* over 8-pixel world tiles from Link's footing toward (gx,gy). If `goal_area`
+-- (a 0..0x3F within-world area index) is given, the goal is any reachable tile in
+-- that area — so it stops at the screen boundary rather than a possibly-walled
+-- centre — and (gx,gy) is only the heuristic aim point. Returns a string-pulled
+-- list of world tiles {tx,ty}, or nil if unreachable / off the map.
+local function ow_plan_path(s, gx, gy, goal_area)
+  local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
+  local sx, sy = ow_nearest_walk(w, s.x >> 3, s.y >> 3)
+  if goal_area == nil then gx, gy = ow_nearest_walk(w, gx, gy) end
+  if sx == nil or gx == nil then return nil end
+  local function key(x, y) return y * 512 + x end
+  local function heur(x, y) return math.abs(x - gx) + math.abs(y - gy) end
+  local function is_goal(n)
+    if goal_area == nil then return n == key(gx, gy) end
+    local nx, ny = n % 512, n // 512
+    return (ny >> 6) * 8 + (nx >> 6) == goal_area
+  end
+  local g, came, closed, heap = { [key(sx, sy)] = 0 }, {}, {}, {}
+  local function push(n, f)
+    heap[#heap + 1] = { n, f }
+    local i = #heap
+    while i > 1 and heap[i >> 1][2] > heap[i][2] do heap[i], heap[i >> 1] = heap[i >> 1], heap[i]; i = i >> 1 end
+  end
+  local function pop()
+    local top = heap[1][1]
+    heap[1] = heap[#heap]; heap[#heap] = nil
+    local i, n = 1, #heap
+    while true do
+      local l, r, m = i * 2, i * 2 + 1, i
+      if l <= n and heap[l][2] < heap[m][2] then m = l end
+      if r <= n and heap[r][2] < heap[m][2] then m = r end
+      if m == i then break end
+      heap[i], heap[m] = heap[m], heap[i]; i = m
+    end
+    return top
+  end
+  push(key(sx, sy), heur(sx, sy))
+  local reached, expanded = nil, 0
+  while #heap > 0 and expanded < OW_ASTAR_CAP do
+    local n = pop()
+    if is_goal(n) then reached = n; break end
+    if not closed[n] then
+      closed[n] = true; expanded = expanded + 1
+      local nx, ny = n % 512, n // 512
+      for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+        local cx, cy = nx + d[1], ny + d[2]
+        if ow_walk(w, cx, cy) then
+          local c = key(cx, cy); local ng = g[n] + 1
+          if g[c] == nil or ng < g[c] then g[c] = ng; came[c] = n; push(c, ng + heur(cx, cy)) end
+        end
+      end
+    end
+  end
+  if reached == nil then return nil end
+  local rev, c = {}, reached
+  while c do rev[#rev + 1] = { c % 512, c // 512 }; c = came[c] end
+  local pts = {}
+  for i = #rev, 1, -1 do pts[#pts + 1] = rev[i] end
+  if #pts <= 2 then return pts end
+  local out, anchor = { pts[1] }, 1
+  for i = 2, #pts - 1 do
+    if not ow_line(w, pts[anchor][1], pts[anchor][2], pts[i + 1][1], pts[i + 1][2]) then
+      out[#out + 1] = pts[i]; anchor = i
+    end
+  end
+  out[#out + 1] = pts[#pts]
+  return out
+end
+
 -- Follower state. Global so an agent can inspect/drive it over MCP.
 pathfind_active = false
 pathfind_path = nil   -- string-pulled list of world-tile waypoints {tx, ty}
@@ -627,6 +955,130 @@ local function pathfind_update(s)
   })
 end
 
+-- The nearest door / passage tile in the current 64x64 window, as world pixel
+-- coordinates (centre of the tile), or nil if none is in view. Shared by the
+-- door guide and the dungeon exit-finder.
+local function nearest_door_tile(s)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local best, best_d
+  for y = 0, 63 do
+    for x = 0, 63 do
+      local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
+      if attr and attr >= 0x30 and attr <= 0x37 then -- a door / passage tile
+        local d = math.abs(x - ltx) + math.abs(y - lty)
+        if best_d == nil or d < best_d then
+          best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+        end
+      end
+    end
+  end
+  return best
+end
+
+-- The nearest on-screen item pickup (a sprite in ITEM_TYPES), as world pixel
+-- coordinates, or nil. sprites() is sorted nearest-first, so the first match is
+-- the closest. Used by the dungeon guide to fetch a loose item in the room.
+local function nearest_item_sprite(s)
+  for _, sp in ipairs(sprites()) do
+    if ITEM_TYPES[sp.kind] then return { sp.x, sp.y } end
+  end
+  return nil
+end
+
+-- ===========================================================================
+-- Cross-room dungeon routing: a room-to-room guide layered over the local
+-- pathfinder, which only reaches within the current room. Rather than decode the
+-- ROM's door tables, the plugin *learns* a dungeon's connectivity as Link walks
+-- it: each room transition records a directed edge and the spot in the room he
+-- left from. A breadth-first search over that learned graph gives the next room
+-- to head for, and the local pathfinder is aimed at the door that leaves toward
+-- it, re-aimed at every room boundary. Rooms not yet walked simply are not in the
+-- graph; guidance falls back to a compass heading until exploration connects them.
+-- ===========================================================================
+
+-- Learned graph: from_room -> { to_room -> {x, y} }, the absolute pixel spot in
+-- from_room where the walk into to_room happened (so aiming Link back at it
+-- re-triggers the same transition — works for doors, stairs, and holes alike).
+-- Room ids are globally unique, so one graph spans every dungeon. Global for MCP.
+room_graph = {}
+local rg_last_room = nil -- last stable dungeon room
+local rg_last_pos = nil  -- Link's pixel spot on the previous in-play frame
+
+-- Grow the graph by observing room transitions. Runs every frame.
+local function record_room_transition(s)
+  if s.module ~= 0x07 or not in_play(s) then rg_last_room = nil; return end
+  local room = s.dungeon_room
+  if rg_last_room ~= nil and rg_last_room ~= room and rg_last_pos ~= nil then
+    local g = room_graph[rg_last_room]
+    if g == nil then g = {}; room_graph[rg_last_room] = g end
+    g[room] = { rg_last_pos[1], rg_last_pos[2] }
+  end
+  rg_last_room = room
+  rg_last_pos = { s.x, s.y }
+end
+
+-- Breadth-first search over learned edges: the ordered list of rooms after
+-- `from`, ending at `to`, or nil if the graph does not yet connect them.
+local function room_path(from, to)
+  if from == to then return {} end
+  local prev, queue, head = { [from] = false }, { from }, 1
+  while head <= #queue do
+    local r = queue[head]; head = head + 1
+    for nr in pairs(room_graph[r] or {}) do
+      if prev[nr] == nil then
+        prev[nr] = r
+        if nr == to then
+          local path, c = { to }, r
+          while c ~= from do table.insert(path, 1, c); c = prev[c] end
+          return path
+        end
+        queue[#queue + 1] = nr
+      end
+    end
+  end
+  return nil
+end
+
+-- Aim the local pathfinder at a world-pixel spot, quietly (no per-room chatter).
+local function route_set_goal(s, wx, wy)
+  pathfind_goal = { wx >> 3, wy >> 3 }
+  if pathfind_replan(s) then pathfind_active = true; return true end
+  return false
+end
+
+-- The active cross-room target room, and the room we last re-aimed from. Global
+-- target for MCP inspection.
+route_room = nil
+local rr_last_room = nil
+
+local function room_route_stop() route_room = nil; rr_last_room = nil end
+
+-- Re-aim the local pathfinder at each room boundary toward the target room. Only
+-- acts when the room actually changes, so the local follower runs undisturbed
+-- between rooms.
+local function room_route_update(s)
+  if route_room == nil then return end
+  if s.module ~= 0x07 or not in_play(s) then return end
+  if s.dungeon_room == rr_last_room then return end
+  rr_last_room = s.dungeon_room
+  if s.dungeon_room == route_room then
+    -- Arrived at the target room: hand off to local guidance (a loose item here,
+    -- else a door) and end the cross-room route.
+    room_route_stop()
+    local it = nearest_item_sprite(s)
+    local d = it or nearest_door_tile(s)
+    if d then route_set_goal(s, d[1], d[2]) end
+    say("You've reached the room.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  local path = room_path(s.dungeon_room, route_room)
+  local hop = path and path[1]
+  local exit = hop and room_graph[s.dungeon_room] and room_graph[s.dungeon_room][hop]
+  if exit then route_set_goal(s, exit[1], exit[2]) end
+  -- else: the graph has no next hop from here yet; leave the local goal in place.
+end
+
 -- ===========================================================================
 -- Exploration memory and user markers, built on the pathfinder above.
 -- ===========================================================================
@@ -703,6 +1155,84 @@ end
 
 function mark_clear(slot) markers[slot] = nil end
 
+-- ===========================================================================
+-- Overworld route follower: drives the guide beacon along a cross-screen path
+-- from ow_plan_path, replanning as Link walks, in the same style as the local
+-- pathfind follower. Only one router owns the "path" beacon at a time — the
+-- local pathfinder takes priority, and ow_route_to stops the others.
+-- ===========================================================================
+ow_route_goal = nil -- {tx, ty, area?} target; global so an agent can inspect it
+ow_route_path = nil -- string-pulled world-tile waypoints; global for inspection
+local ow_route_wp = 1
+local ow_replan_in = 0
+
+local function ow_route_stop()
+  ow_route_goal = nil
+  ow_route_path = nil
+end
+
+-- Begin a cross-screen route to a world pixel destination.
+function ow_route_to(wx, wy)
+  pathfind_stop() -- one router owns the beacon
+  room_route_stop()
+  ow_route_goal = { wx >> 3, wy >> 3 }
+  ow_route_path = nil
+  ow_replan_in = 0
+end
+
+-- Begin a cross-screen route to an overworld AREA (0..0x3F within the world):
+-- route to the nearest reachable tile on that screen, aiming at its centre. Best
+-- for a destination whose exact tile isn't known or is walled off (a building).
+function ow_route_to_area(area)
+  pathfind_stop()
+  room_route_stop()
+  local col, row = area & 7, (area >> 3) & 7
+  ow_route_goal = { col * 64 + 32, row * 64 + 32, area = area & 0x3F }
+  ow_route_path = nil
+  ow_replan_in = 0
+end
+
+local function ow_route_update(s)
+  if ow_route_goal == nil or pathfind_active then return end
+  if s.module ~= 0x09 or not in_play(s) then
+    beacon.clear("path"); return
+  end
+  ow_replan_in = ow_replan_in - 1
+  if ow_route_path == nil or ow_replan_in <= 0 then
+    -- ow_route_goal holds tile coordinates, which ow_plan_path expects directly.
+    ow_route_path = ow_plan_path(s, ow_route_goal[1], ow_route_goal[2], ow_route_goal.area)
+    ow_route_wp = 1
+    ow_replan_in = REPLAN_INTERVAL
+  end
+  local path = ow_route_path
+  if path == nil then beacon.clear("path"); return end
+  while ow_route_wp <= #path do
+    local w = path[ow_route_wp]
+    if math.abs(w[1] * 8 + 4 - s.x) + math.abs(w[2] * 8 + 4 - s.y) <= WAYPOINT_REACHED then
+      ow_route_wp = ow_route_wp + 1
+    else
+      break
+    end
+  end
+  if ow_route_wp > #path then
+    say("You have arrived.", { priority = "navigation", category = "on-demand" })
+    ow_route_stop(); beacon.clear("path"); return
+  end
+  local w = path[ow_route_wp]
+  local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
+  local on_course
+  if math.abs(dx) > math.abs(dy) then
+    on_course = (dx > 0 and s.direction == 6) or (dx < 0 and s.direction == 4)
+  else
+    on_course = (dy > 0 and s.direction == 2) or (dy < 0 and s.direction == 0)
+  end
+  beacon.set("path", {
+    x = dx, y = dy,
+    pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
+    volume = PATH_VOLUME,
+  })
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -763,9 +1293,13 @@ function on_frame(frame)
     end
   end
 
-  -- Top level state changes: file select, entering a dungeon, and so on. The
-  -- text module is handled just above, so it is not also announced generically.
-  if now.module ~= was.module and now.module ~= 0x0E then
+  -- Top level state changes: file select, entering a dungeon, and so on. Some
+  -- modules are deliberately silent: the text module (0x0E, handled just above),
+  -- the dungeon (0x07) and overworld (0x09) — being in one is obvious and the
+  -- room / area callout below already says where — and the non-interactive title
+  -- screens, intro (0x00) and attract mode (0x14), which the player never chose
+  -- to enter. Announcing any of these is just noise.
+  if now.module ~= was.module and not MODULE_SILENT[now.module] then
     say(module_name(now.module), { priority = "navigation", category = "area" })
   end
 
@@ -806,19 +1340,22 @@ function on_frame(frame)
     end
     for i = 0, 15 do
       local sp = active[i]
-      -- On screen, a threat, and not hidden behind a wall: a sprite the player
-      -- could actually see. Occluded enemies stay unannounced until they clear
-      -- the wall, so the callout matches what is really visible.
-      local visible = sp ~= nil and is_enemy(sp) and on_screen(sp.dx, sp.dy)
-        and not sight_blocked(now, now.x, now.y, sp.x, sp.y)
-      if visible and not announced[i] then
+      -- "Present" = a threat that is on the visible screen, whether or not a wall
+      -- currently hides it. An occluded enemy is still present, so it stays
+      -- latched; only leaving the screen re-arms it.
+      local present = sp ~= nil and is_enemy(sp) and on_screen(sp.dx, sp.dy)
+      if not present then
+        announced[i] = false -- off screen: a genuine re-entrance may speak again
+      elseif not announced[i]
+          and not sight_blocked(now, now.x, now.y, sp.x, sp.y) then
+        -- Announce once, when it is actually in the clear. If it first appears
+        -- occluded it waits, but it will not re-announce merely for stepping back
+        -- into line of sight after ducking behind cover.
         say(
           string.format("%s, %s.", enemy_name(sp), direction(sp.dx, sp.dy)),
           { priority = "interaction", category = "enemy" }
         )
         announced[i] = true
-      elseif not visible then
-        announced[i] = false
       end
     end
 
@@ -843,7 +1380,15 @@ function on_frame(frame)
         if sight_blocked(now, now.x, now.y, sp.x, sp.y) then
           vol = vol * BEACON_OCCLUDED_SCALE
         end
-        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol })
+        -- Enemies pulse faster the tougher they are; other classes use the
+        -- class's fixed rate.
+        local trem = kind.tremolo
+        if name == "enemy" then
+          local hp = sp.hp or 0
+          if hp > ENEMY_TREMOLO_HP_CAP then hp = ENEMY_TREMOLO_HP_CAP end
+          trem = ENEMY_TREMOLO_BASE + hp * ENEMY_TREMOLO_PER_HP
+        end
+        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol, tremolo = trem })
       else
         beacon.clear(name)
       end
@@ -860,7 +1405,13 @@ function on_frame(frame)
   -- Remember where Link has been, for the explore command.
   if in_play(now) then mark_explored(now) end
 
+  -- Learn the dungeon's room connectivity as Link walks, and re-aim any active
+  -- cross-room route at each room boundary, before the local follower runs.
+  record_room_transition(now)
+  room_route_update(now)
+
   -- Route guidance runs last, so its beacon coexists with the object beacons.
+  ow_route_update(now)
   pathfind_update(now)
 end
 
@@ -983,35 +1534,287 @@ on_command("coordinates", function()
   end
 end)
 
--- "Guide me to the nearest door." A concrete use of the pathfinder: it scans the
--- current window for door tiles and routes to the nearest one. Other targets
--- (markers, unexplored frontier) can drive pathfind_to the same way.
+-- "What should I be doing?" The strategic counterpart to the local guide: it
+-- reads the quest-progress bytes, finds the current critical-path milestone, and
+-- speaks the objective and where to head. Says how far along the spine the player
+-- is so the goal has a sense of scale.
+on_command("objective", function()
+  local v = read_progress()
+  if v == nil then
+    say("No game state yet.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  local idx, m = current_milestone(v)
+  say(
+    string.format("Objective %d of %d: %s. %s", idx, #MILESTONES, m.goal, m.hint),
+    { priority = "navigation", category = "on-demand" }
+  )
+end)
+
+-- "Guide me to the nearest door." A concrete use of the pathfinder: it routes to
+-- the nearest door tile. Other targets (markers, frontier) drive pathfind_to too.
 on_command("pathfind", function()
   local s = prev
   if s == nil or not in_play(s) then
     say("Not in play.", { priority = "navigation", category = "on-demand" })
     return
   end
+  local d = nearest_door_tile(s)
+  if d == nil then
+    say("No door nearby.", { priority = "navigation", category = "on-demand" })
+  else
+    pathfind_to(d[1], d[2])
+  end
+end)
+
+-- ===========================================================================
+-- "Advance the quest" — the context-aware guide bound to the L key. It knows the
+-- game, not just the room: in a dungeon it heads for the next thing worth taking
+-- (or the exit, once the dungeon is cleared or you lack what it takes to finish);
+-- on the overworld it heads for the next place the main story wants you.
+--
+-- The destinations come from researched data, not guesses:
+--   * DUNGEON_NAV[dungeon_id] — each dungeon's signature item, Big Key and boss
+--     rooms, from a thorough walkthrough cross-checked against the randomizer's
+--     room table and the disassembly's underworld-room list.
+--   * MILESTONE_AREA[milestone] — the overworld area each story step sends you to.
+-- The pathfinder only navigates within the current room, and dungeon room ids
+-- stack floors in one grid, so a cross-room heading is a rough hint, not a path:
+-- the guide names the goal and points you the right way, guiding precisely only
+-- once you are in the room the target sits in.
+-- ===========================================================================
+local nav_say = function(text)
+  say(text, { priority = "navigation", category = "on-demand" })
+end
+
+-- Milestone index -> the overworld area its destination sits in. The area byte
+-- carries the +0x40 Dark World offset, so it doubles as the world marker. From
+-- the Archipelago randomizer entrance table, cross-checked against the
+-- disassembly's overworld-area names (both agree on every value).
+local MILESTONE_AREA = {
+  [1]  = 0x1B, -- Hyrule Castle (reach uncle, free Zelda)
+  [2]  = 0x13, -- Sanctuary
+  [3]  = 0x1E, -- Eastern Palace
+  [4]  = 0x30, -- Desert Palace
+  [5]  = 0x03, -- Tower of Hera (west Death Mountain)
+  [6]  = 0x00, -- Master Sword pedestal (Lost Woods)
+  [7]  = 0x1B, -- Hyrule Castle Tower (Agahnim)
+  [8]  = 0x5E, -- Palace of Darkness
+  [9]  = 0x7B, -- Swamp Palace
+  [10] = 0x40, -- Skull Woods
+  [11] = 0x58, -- Thieves' Town
+  [12] = 0x75, -- Ice Palace
+  [13] = 0x70, -- Misery Mire
+  [14] = 0x47, -- Turtle Rock
+  [15] = 0x43, -- Ganon's Tower
+}
+
+-- Compass heading from one overworld area to another on the 8-wide area grid. An
+-- area byte's low three bits are the column, the next three the row; the 0x40 bit
+-- is Light vs Dark world. Returns a direction word (nil if already in the target
+-- cell) and whether the destination lies in the other world.
+local function area_heading(from_area, to_area)
+  local fc, fr = from_area & 7, (from_area >> 3) & 7
+  local tc, tr = to_area & 7, (to_area >> 3) & 7
+  local other_world = (from_area & 0x40) ~= (to_area & 0x40)
+  if fc == tc and fr == tr then return nil, other_world end
+  return direction(tc - fc, tr - fr), other_world
+end
+
+-- Per-dungeon navigation data, keyed by $040C dungeon id. The canonical spine of
+-- a dungeon is: fetch its signature item, then the Big Key, then beat the boss.
+-- Each entry gives how to tell the signature item is in hand (an inventory read),
+-- the Big Key bit for this dungeon (in the $366/$367 big-key bitfields), and the
+-- room ids of the item, the Big Key, the boss, and the entrance. Room ids are the
+-- $00A0 value; all boss/entrance/chest room ids are confirmed against the
+-- randomizer chest table and the disassembly's underworld-room list. Small keys,
+-- map and compass are deliberately not tracked — they are not what a player is
+-- steered toward, and pot/enemy-drop keys have no stable room id.
+local DUNGEON_NAV = {
+  [0x04] = { name = "Eastern Palace",     item = "the Bow",
+             have = function() return mem.u8(0x7EF340) >= 1 end,
+             item_room = 0xA9, bk_byte = 0x7EF367, bk_bit = 0x20, bk_room = 0xB8,
+             boss_room = 0xC8, entrance_room = 0xC9 },
+  [0x06] = { name = "Desert Palace",      item = "the Power Glove",
+             have = function() return mem.u8(0x7EF354) >= 1 end,
+             item_room = 0x73, bk_byte = 0x7EF367, bk_bit = 0x10, bk_room = 0x75,
+             boss_room = 0x33, entrance_room = 0x84 },
+  [0x14] = { name = "Tower of Hera",      item = "the Moon Pearl",
+             have = function() return mem.u8(0x7EF357) >= 1 end,
+             item_room = 0x27, bk_byte = 0x7EF366, bk_bit = 0x20, bk_room = 0x87,
+             boss_room = 0x07, entrance_room = 0x77 },
+  [0x0C] = { name = "Palace of Darkness", item = "the Magic Hammer",
+             have = function() return mem.u8(0x7EF34B) >= 1 end,
+             item_room = 0x1A, bk_byte = 0x7EF367, bk_bit = 0x02, bk_room = 0x3A,
+             boss_room = 0x5A, entrance_room = 0x4A },
+  [0x0A] = { name = "Swamp Palace",       item = "the Hookshot",
+             have = function() return mem.u8(0x7EF342) >= 1 end,
+             item_room = 0x36, bk_byte = 0x7EF367, bk_bit = 0x04, bk_room = 0x35,
+             boss_room = 0x06, entrance_room = 0x28 },
+  [0x10] = { name = "Skull Woods",        item = "the Fire Rod",
+             have = function() return mem.u8(0x7EF345) >= 1 end,
+             item_room = 0x58, bk_byte = 0x7EF366, bk_bit = 0x80, bk_room = 0x57,
+             boss_room = 0x29, entrance_room = nil }, -- three overworld entrances
+  [0x16] = { name = "Thieves' Town",      item = "the Titan's Mitt",
+             have = function() return mem.u8(0x7EF354) >= 2 end,
+             item_room = 0x44, bk_byte = 0x7EF366, bk_bit = 0x10, bk_room = 0xDB,
+             boss_room = 0xAC, entrance_room = 0xDB },
+  [0x12] = { name = "Ice Palace",         item = "the Blue Mail",
+             have = function() return mem.u8(0x7EF35B) >= 1 end,
+             item_room = 0x9E, bk_byte = 0x7EF366, bk_bit = 0x40, bk_room = 0x1F,
+             boss_room = 0xDE, entrance_room = 0x0E },
+  [0x0E] = { name = "Misery Mire",        item = "the Cane of Somaria",
+             have = function() return mem.u8(0x7EF350) >= 1 end,
+             item_room = 0xC3, bk_byte = 0x7EF367, bk_bit = 0x01, bk_room = 0xD1,
+             boss_room = 0x90, entrance_room = 0x98 },
+  [0x18] = { name = "Turtle Rock",        item = "the Mirror Shield",
+             have = function() return mem.u8(0x7EF35A) >= 3 end,
+             item_room = 0x24, bk_byte = 0x7EF366, bk_bit = 0x08, bk_room = 0x14,
+             boss_room = 0xA4, entrance_room = 0xD6 },
+}
+
+-- The door/passage tile in the current window best aligned with a room-grid
+-- heading (ddx east, ddy south), tie-broken toward the nearer one. With no
+-- heading it is just the nearest door. Used to leave a room in roughly the right
+-- direction when the goal is in another room the local pathfinder cannot reach.
+local function door_toward(s, ddx, ddy)
   local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
   local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
-  local best, best_d
+  local best, best_score
   for y = 0, 63 do
     for x = 0, 63 do
       local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
-      if attr and attr >= 0x30 and attr <= 0x37 then -- a door / passage tile
-        local d = math.abs(x - ltx) + math.abs(y - lty)
-        if best_d == nil or d < best_d then best_d, best = d, { ox + x, oy + y } end
+      if attr and attr >= 0x30 and attr <= 0x37 then
+        local rx, ry = x - ltx, y - lty
+        local dist = math.abs(rx) + math.abs(ry)
+        local score = (ddx == 0 and ddy == 0) and -dist or (rx * ddx + ry * ddy - dist * 0.01)
+        if best_score == nil or score > best_score then
+          best_score, best = score, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+        end
       end
     end
   end
-  if best == nil then
-    say("No door nearby.", { priority = "navigation", category = "on-demand" })
+  return best
+end
+
+-- Route toward a target room, given a spoken label for what is there. Already in
+-- the room: guide to a loose item if visible, else a door, and say it is here.
+-- Elsewhere: start a cross-room route. If the learned graph already connects the
+-- rooms, aim precisely at the door that leaves toward the target and follow the
+-- chain room by room; if not, set a rough heading (dungeon rooms are a 16-wide
+-- grid, id low nibble = column, high nibble = row) and let the route lock on as
+-- exploration fills the graph in. Cross-floor headings are approximate, so the
+-- fallback wording stays soft.
+local function route_to_room(s, target_room, label)
+  if target_room == nil then return false end
+  if s.dungeon_room == target_room then
+    room_route_stop()
+    local it = nearest_item_sprite(s)
+    local d = it or nearest_door_tile(s)
+    if d then pathfind_to(d[1], d[2]) end
+    nav_say(label .. " It's in this room.")
+    return true
+  end
+  route_room = target_room
+  rr_last_room = s.dungeon_room
+  local path = room_path(s.dungeon_room, target_room)
+  local hop = path and path[1]
+  local exit = hop and room_graph[s.dungeon_room] and room_graph[s.dungeon_room][hop]
+  if exit then
+    route_set_goal(s, exit[1], exit[2])
+    nav_say(label .. " Following the route.")
   else
-    pathfind_to(best[1] * 8 + 4, best[2] * 8 + 4)
+    local ddx = (target_room & 0x0F) - (s.dungeon_room & 0x0F)
+    local ddy = (target_room >> 4) - (s.dungeon_room >> 4)
+    local d = door_toward(s, ddx, ddy)
+    if d then route_set_goal(s, d[1], d[2]) end
+    nav_say(string.format("%s Head roughly %s; I'll route you once the way is known.", label, direction(ddx, ddy)))
+  end
+  return true
+end
+
+-- In a dungeon: cleared -> the exit; otherwise the next canonical target — the
+-- signature item, then the Big Key, then the boss.
+local function advance_dungeon(s, v)
+  ow_route_stop() -- drop any overworld route once inside a dungeon
+  local nav = DUNGEON_NAV[s.dungeon_id]
+  local done = DUNGEON_DONE[s.dungeon_id]
+  local cleared = (done and v and done(v)) or (nav and room_boss_beaten(nav.boss_room))
+  if cleared then
+    if not route_to_room(s, nav and nav.entrance_room, "Dungeon cleared. Heading for the exit.") then
+      local d = nearest_door_tile(s)
+      if d then pathfind_to(d[1], d[2]) end
+      nav_say("Dungeon cleared. Find the stairs out.")
+    end
+    return
+  end
+  if nav == nil then
+    -- No canonical spine for this place (sewer, castle, the towers): keep the
+    -- player moving — a loose item in the room, else into unexplored ground.
+    local it = nearest_item_sprite(s)
+    if it then pathfind_to(it[1], it[2]); nav_say("Guiding to an item in this room."); return end
+    local tx, ty = nearest_unexplored(s)
+    if tx then pathfind_to(tx * 8 + 4, ty * 8 + 4); nav_say("Guiding you deeper into the dungeon.")
+    else
+      local d = nearest_door_tile(s)
+      if d then pathfind_to(d[1], d[2]) end
+      nav_say("Heading for the next door.")
+    end
+    return
+  end
+  -- The canonical spine: signature item, then Big Key, then boss.
+  if not nav.have() then
+    route_to_room(s, nav.item_room, "Next: " .. nav.item .. ".")
+  elseif (mem.u8(nav.bk_byte) & nav.bk_bit) == 0 then
+    route_to_room(s, nav.bk_room, "Next: the Big Key.")
+  else
+    route_to_room(s, nav.boss_room, "Head for the boss.")
+  end
+end
+
+-- On the overworld: head for the current story milestone's destination — a
+-- compass heading across the area grid toward it, and a note when it is in the
+-- other world. If already in the target area, point at finding the entrance.
+local function advance_overworld(s, v)
+  room_route_stop() -- drop any stale dungeon route when out on the overworld
+  if v == nil then nav_say("No game state yet."); return end
+  local idx, m = current_milestone(v)
+  local area = MILESTONE_AREA[idx]
+  if area == nil then
+    nav_say(string.format("Next: %s. %s", m.goal, m.hint))
+    return
+  end
+  -- If the destination is in the other world, we can't draw a path across the
+  -- mirror — name it and give a heading instead.
+  local other_world = (s.ow_screen & 0x40) ~= (area & 0x40)
+  if other_world then
+    local dir = area_heading(s.ow_screen, area)
+    local which = (area & 0x40) ~= 0 and "Dark World" or "Light World"
+    nav_say(string.format("Next: %s. Head %s, then cross to the %s.", m.goal, dir or "toward it", which))
+    return
+  end
+  -- Same world: draw a path onto the destination screen (nearest reachable tile
+  -- there), rather than a possibly-walled centre.
+  ow_route_to_area(area)
+  nav_say(string.format("Routing to %s.", m.goal))
+end
+
+on_command("advance", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    nav_say("Not in play.")
+    return
+  end
+  local v = read_progress()
+  if s.module == 0x07 then
+    advance_dungeon(s, v)
+  else
+    advance_overworld(s, v)
   end
 end)
 
 on_command("pathfind_stop", function()
+  room_route_stop()
   pathfind_stop()
   say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
 end)
@@ -1175,6 +1978,21 @@ function on_draw(canvas)
       for i, wt in ipairs(pathfind_path) do
         local px, py = plot(wt)
         canvas:rect(px - 1, py - 1, 3, 3, (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
+      end
+    end
+
+    -- The cross-screen overworld route, drawn through the current 512-pixel
+    -- window; the segment leaving the screen edge points on toward the next area.
+    -- World tiles are placed relative to Link's block, so off-window corners clip.
+    if s.module == 0x09 and ow_route_goal and ow_route_path then
+      local bx, by = s.x - s.x % 512, s.y - s.y % 512
+      local function oplot(wt)
+        return fx + (wt[1] * 8 + 4 - bx) * fw // 512, fy + (wt[2] * 8 + 4 - by) * fw // 512
+      end
+      for i = 1, #ow_route_path - 1 do
+        local ax, ay = oplot(ow_route_path[i])
+        local cx2, cy2 = oplot(ow_route_path[i + 1])
+        canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
       end
     end
 

@@ -155,6 +155,7 @@ impl Session {
                     &mut self.audio_scratch,
                     self.settings.beacons.volume_min,
                     self.settings.beacons.volume_max,
+                    self.settings.beacons.music_duck,
                 );
             }
             let scratch = std::mem::take(&mut self.audio_scratch);

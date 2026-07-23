@@ -121,6 +121,46 @@ pub(crate) fn control_socket_path() -> PathBuf {
     Path::new(&dir).join("beacon-control.sock")
 }
 
+/// Bridges this process's stdio to a running `--control` session's socket, so an
+/// MCP client that only speaks stdio (an agent harness) can drive the live
+/// windowed session the player is looking at, rather than a headless one of its
+/// own. Waits briefly for the socket, in case the window is still starting up.
+pub(crate) fn connect_bridge() -> std::io::Result<()> {
+    use std::os::unix::net::UnixStream;
+
+    let path = control_socket_path();
+    let mut stream = None;
+    for _ in 0..300 {
+        // ~30s
+        if let Ok(s) = UnixStream::connect(&path) {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let stream = stream.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "no beacon --control session at {} (start one with `beacon <rom> --control`)",
+                path.display()
+            ),
+        )
+    })?;
+
+    // socket -> stdout on a thread; stdin -> socket on this one. When stdin
+    // closes (the client disconnects) we shut the socket, ending the reader.
+    let mut to_sock = stream.try_clone()?;
+    let mut from_sock = stream;
+    let reader = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut from_sock, &mut std::io::stdout());
+    });
+    let _ = std::io::copy(&mut std::io::stdin(), &mut to_sock);
+    let _ = to_sock.shutdown(std::net::Shutdown::Both);
+    let _ = reader.join();
+    Ok(())
+}
+
 /// Serves the MCP protocol on a Unix socket, returning the channel the main
 /// thread drains to run tool calls against its [`Session`].
 ///
