@@ -784,6 +784,17 @@ local function ow_line(w, x0, y0, x1, y1)
   end
 end
 
+-- Large overworld areas (Hyrule Castle, Kakariko, ...) span a 2x2 block of cells
+-- that all share one "parent" id — the id the game reports in $008A. Routing must
+-- treat any cell of a large area as the same destination, else it drags Link to
+-- the parent's top-left cell when he is already on the screen. The parent table
+-- is indexed by the within-world cell (0-0x3F); the value is the parent cell.
+local OW_PARENT = nil
+local function ow_parent(cell)
+  if OW_PARENT == nil then OW_PARENT = rom.slice(0x125EC, 0x40) end
+  return (string.byte(OW_PARENT, (cell & 0x3F) + 1) or (cell & 0x3F)) & 0x3F
+end
+
 local OW_ASTAR_CAP = 40000 -- node budget; bounds a worst-case mazey route
 
 -- A* over 8-pixel world tiles from Link's footing toward (gx,gy). If `goal_area`
@@ -798,10 +809,11 @@ local function ow_plan_path(s, gx, gy, goal_area)
   if sx == nil or gx == nil then return nil end
   local function key(x, y) return y * 512 + x end
   local function heur(x, y) return math.abs(x - gx) + math.abs(y - gy) end
+  local goal_parent = ow_parent(goal_area or 0)
   local function is_goal(n)
     if goal_area == nil then return n == key(gx, gy) end
     local nx, ny = n % 512, n // 512
-    return (ny >> 6) * 8 + (nx >> 6) == goal_area
+    return ow_parent((ny >> 6) * 8 + (nx >> 6)) == goal_parent
   end
   local g, came, closed, heap = { [key(sx, sy)] = 0 }, {}, {}, {}
   local function push(n, f)
@@ -988,14 +1000,79 @@ end
 
 -- ===========================================================================
 -- Cross-room dungeon routing: a room-to-room guide layered over the local
--- pathfinder, which only reaches within the current room. Rather than decode the
--- ROM's door tables, the plugin *learns* a dungeon's connectivity as Link walks
--- it: each room transition records a directed edge and the spot in the room he
--- left from. A breadth-first search over that learned graph gives the next room
--- to head for, and the local pathfinder is aimed at the door that leaves toward
--- it, re-aimed at every room boundary. Rooms not yet walked simply are not in the
--- graph; guidance falls back to a compass heading until exploration connects them.
+-- pathfinder, which only reaches within the current room. Two graphs feed it. A
+-- baked STATIC graph knows every room's connections up front (which side each
+-- doorway or staircase leaves by), so a route can lead through rooms Link has
+-- never walked. A LEARNED graph on top records the exact spot each transition
+-- fired at, refining a hop the moment Link has walked it. A breadth-first search
+-- over the union gives the next room to head for; the local pathfinder is aimed
+-- at that hop's exit — the learned spot if known, else the door (or edge, or
+-- staircase) on the static side — and re-aimed at every room boundary.
 -- ===========================================================================
+
+-- Static room adjacency, baked from the door/stair connectivity dataset (the
+-- ALttP Door Randomizer's room tables, cross-checked against the disassembly's
+-- underworld-room list). Packed three bytes per directed edge: from-room,
+-- to-room, and the side you leave `from` by. Sides: 0 N, 1 S, 2 E, 3 W, and 4/5
+-- Up/Dn for the spiral staircases that change floor. Room ids are the $00A0
+-- value, globally unique, so one table spans every dungeon.
+local STATIC_ADJ_PACKED =
+    "\x01\x50\x03\x01\x52\x02\x01\x72\x05\x02\x11\x05\x04\x14\x01\x04\xB5\x05\x07\x17\x05\x09\x4A\x04\x0A\x3A\x04\x0B\x1B\x00"
+  .."\x0C\x6B\x04\x0C\x8C\x05\x0E\x1E\x05\x11\x02\x04\x11\x21\x01\x13\x14\x02\x14\x04\x00\x14\x13\x03\x14\x15\x02\x14\x24\x01"
+  .."\x15\x14\x03\x15\xB6\x04\x16\x66\x05\x17\x07\x04\x17\x27\x05\x19\x1A\x02\x1A\x19\x03\x1A\x2A\x01\x1A\x6A\x05\x1B\x0B\x01"
+  .."\x1B\x2B\x01\x1C\x8C\x04\x1D\x4C\x05\x1E\x0E\x04\x1E\x1F\x02\x1E\x2E\x01\x1F\x1E\x03\x1F\x3F\x01\x21\x11\x00\x21\x22\x02"
+  .."\x22\x21\x03\x22\x32\x01\x23\x24\x02\x24\x14\x00\x24\x23\x03\x26\x36\x01\x26\x76\x05\x27\x17\x04\x27\x31\x05\x28\x38\x05"
+  .."\x2A\x1A\x00\x2A\x2B\x02\x2A\x3A\x01\x2B\x1B\x00\x2B\x2A\x03\x2B\x3B\x01\x2E\x1E\x00\x30\x40\x01\x31\x27\x04\x31\x77\x05"
+  .."\x32\x22\x00\x32\x42\x01\x34\x35\x02\x34\x54\x04\x35\x34\x03\x35\x36\x02\x36\x26\x00\x36\x35\x03\x36\x37\x02\x36\x46\x01"
+  .."\x37\x36\x03\x37\x38\x02\x38\x28\x04\x38\x37\x03\x39\x49\x01\x3A\x0A\x05\x3A\x2A\x00\x3A\x4A\x01\x3B\x2B\x00\x3B\x4B\x01"
+  .."\x3D\x4D\x01\x3D\x96\x01\x3E\x4E\x01\x3F\x1F\x00\x3F\x5F\x05\x40\x30\x00\x40\xB0\x05\x41\x42\x05\x41\x51\x01\x42\x32\x00"
+  .."\x42\x41\x04\x43\x53\x01\x44\x45\x02\x45\x44\x03\x45\xBC\x04\x46\x36\x00\x49\x39\x00\x49\x59\x01\x4A\x09\x05\x4A\x3A\x00"
+  .."\x4B\x3B\x00\x4C\x1D\x04\x4D\x3D\x00\x4D\xA6\x05\x4E\x3E\x00\x4E\x6E\x05\x50\x01\x02\x50\x60\x01\x51\x41\x00\x51\x61\x01"
+  .."\x52\x01\x03\x52\x62\x01\x53\x43\x00\x53\x63\x05\x54\x34\x05\x56\x57\x02\x57\x56\x03\x57\x58\x02\x57\x67\x01\x58\x57\x03"
+  .."\x58\x68\x01\x59\x49\x00\x5B\x5C\x02\x5B\x6B\x01\x5C\x5B\x03\x5C\x5D\x04\x5D\x5C\x05\x5D\x6D\x01\x5E\x5F\x02\x5E\x6E\x01"
+  .."\x5E\x7E\x01\x5F\x3F\x04\x5F\x5E\x03\x5F\x7F\x05\x60\x50\x00\x60\x61\x02\x61\x51\x00\x61\x60\x03\x61\x62\x02\x62\x52\x00"
+  .."\x62\x61\x03\x63\x53\x04\x64\x65\x02\x64\xAB\x05\x65\x64\x03\x66\x16\x04\x66\x76\x01\x67\x57\x00\x67\x68\x02\x68\x58\x00"
+  .."\x68\x67\x03\x6A\x1A\x04\x6B\x0C\x05\x6B\x5B\x00\x6C\x6D\x02\x6C\xA5\x04\x6D\x5D\x00\x6D\x6C\x03\x6E\x4E\x04\x6E\x5E\x00"
+  .."\x70\x71\x04\x70\x80\x05\x71\x70\x05\x71\x81\x01\x72\x01\x04\x72\x82\x01\x73\x74\x02\x73\x83\x01\x74\x73\x03\x74\x75\x02"
+  .."\x74\x84\x01\x75\x74\x03\x75\x85\x01\x76\x26\x04\x76\x66\x00\x77\x31\x04\x77\x87\x05\x7B\x7C\x02\x7B\x8B\x01\x7C\x7B\x03"
+  .."\x7C\x7D\x02\x7D\x7C\x03\x7D\x8D\x01\x7E\x5E\x00\x7E\x7F\x02\x7E\x8E\x01\x7F\x5F\x04\x7F\x7E\x03\x80\x70\x04\x81\x71\x00"
+  .."\x81\x82\x02\x82\x72\x00\x82\x81\x03\x83\x73\x00\x84\x74\x00\x84\x85\x02\x85\x75\x00\x85\x84\x03\x87\x77\x04\x8B\x7B\x00"
+  .."\x8B\x8C\x02\x8B\x9B\x01\x8C\x0C\x04\x8C\x1C\x05\x8C\x8B\x03\x8C\x8D\x02\x8C\x9C\x01\x8D\x7D\x00\x8D\x8C\x03\x8D\x9D\x01"
+  .."\x8E\x7E\x00\x8E\xAE\x05\x91\x92\x02\x91\xA0\x04\x92\x91\x03\x92\x93\x02\x93\x92\x03\x93\xA2\x04\x95\x96\x02\x95\xA5\x01"
+  .."\x96\x3D\x00\x96\x95\x03\x97\xD1\x05\x98\xD2\x05\x99\xA9\x01\x99\xDA\x04\x9B\x8B\x00\x9B\x9C\x02\x9C\x8C\x00\x9C\x9B\x03"
+  .."\x9D\x8D\x00\x9E\x9F\x02\x9E\xBE\x05\x9F\x9E\x03\x9F\xAF\x01\xA0\x91\x05\xA1\xA2\x02\xA1\xB1\x01\xA2\x93\x05\xA2\xA1\x03"
+  .."\xA2\xA3\x02\xA2\xB2\x01\xA3\xA2\x03\xA3\xB3\x01\xA5\x6C\x05\xA5\x95\x00\xA6\x4D\x04\xA8\xA9\x02\xA8\xB8\x01\xA9\x99\x00"
+  .."\xA9\xA8\x03\xA9\xAA\x02\xA9\xB9\x01\xAA\xA9\x03\xAA\xBA\x01\xAB\x64\x04\xAB\xBB\x01\xAE\x8E\x04\xAE\xAF\x02\xAF\x9F\x00"
+  .."\xAF\xAE\x03\xB0\x40\x04\xB0\xC0\x05\xB1\xA1\x00\xB1\xC1\x01\xB2\xA2\x00\xB2\xB3\x02\xB2\xC2\x01\xB3\xA3\x00\xB3\xB2\x03"
+  .."\xB3\xC3\x01\xB4\xC4\x01\xB5\x04\x04\xB5\xC5\x01\xB6\x15\x05\xB6\xC6\x01\xB7\xC7\x01\xB8\xA8\x00\xB8\xB9\x02\xB9\xA9\x00"
+  .."\xB9\xB8\x03\xB9\xBA\x02\xB9\xC9\x01\xBA\xAA\x00\xBA\xB9\x03\xBB\xAB\x00\xBB\xBC\x02\xBC\x45\x05\xBC\xBB\x03\xBC\xCC\x01"
+  .."\xBE\x9E\x04\xBE\xBF\x02\xBE\xCE\x01\xBF\xBE\x03\xC0\xB0\x04\xC0\xD0\x05\xC1\xB1\x00\xC1\xC2\x02\xC1\xD1\x01\xC2\xB2\x00"
+  .."\xC2\xC1\x03\xC2\xC3\x02\xC2\xD2\x01\xC3\xB3\x00\xC3\xC2\x03\xC4\xB4\x00\xC4\xC5\x02\xC5\xB5\x00\xC5\xC4\x03\xC5\xD5\x01"
+  .."\xC6\xB6\x00\xC6\xC7\x02\xC6\xD6\x01\xC7\xB7\x00\xC7\xC6\x03\xC9\xB9\x00\xCB\xCC\x02\xCB\xDB\x01\xCC\xBC\x00\xCC\xCB\x03"
+  .."\xCC\xDC\x01\xCE\xBE\x00\xD0\xC0\x04\xD0\xE0\x05\xD1\x97\x04\xD1\xC1\x00\xD2\x98\x04\xD2\xC2\x00\xD5\xC5\x00\xD6\xC6\x00"
+  .."\xD8\xD9\x02\xD9\xD8\x03\xD9\xDA\x02\xDA\x99\x05\xDA\xD9\x03\xDB\xCB\x00\xDB\xDC\x02\xDC\xCC\x00\xDC\xDB\x03\xE0\xD0\x04"
+
+-- Side codes and their in-room-grid heading. Up/Dn (spiral stairs) change floor,
+-- so they have no cardinal heading and are found by their staircase tile instead.
+local SIDE_UP, SIDE_DN = 4, 5
+local SIDE_DIR  = { [0] = { 0, -1 }, [1] = { 0, 1 }, [2] = { 1, 0 }, [3] = { -1, 0 } }
+local SIDE_WORD = { [0] = "north", [1] = "south", [2] = "east", [3] = "west",
+                    [SIDE_UP] = "up the stairs", [SIDE_DN] = "down the stairs" }
+
+-- from_room -> { to_room -> side }, decoded from the packed table above.
+local STATIC_ADJ = {}
+for i = 1, #STATIC_ADJ_PACKED, 3 do
+  local frm  = string.byte(STATIC_ADJ_PACKED, i)
+  local to   = string.byte(STATIC_ADJ_PACKED, i + 1)
+  local side = string.byte(STATIC_ADJ_PACKED, i + 2)
+  local g = STATIC_ADJ[frm]; if g == nil then g = {}; STATIC_ADJ[frm] = g end
+  g[to] = side
+end
+
+-- Forward declaration: hop_goal turns a route hop into a spot to aim at, but it
+-- needs door_toward (defined lower); room_route_update and route_to_room, defined
+-- above door_toward, reference it here and it is assigned once door_toward exists.
+local hop_goal
 
 -- Learned graph: from_room -> { to_room -> {x, y} }, the absolute pixel spot in
 -- from_room where the walk into to_room happened (so aiming Link back at it
@@ -1018,14 +1095,24 @@ local function record_room_transition(s)
   rg_last_pos = { s.x, s.y }
 end
 
--- Breadth-first search over learned edges: the ordered list of rooms after
--- `from`, ending at `to`, or nil if the graph does not yet connect them.
+-- The set of rooms reachable in one hop from `r`, across both graphs. A learned
+-- edge and a static edge to the same room collapse to one entry, since the search
+-- only needs the neighbour ids; hop_goal decides where in the room to aim.
+local function room_neighbors(r)
+  local out = {}
+  for nr in pairs(STATIC_ADJ[r] or {}) do out[nr] = true end
+  for nr in pairs(room_graph[r] or {}) do out[nr] = true end
+  return out
+end
+
+-- Breadth-first search over the static+learned edges: the ordered list of rooms
+-- after `from`, ending at `to`, or nil if neither graph connects them.
 local function room_path(from, to)
   if from == to then return {} end
   local prev, queue, head = { [from] = false }, { from }, 1
   while head <= #queue do
     local r = queue[head]; head = head + 1
-    for nr in pairs(room_graph[r] or {}) do
+    for nr in pairs(room_neighbors(r)) do
       if prev[nr] == nil then
         prev[nr] = r
         if nr == to then
@@ -1074,7 +1161,7 @@ local function room_route_update(s)
   end
   local path = room_path(s.dungeon_room, route_room)
   local hop = path and path[1]
-  local exit = hop and room_graph[s.dungeon_room] and room_graph[s.dungeon_room][hop]
+  local exit = hop and hop_goal(s, s.dungeon_room, hop)
   if exit then route_set_goal(s, exit[1], exit[2]) end
   -- else: the graph has no next hop from here yet; leave the local goal in place.
 end
@@ -1697,14 +1784,75 @@ local function door_toward(s, ddx, ddy)
   return best
 end
 
+-- The tile-types of a floor-changing spiral staircase, from the game's own tile
+-- detection (zelda3 tile_detect.c, TileDetect_ExecuteInner): north/up stairs read
+-- as 0x1D-0x1F, down stairs as 0x3D-0x3F. (The 0x30-0x37 the door finder keys on
+-- also count as stair tiles there, but they are the in-plane doorways; 0x38-0x3C
+-- are ordinary floor.) An Up hop wants the up set, a Down hop the down set.
+local STAIR_UP   = { [0x1D] = true, [0x1E] = true, [0x1F] = true }
+local STAIR_DOWN = { [0x3D] = true, [0x3E] = true, [0x3F] = true }
+
+-- The nearest staircase tile in the current window matching the wanted direction,
+-- as a world-pixel spot, or nil. Falls back to the other direction's set so a hop
+-- still lands on a staircase even if a room labels its stairs unexpectedly.
+local function nearest_stair_tile(s, want_up)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local function scan(set)
+    local best, best_d
+    for y = 0, 63 do
+      for x = 0, 63 do
+        if set[tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)] then
+          local d = math.abs(x - ltx) + math.abs(y - lty)
+          if best_d == nil or d < best_d then
+            best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+          end
+        end
+      end
+    end
+    return best
+  end
+  return scan(want_up and STAIR_UP or STAIR_DOWN) or scan(want_up and STAIR_DOWN or STAIR_UP)
+end
+
+-- The middle of the current room's edge in a heading, as a world-pixel spot. Used
+-- when a hop leaves by an open edge or a ladder rather than a door tile: there is
+-- nothing to key on, so aim at the edge and let the local A* get as close as the
+-- layout allows, which is enough to cross into the next room.
+local function room_edge_goal(s, ddx, ddy)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local tx = (ddx == 0) and ltx or (ddx > 0 and 62 or 1)
+  local ty = (ddy == 0) and lty or (ddy > 0 and 62 or 1)
+  return { (ox + tx) * 8 + 4, (oy + ty) * 8 + 4 }
+end
+
+-- Where in `from` to aim to cross into `to` — the concrete spot behind a route
+-- hop. Prefer the exact place the learned graph saw the transition; failing that,
+-- take the static graph's side and find it live: a matching door on that side,
+-- else (open edge / ladder) that edge; a spiral staircase for an Up/Dn hop. Also
+-- returns the side, so the caller can name the direction. nil if neither graph
+-- knows the hop.
+hop_goal = function(s, from, to)
+  local learned = room_graph[from] and room_graph[from][to]
+  if learned then return learned, nil end
+  local side = STATIC_ADJ[from] and STATIC_ADJ[from][to]
+  if side == nil then return nil, nil end
+  local dir = SIDE_DIR[side]
+  if dir == nil then -- Up/Dn: a spiral staircase
+    return nearest_stair_tile(s, side == SIDE_UP) or nearest_door_tile(s), side
+  end
+  return door_toward(s, dir[1], dir[2]) or room_edge_goal(s, dir[1], dir[2]), side
+end
+
 -- Route toward a target room, given a spoken label for what is there. Already in
 -- the room: guide to a loose item if visible, else a door, and say it is here.
--- Elsewhere: start a cross-room route. If the learned graph already connects the
--- rooms, aim precisely at the door that leaves toward the target and follow the
--- chain room by room; if not, set a rough heading (dungeon rooms are a 16-wide
--- grid, id low nibble = column, high nibble = row) and let the route lock on as
--- exploration fills the graph in. Cross-floor headings are approximate, so the
--- fallback wording stays soft.
+-- Elsewhere: start a cross-room route. If either graph connects the rooms, aim at
+-- the first hop's exit (the door, edge or staircase leaving toward the target) and
+-- name the direction, following the chain room by room. Only if the rooms are
+-- unconnected in both graphs does it fall back to a rough compass heading (dungeon
+-- rooms are a 16-wide grid, id low nibble = column, high nibble = row) and let the
+-- route lock on as exploration fills the learned graph in.
 local function route_to_room(s, target_room, label)
   if target_room == nil then return false end
   if s.dungeon_room == target_room then
@@ -1719,10 +1867,15 @@ local function route_to_room(s, target_room, label)
   rr_last_room = s.dungeon_room
   local path = room_path(s.dungeon_room, target_room)
   local hop = path and path[1]
-  local exit = hop and room_graph[s.dungeon_room] and room_graph[s.dungeon_room][hop]
+  local exit, side = nil, nil
+  if hop then exit, side = hop_goal(s, s.dungeon_room, hop) end
   if exit then
     route_set_goal(s, exit[1], exit[2])
-    nav_say(label .. " Following the route.")
+    if side then
+      nav_say(string.format("%s Head %s.", label, SIDE_WORD[side]))
+    else
+      nav_say(label .. " Following the route.")
+    end
   else
     local ddx = (target_room & 0x0F) - (s.dungeon_room & 0x0F)
     local ddy = (target_room >> 4) - (s.dungeon_room >> 4)
@@ -1793,8 +1946,16 @@ local function advance_overworld(s, v)
     nav_say(string.format("Next: %s. Head %s, then cross to the %s.", m.goal, dir or "toward it", which))
     return
   end
-  -- Same world: draw a path onto the destination screen (nearest reachable tile
-  -- there), rather than a possibly-walled centre.
+  -- Already on the destination screen (comparing parents, so a large 2x2 area
+  -- counts wherever Link stands in it): the objective is here, so stop routing
+  -- and hand off — the exact entrance is a per-objective waypoint, still to come.
+  if ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
+    ow_route_stop()
+    nav_say(string.format("You're at %s. Look for the entrance.", m.goal))
+    return
+  end
+  -- Same world, elsewhere: draw a path onto the destination screen (nearest
+  -- reachable tile there), rather than a possibly-walled centre.
   ow_route_to_area(area)
   nav_say(string.format("Routing to %s.", m.goal))
 end
@@ -2006,8 +2167,12 @@ function on_draw(canvas)
       end
     end
 
-    local lx = fx + (s.x % 512) * fw // 512
-    local ly = fy + (s.y % 512) * fw // 512
+    -- Link's marker at his sprite CENTRE, not the raw $0020/$0022 which is the
+    -- 16x16 sprite's top-left corner — often up in a wall tile a row or two above
+    -- where he visibly stands, so the raw point reads a tile off from the ground
+    -- (and the bush/entrance) beneath his feet.
+    local lx = fx + ((s.x + 8) % 512) * fw // 512
+    local ly = fy + ((s.y + 8) % 512) * fw // 512
     canvas:rect(lx - 2, ly - 2, 5, 5, 0x40FF60) -- Link
 
     -- A short line in the direction he faces.
