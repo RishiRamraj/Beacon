@@ -1981,6 +1981,21 @@ function on_draw(canvas)
       end
     end
 
+    -- The cross-screen overworld route, drawn through the current 512-pixel
+    -- window; the segment leaving the screen edge points on toward the next area.
+    -- World tiles are placed relative to Link's block, so off-window corners clip.
+    if s.module == 0x09 and ow_route_goal and ow_route_path then
+      local bx, by = s.x - s.x % 512, s.y - s.y % 512
+      local function oplot(wt)
+        return fx + (wt[1] * 8 + 4 - bx) * fw // 512, fy + (wt[2] * 8 + 4 - by) * fw // 512
+      end
+      for i = 1, #ow_route_path - 1 do
+        local ax, ay = oplot(ow_route_path[i])
+        local cx2, cy2 = oplot(ow_route_path[i + 1])
+        canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+      end
+    end
+
     -- Dropped waypoint markers in this area, as small orange squares.
     local here = area_id(s)
     for _, m in pairs(markers) do
