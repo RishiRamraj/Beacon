@@ -38,6 +38,8 @@ options:
   --map-only            show only the plugin's map, no game picture
   --control             serve the MCP control protocol on a local socket while
                         the window runs, so an agent can assist a live session
+  --connect             no ROM; bridge stdio to a running --control session's
+                        socket, so a stdio MCP client can drive that live window
 
 game controls (fixed):
   arrows                d-pad            enter    start
@@ -70,6 +72,7 @@ struct Args {
     map: bool,
     map_only: bool,
     control: bool,
+    connect: bool,
 }
 
 fn parse_args() -> Args {
@@ -84,6 +87,7 @@ fn parse_args() -> Args {
         map: false,
         map_only: false,
         control: false,
+        connect: false,
     };
 
     let mut it = std::env::args().skip(1);
@@ -102,6 +106,7 @@ fn parse_args() -> Args {
             "--map" => args.map = true,
             "--map-only" => args.map_only = true,
             "--control" => args.control = true,
+            "--connect" => args.connect = true,
             "--rate" => {
                 args.rate = Some(
                     it.next()
@@ -115,7 +120,12 @@ fn parse_args() -> Args {
         }
     }
 
-    args.rom = rom.unwrap_or_else(|| usage());
+    // Every mode needs a ROM except the bare stdio<->socket bridge.
+    args.rom = match rom {
+        Some(r) => r,
+        None if args.connect => PathBuf::new(),
+        None => usage(),
+    };
     args
 }
 
@@ -275,6 +285,11 @@ fn run_headless(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
+
+    // The stdio<->socket bridge needs nothing else — no ROM, emulator, or plugin.
+    if args.connect {
+        return mcp::connect_bridge().map_err(Into::into);
+    }
 
     let settings = match Settings::default_path() {
         Some(path) => Settings::load(&path).unwrap_or_else(|e| {
