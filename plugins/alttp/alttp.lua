@@ -1848,6 +1848,35 @@ local function door_toward(s, ddx, ddy)
   return best
 end
 
+-- Any room-leaving tile — an in-plane door (0x30-0x37), a room entrance/exit
+-- (0x8E-0x8F, the game's TileBehavior_Entrance), or a staircase (0x1D-0x1F up,
+-- 0x3D-0x3F down) — best aligned with a room-grid heading. Used to leave a room
+-- the graph does not connect: a room can have several exits (the uncle room has
+-- both a down stair and a south entrance passage), so the heading toward the
+-- target room picks the right one rather than the nearest.
+local function is_exit_attr(a)
+  return a ~= nil and ((a >= 0x30 and a <= 0x37) or a == 0x8E or a == 0x8F
+    or (a >= 0x1D and a <= 0x1F) or (a >= 0x3D and a <= 0x3F))
+end
+local function exit_toward(s, ddx, ddy)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local best, best_score
+  for y = 0, 63 do
+    for x = 0, 63 do
+      if is_exit_attr(tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)) then
+        local rx, ry = x - ltx, y - lty
+        local dist = math.abs(rx) + math.abs(ry)
+        local score = (ddx == 0 and ddy == 0) and -dist or (rx * ddx + ry * ddy - dist * 0.01)
+        if best_score == nil or score > best_score then
+          best_score, best = score, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+        end
+      end
+    end
+  end
+  return best
+end
+
 -- The tile-types of a floor-changing spiral staircase, from the game's own tile
 -- detection (zelda3 tile_detect.c, TileDetect_ExecuteInner): north/up stairs read
 -- as 0x1D-0x1F, down stairs as 0x3D-0x3F. (The 0x30-0x37 the door finder keys on
@@ -2066,11 +2095,19 @@ local function head_for(s, area, room, label, entrance)
       return
     end
     -- An interior the graph does not reach (Link's house at the start, or the
-    -- castle secret-entrance room whose stair down the rando omits). Aim at the
-    -- way out: a door if there is one, else a staircase (the uncle room leaves by
-    -- a down stair), else south — a house exits at its bottom edge. The local A*
-    -- gets Link there, and the auto-follow re-aims once he crosses out.
-    local d = nearest_door_tile(s) or nearest_stair_tile(s, false) or room_edge_goal(s, 0, 1)
+    -- castle secret-entrance room whose onward passage the rando omits). Head for
+    -- the exit — door, entrance passage or staircase — that points toward the
+    -- target room on the dungeon-room grid (low nibble = column, high = row), so a
+    -- room with several exits picks the right one. Fall back to that heading's
+    -- edge. The local A* gets Link there; the auto-follow re-aims once he crosses.
+    local ddx, ddy = 0, 1 -- default heading: south (a house exits at its bottom)
+    if room and s.dungeon_room <= 0xFF then
+      -- Both are standard dungeon rooms on the 16-wide grid; head toward the target.
+      ddx = (room & 0x0F) - (s.dungeon_room & 0x0F)
+      ddy = (room >> 4) - (s.dungeon_room >> 4)
+    end
+    local d = exit_toward(s, ddx, ddy)
+      or room_edge_goal(s, ddx > 0 and 1 or ddx < 0 and -1 or 0, ddy >= 0 and 1 or -1)
     if d then pathfind_to(d[1], d[2]) end
     nav_say(label .. " Head for the way out.")
   elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
