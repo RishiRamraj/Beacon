@@ -25,6 +25,16 @@ const BASE_FREQ: f32 = 330.0;
 /// beats — the source stays continuously locatable, it just throbs.
 const TREMOLO_DEPTH: f32 = 0.6;
 
+/// The soft constant floor a *ping* beacon holds between pings — the underlying
+/// tone of the sonar. Each ping attacks to full and decays back to this.
+const PING_FLOOR: f32 = 0.16;
+
+/// How fast a ping decays, as a fraction of its cycle: the amplitude is
+/// `exp(-phase / PING_DECAY)` above the floor, so at this many cycles-worth past
+/// the attack it has fallen to ~37%. Small, so the ping is a brief blip and the
+/// rest of the cycle is the soft floor.
+const PING_DECAY: f32 = 0.05;
+
 pub struct BeaconMixer {
     sample_rate: f32,
     /// Oscillator phase per beacon id, in cycles `[0, 1)`, kept between frames.
@@ -102,11 +112,17 @@ impl BeaconMixer {
             let mut phase = self.phases.get(&b.id).copied().unwrap_or(0.0);
             let mut trem_phase = self.trem_phases.get(&b.id).copied().unwrap_or(0.0);
             for i in 0..frames {
-                let trem_gain = if tremolo > 0.0 {
+                let trem_gain = if tremolo <= 0.0 {
+                    1.0
+                } else if b.ping {
+                    // A sonar ping: sharp attack at the top of each cycle, quick
+                    // exponential decay to a soft constant floor that holds until
+                    // the next ping.
+                    PING_FLOOR + (1.0 - PING_FLOOR) * (-trem_phase / PING_DECAY).exp()
+                } else {
+                    // A smooth swell riding in [1 - depth, 1], only ducking the tone.
                     let lfo = (trem_phase * std::f32::consts::TAU).sin() * 0.5 + 0.5;
                     1.0 - TREMOLO_DEPTH + TREMOLO_DEPTH * lfo
-                } else {
-                    1.0
                 };
                 let s = (phase * std::f32::consts::TAU).sin() * amp * trem_gain;
                 out[2 * i] += s * left_gain;
@@ -142,6 +158,7 @@ mod tests {
             pitch: 1.0,
             volume,
             tremolo: 0.0,
+            ping: false,
         }
     }
 
@@ -277,6 +294,40 @@ mod tests {
         );
         // The trough never reaches silence — the source stays locatable.
         assert!(p_lo > 0.0, "a pulsing beacon never goes fully silent");
+    }
+
+    #[test]
+    fn ping_spikes_then_holds_a_soft_floor() {
+        // A ping beacon attacks to full at the top of each cycle and decays to a
+        // soft constant floor that holds until the next ping — so most of the cycle
+        // sits quiet with a brief loud blip, the sonar sound, unlike the smooth
+        // swell that spends half its time loud.
+        let window = 480; // 10 ms at 48 kHz
+        let mut b = beacon("p", 0.0, 100.0, 1.0);
+        b.tremolo = 10.0; // ten pings a second -> one ping every 100 ms
+        b.ping = true;
+        let mut mixer = BeaconMixer::new(48_000);
+        let mut out = vec![0.0f32; 2 * 4800]; // 100 ms -> exactly one ping cycle
+        mixer.mix(std::slice::from_ref(&b), &mut out, 0.0, 1.0, 1.0);
+        let mono: Vec<f32> = out.chunks(2).map(|f| f[0]).collect();
+        let mut rms: Vec<f32> = mono
+            .chunks(window)
+            .map(|w| (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt())
+            .collect();
+        let peak = rms.iter().cloned().fold(0.0f32, f32::max);
+        rms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let lo = rms[0]; // the quietest window: the soft steady floor
+        assert!(lo > 0.0, "a soft constant tone holds between pings: {lo}");
+        assert!(
+            peak > lo * 2.0,
+            "the ping is a sharp spike well above the floor: floor {lo}, peak {peak}"
+        );
+        // The blip is brief: the median window sits down near the floor, not the peak.
+        let median = rms[rms.len() / 2];
+        assert!(
+            median < peak * 0.5,
+            "most of the cycle rests at the soft floor: median {median}, peak {peak}"
+        );
     }
 
     #[test]

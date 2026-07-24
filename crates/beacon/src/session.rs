@@ -66,6 +66,10 @@ pub struct Session {
     held_buttons: u16,
     /// Set by the quit action; the driver checks it and shuts down.
     quit: bool,
+    /// When true, all output is silenced: the game and beacon audio is submitted
+    /// as silence and speech is not spoken (still logged for the MCP speech log).
+    /// A single toggle to hush Beacon without closing it.
+    muted: bool,
 
     audio_scratch: Vec<f32>,
     /// Synthesises the plugin's spatial-audio beacons into the audio stream.
@@ -112,6 +116,7 @@ impl Session {
             map_dims: (0, 0),
             held_buttons: 0,
             quit: false,
+            muted: false,
             audio_scratch: Vec::with_capacity(4096),
             beacon_mixer: BeaconMixer::new(beacon_emu::AUDIO_SAMPLE_RATE),
             last_spoken: None,
@@ -145,10 +150,14 @@ impl Session {
         self.audio_scratch.clear();
         self.emu.drain_audio(&mut self.audio_scratch);
         if !self.audio_scratch.is_empty() {
-            // Mix the plugin's spatial-audio beacons into the game audio before
-            // it is queued. The beacons are owned here, so the mixer and the
-            // buffer can be borrowed together.
-            if self.settings.beacons.enabled {
+            if self.muted {
+                // Silence game and beacons alike, but keep the sample count so the
+                // audio queue still paces emulation at normal speed.
+                self.audio_scratch.iter_mut().for_each(|s| *s = 0.0);
+            } else if self.settings.beacons.enabled {
+                // Mix the plugin's spatial-audio beacons into the game audio before
+                // it is queued. The beacons are owned here, so the mixer and the
+                // buffer can be borrowed together.
                 let beacons = self.plugin.beacons();
                 self.beacon_mixer.mix(
                     &beacons,
@@ -230,6 +239,11 @@ impl Session {
             self.speech_log.pop_front();
         }
         self.speech_log.push_back(utterance.text.clone());
+        // Muted hushes the voice but still records the line, so `repeat_last` and
+        // the MCP speech log keep working while silent.
+        if self.muted {
+            return;
+        }
         if let Err(e) = self.speech.speak(&utterance) {
             eprintln!("speech: {e}");
         }
@@ -289,9 +303,22 @@ impl Session {
             Action::PrevSlot => self.change_slot(-1),
             Action::Pause => self.toggle_pause(),
             Action::FrameAdvance => self.frame_advance(),
+            Action::Mute => self.toggle_mute(),
             Action::ToggleMap => self.toggle_map(),
             Action::OpenInputConfig => self.open_input_config(),
             Action::Command(name) => self.run_command(&name),
+        }
+    }
+
+    /// Toggles the global mute. The confirmation is spoken outside the muted
+    /// window — before muting, after unmuting — so the player always hears it.
+    fn toggle_mute(&mut self) {
+        if self.muted {
+            self.muted = false;
+            self.say_now("Sound on.");
+        } else {
+            self.say_now("Muted.");
+            self.muted = true;
         }
     }
 

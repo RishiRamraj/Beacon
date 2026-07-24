@@ -27,6 +27,8 @@ pub enum Action {
     PrevSlot,
     /// Toggle pause.
     Pause,
+    /// Toggle a global mute of all audio and speech.
+    Mute,
     /// Advance exactly one frame, pausing if not already paused. A debugging aid
     /// for watching a plugin frame by frame.
     FrameAdvance,
@@ -57,6 +59,7 @@ impl Action {
             "next_slot" => Action::NextSlot,
             "prev_slot" => Action::PrevSlot,
             "pause" => Action::Pause,
+            "mute" => Action::Mute,
             "frame_advance" => Action::FrameAdvance,
             "toggle_map" => Action::ToggleMap,
             "bind" => Action::OpenInputConfig,
@@ -78,12 +81,13 @@ pub struct Bindable {
 ///
 /// Ordered by how often they are reached for, not alphabetically: a player
 /// scrolling the list hears the common ones first.
-const BUILTIN: [(&str, &str); 12] = [
+const BUILTIN: [(&str, &str); 13] = [
     ("save_state", "Save state"),
     ("load_state", "Load state"),
     ("next_slot", "Next save slot"),
     ("prev_slot", "Previous save slot"),
     ("pause", "Pause or resume"),
+    ("mute", "Mute or unmute"),
     ("frame_advance", "Advance one frame"),
     ("toggle_map", "Show or hide the map"),
     ("cycle_verbosity", "Cycle verbosity"),
@@ -145,6 +149,7 @@ mod tests {
     #[test]
     fn round_trips_builtins_and_commands() {
         assert_eq!(Action::from_id("save_state"), Some(Action::SaveState));
+        assert_eq!(Action::from_id("mute"), Some(Action::Mute));
         assert_eq!(Action::from_id("frame_advance"), Some(Action::FrameAdvance));
         assert_eq!(
             Action::from_id("command:coordinates"),

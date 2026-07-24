@@ -495,7 +495,8 @@ fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
 
     // Post-Agahnim: all three pendants, the Master Sword, Agahnim beaten, no
     // crystals yet. The next milestone is Palace of Darkness (area 0x5E, Dark
-    // World). Standing in the Light World it should flag the other world.
+    // World). The assist is already on, so as the objective changes the next frame
+    // re-aims on its own and flags the other world — no second key press.
     {
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7EF374, 0x07); // all three pendants
@@ -503,8 +504,7 @@ fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
         set(0x7EF3C5, 3); // Agahnim beaten
         set(0x7E008A, 0x1B); // in the Light World castle area
     }
-    plugin.on_frame(&ram, 2);
-    let out = plugin.command("advance", &ram);
+    let out = plugin.on_frame(&ram, 2);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
         texts.iter().any(|t| t.contains("Dark World")),
@@ -541,10 +541,10 @@ fn alttp_advance_names_the_next_canonical_dungeon_item() {
         "points at the Bow first: {texts:?}"
     );
 
-    // Bow in hand, Big Key not: the goal advances to the Big Key.
+    // Bow in hand, Big Key not: the assist is already on, so the next frame
+    // re-aims the goal at the Big Key on its own.
     let have_bow = base(1, 0x00);
-    plugin.on_frame(&have_bow, 2);
-    let out = plugin.command("advance", &have_bow);
+    let out = plugin.on_frame(&have_bow, 2);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
         texts.iter().any(|t| t.contains("Big Key")),
@@ -868,6 +868,83 @@ fn alttp_intro_chain_walks_the_opening_beat_by_beat() {
     delivered[wram_offset(0x7EF3C5).unwrap()] = 2;
     let t = objective(&mut plugin, &delivered);
     assert!(t.contains("Objective") && t.contains("Eastern Palace"), "{t}");
+}
+
+#[test]
+fn alttp_intro_guide_auto_advances_when_a_beat_completes() {
+    // Engaging the intro guide (advance) arms an auto-follow: once the Lamp is
+    // picked up, the guide re-aims at the next beat on its own on the next frame,
+    // with no further key press. In the starting house — an interior the dungeon
+    // graph does not reach — that next beat sends Link to the door out.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // House interior: module 0x07, room 0x0104, with a chest tile and a door.
+    let house = |lamp: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((32, 40), (32, 6), &[]); // door tile at (32,6)
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x04); // room 0x0104, low byte
+        set(0x7E00A1, 0x01); // room 0x0104, high byte
+        set(0x7EF34A, lamp); // Lamp ($7EF34A)
+        set(0x7F2000 + 20 * 64 + 20, 0x58); // a chest tile
+        ram
+    };
+
+    // Prime, then engage the guide on the Lamp beat.
+    plugin.on_frame(&house(0), 0);
+    plugin.on_frame(&house(0), 1);
+    let out = plugin.command("advance", &house(0));
+    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Lamp")),
+        "engages on the Lamp beat: {texts:?}"
+    );
+
+    // Lamp now in hand: the next frame auto-advances to the door-out beat, no
+    // second key press.
+    let out = plugin.on_frame(&house(1), 2);
+    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.to_lowercase().contains("door") || t.to_lowercase().contains("uncle")),
+        "auto-advances to the next beat once the Lamp is taken: {texts:?}"
+    );
+}
+
+#[test]
+fn alttp_nav_assist_toggles_on_and_off_with_advance() {
+    // The navigation assist (L / advance) is a global on/off toggle: the first
+    // press turns it on and aims at the objective, the second turns it off. It is
+    // not a one-shot that has to be re-pressed.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let mut ram = vec![0u8; 128 * 1024];
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // overworld
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E008A, 0x18); // Kakariko
+    }
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+
+    // First press: on, and it routes toward the objective.
+    let on: Vec<String> = plugin.command("advance", &ram).iter().map(|i| i.text.clone()).collect();
+    assert!(
+        on.iter().any(|t| t.contains("Routing")),
+        "first L turns the assist on and routes: {on:?}"
+    );
+
+    // Second press: off.
+    let off: Vec<String> = plugin.command("advance", &ram).iter().map(|i| i.text.clone()).collect();
+    assert!(
+        off.iter().any(|t| t.contains("Navigation off")),
+        "second L turns the assist off: {off:?}"
+    );
 }
 
 #[test]

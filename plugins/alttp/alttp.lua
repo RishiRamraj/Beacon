@@ -317,24 +317,21 @@ local NPC_TYPES = { [22]=true, [30]=true, [31]=true, [33]=true, [47]=true, [49]=
 -- Per-class tone, reach, and pulse. `pitch` scales the 330 Hz base tone (higher
 -- is brighter); enemies keep the original 1.0. `range` is Manhattan pixels —
 -- about 16 to a tile, so 24 is "within a block", the near-only reach for scenery.
--- `tremolo` is the amplitude-pulse rate in Hz: a rhythmic signature that tells
--- the classes apart by ear even when they overlap. The rate rises with danger —
--- scenery and pickups are calm or steady, enemies throb fast (and faster still
--- the tougher they are, see the emission loop). The guide tone stays steady (no
--- tremolo) so the thing you actively steer by is never mistaken for a threat.
+-- `tremolo` is the amplitude-swell rate in Hz: a rhythmic signature that tells the
+-- classes apart by ear even when they overlap. Danger swells fast, reward slow:
+-- enemies pulse at 2 Hz (120 BPM), the things you collect — items and chests — at
+-- 1 Hz (60 BPM), and incidental scenery sits steady. The guide tone carries no
+-- swell at all (see the path beacon), so the thing you actively steer by is a
+-- solid tone, never mistaken for a threat or a pickup.
+-- `gain` scales the class's loudness on top of the distance falloff (clamped to
+-- 1.0). Enemies carry a boost so a threat is heard over the quieter guide tone;
+-- the calmer classes sit at unity.
 local BEACON_KINDS = {
-  enemy = { pitch = 1.0, range = 224, tremolo = 6.0 }, -- base; scaled by HP below
-  item  = { pitch = 2.0, range = 224, tremolo = 2.0 }, -- a calm "come and get me"
-  npc   = { pitch = 1.5, range = 224, tremolo = 3.5 }, -- gently active, but safe
-  minor = { pitch = 0.5, range = 24,  tremolo = 0.0 }, -- steady, incidental
+  enemy = { pitch = 1.0, range = 224, tremolo = 2.0, gain = 1.6 }, -- 120 BPM: danger
+  item  = { pitch = 2.0, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: a pickup
+  npc   = { pitch = 1.5, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: safe to approach
+  minor = { pitch = 0.5, range = 24,  tremolo = 0.0, gain = 1.0 }, -- steady, incidental
 }
-
--- Enemy pulse scales with toughness: the base rate plus a term in the sprite's
--- health, so a stronger foe throbs faster and more urgently. Health is capped
--- before scaling so a boss's huge HP does not run the rate off into a buzz.
-local ENEMY_TREMOLO_BASE = 6.0    -- Hz, a plain enemy with little or no health
-local ENEMY_TREMOLO_PER_HP = 0.06 -- added Hz per point of (capped) health
-local ENEMY_TREMOLO_HP_CAP = 160  -- health past this does not pulse any faster
 
 -- How much a wall between the player and a source dims its beacon: muffled, not
 -- silenced, so an occluded threat still registers.
@@ -877,7 +874,8 @@ local pathfind_replan_in = 0
 
 local PATH_PITCH = 3.0         -- a high, distinct navigation tone
 local PATH_ALIGNED_PITCH = 3.4 -- brighter when Link faces the way to go
-local PATH_VOLUME = 0.7
+local PATH_VOLUME = 0.30        -- kept well under the object beacons so threats read over the guide
+local PATH_PING_HZ = 0.5        -- sonar: a ping every 2 seconds over a soft steady tone
 local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
 local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 
@@ -964,6 +962,7 @@ local function pathfind_update(s)
     x = dx, y = dy,
     pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
     volume = PATH_VOLUME,
+    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
   })
 end
 
@@ -1015,6 +1014,16 @@ end
 local function nearest_item_sprite(s)
   for _, sp in ipairs(sprites()) do
     if ITEM_TYPES[sp.kind] then return { sp.x, sp.y } end
+  end
+  return nil
+end
+
+-- The nearest on-screen sprite of a specific type, as world pixel coordinates, or
+-- nil. sprites() is sorted nearest-first. Used to home the intro guide on a story
+-- character — Link's Uncle (115), Princess Zelda (118) — rather than a door.
+local function nearest_sprite_kind(s, kind)
+  for _, sp in ipairs(sprites()) do
+    if sp.kind == kind then return { sp.x, sp.y } end
   end
   return nil
 end
@@ -1099,6 +1108,10 @@ local hop_goal
 -- with the advance guide far below, but the objective readout above it consults
 -- it too; both reference this upvalue, assigned once the chain is defined.
 local intro_step
+
+-- Forward declaration: nav_update re-aims the navigation assist each frame while
+-- it is toggled on; on_frame (defined above the chain) drives it.
+local nav_update
 
 -- Learned graph: from_room -> { to_room -> {x, y} }, the absolute pixel spot in
 -- from_room where the walk into to_room happened (so aiming Link back at it
@@ -1343,6 +1356,7 @@ local function ow_route_update(s)
     x = dx, y = dy,
     pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
     volume = PATH_VOLUME,
+    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
   })
 end
 
@@ -1485,23 +1499,17 @@ function on_frame(frame)
       local sp = nearest[name]
       if sp and sp.dist < kind.range then
         -- Quadratic falloff: quieter at a distance, ramping up steeply as the
-        -- source closes, rather than a flat linear fade.
+        -- source closes, rather than a flat linear fade. The class gain scales it
+        -- (enemies boosted so they carry over the guide), clamped to full volume.
         local t = 1 - sp.dist / kind.range
-        local vol = t * t
+        local vol = math.min(1, t * t * (kind.gain or 1))
         -- Behind a wall: muffled rather than silent, so a close but occluded
         -- source still registers without sounding like it is out in the open.
         if sight_blocked(now, now.x, now.y, sp.x, sp.y) then
           vol = vol * BEACON_OCCLUDED_SCALE
         end
-        -- Enemies pulse faster the tougher they are; other classes use the
-        -- class's fixed rate.
-        local trem = kind.tremolo
-        if name == "enemy" then
-          local hp = sp.hp or 0
-          if hp > ENEMY_TREMOLO_HP_CAP then hp = ENEMY_TREMOLO_HP_CAP end
-          trem = ENEMY_TREMOLO_BASE + hp * ENEMY_TREMOLO_PER_HP
-        end
-        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol, tremolo = trem })
+        -- Each class swells at its own fixed rate (enemies 120 BPM, pickups 60).
+        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol, tremolo = kind.tremolo })
       else
         beacon.clear(name)
       end
@@ -1521,6 +1529,10 @@ function on_frame(frame)
   -- Learn the dungeon's room connectivity as Link walks, and re-aim any active
   -- cross-room route at each room boundary, before the local follower runs.
   record_room_transition(now)
+  -- Keep the navigation assist aimed at the objective as beats complete and Link
+  -- crosses screens, before the followers it drives so a fresh target takes effect
+  -- this frame.
+  nav_update(now)
   room_route_update(now)
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
@@ -2012,16 +2024,25 @@ end
 local CASTLE_AREA = 0x1B
 local SANCTUARY_AREA, SANCTUARY_ROOM = 0x13, 0x12
 
--- Route toward an intro beat from wherever Link is: in a dungeon, room-route to
--- the given room (stage-2 door-to-door); on the overworld, head for the area
--- (stage-1 cross-screen path), or, once standing in it, hand off to look for the
--- way in.
+-- Route toward an intro beat from wherever Link is. In a dungeon room the graph
+-- connects to the target, door-to-door route there (stage 2). In an indoor room
+-- the graph does not reach yet — Link's house at the very start — head for the
+-- door out. On the overworld, take the stage-1 cross-screen path to the area, or
+-- hand off to look for the entrance once standing in it.
 local function head_for(s, area, room, label)
   if s.module == 0x07 then
-    if room and route_to_room(s, room, label) then return end
-    local d = nearest_door_tile(s)
+    if room and (room == s.dungeon_room or room_path(s.dungeon_room, room)) then
+      route_to_room(s, room, label)
+      return
+    end
+    -- An interior the graph does not reach (Link's house at the start, or the
+    -- castle secret-entrance room whose stair down the rando omits). Aim at the
+    -- way out: a door if there is one, else a staircase (the uncle room leaves by
+    -- a down stair), else south — a house exits at its bottom edge. The local A*
+    -- gets Link there, and the auto-follow re-aims once he crosses out.
+    local d = nearest_door_tile(s) or nearest_stair_tile(s, false) or room_edge_goal(s, 0, 1)
     if d then pathfind_to(d[1], d[2]) end
-    nav_say(label .. " Find the way through.")
+    nav_say(label .. " Head for the way out.")
   elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
     ow_route_stop()
     nav_say(label .. " Look for the entrance.")
@@ -2051,8 +2072,8 @@ local INTRO = {
     done = function(v) return v.sword >= 1 or v.progress >= 1 end,
     act = function(s, v)
       if s.module == 0x07 and s.dungeon_room == 0x55 then
-        local it = nearest_item_sprite(s)
-        if it then pathfind_to(it[1], it[2]) end
+        local u = nearest_sprite_kind(s, 115) -- Link's Uncle
+        if u then pathfind_to(u[1], u[2]) end
         nav_say("Your uncle is in this room. Reach him for the sword.")
         return
       end
@@ -2063,6 +2084,12 @@ local INTRO = {
     hint = "Descend through the castle to the dungeon below and free Princess Zelda from her cell.",
     done = function(v) return mem.u8(0x7EF3CC) == 1 or v.progress >= 2 end,
     act = function(s, v)
+      if s.module == 0x07 and s.dungeon_room == 0x80 then
+        local z = nearest_sprite_kind(s, 118) -- Princess Zelda
+        if z then pathfind_to(z[1], z[2]) end
+        nav_say("Zelda is in this cell. Reach her.")
+        return
+      end
       head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.")
     end },
   { key = "sanctuary",
@@ -2084,13 +2111,20 @@ intro_step = function(v)
   return nil
 end
 
-on_command("advance", function()
-  local s = prev
-  if s == nil or not in_play(s) then
-    nav_say("Not in play.")
-    return
-  end
-  local v = read_progress()
+-- The navigation assist is a global on/off toggle, bound to L (advance). While it
+-- is on it re-aims itself at the current objective across every screen, room and
+-- module change, so the route stays alive map to map instead of dying at each
+-- transition — the player flips it on once and it leads the whole way. `nav_sig`
+-- is the context it last aimed from; it re-aims only when the module or the
+-- objective changes, since the room-to-room and screen-to-screen followers handle
+-- movement within a module quietly. Global for MCP inspection.
+nav_active = false
+local nav_sig = nil
+
+-- Aim the guide at the current objective from wherever Link stands: the scripted
+-- intro beat while the intro runs, else the dungeon spine, else the overworld
+-- milestone. Each announces what it is heading for.
+local function nav_reaim(s, v)
   local _, step = intro_step(v)
   if step then
     step.act(s, v)
@@ -2099,11 +2133,74 @@ on_command("advance", function()
   else
     advance_overworld(s, v)
   end
+end
+
+-- What the guide should be heading toward, plus which module Link is in — so it
+-- re-aims exactly when either changes and stays put otherwise. The objective is
+-- the intro beat while the intro runs; in a dungeon, the spine phase (whether the
+-- signature item, Big Key and boss are done, so grabbing the item re-aims at the
+-- Big Key); on the overworld, the current milestone.
+local function nav_signature(s, v)
+  local _, step = intro_step(v)
+  local obj
+  if step then
+    obj = "in:" .. step.key
+  elseif s.module == 0x07 then
+    local nav = DUNGEON_NAV[s.dungeon_id]
+    if nav then
+      local a = nav.have() and 1 or 0
+      local b = (mem.u8(nav.bk_byte) & nav.bk_bit) ~= 0 and 1 or 0
+      local c = room_boss_beaten(nav.boss_room) and 1 or 0
+      obj = string.format("dg%d.%d%d%d", s.dungeon_id, a, b, c)
+    else
+      obj = "dg" .. s.dungeon_id
+    end
+  else
+    obj = "ms" .. (current_milestone(v))
+  end
+  return s.module .. ":" .. obj
+end
+
+-- Turn the assist off and drop every route it was driving.
+local function nav_stop()
+  nav_active = false
+  nav_sig = nil
+  room_route_stop()
+  ow_route_stop()
+  pathfind_stop()
+end
+
+-- Per-frame while the assist is on: re-aim when the module or objective changes.
+-- Runs before the followers it feeds so a fresh target takes effect this frame.
+nav_update = function(s)
+  if not nav_active or not in_play(s) then return end
+  local v = read_progress()
+  local sig = nav_signature(s, v)
+  if sig ~= nav_sig then
+    nav_sig = sig
+    nav_reaim(s, v)
+  end
+end
+
+on_command("advance", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    nav_say("Not in play.")
+    return
+  end
+  if nav_active then
+    nav_stop()
+    nav_say("Navigation off.")
+    return
+  end
+  nav_active = true
+  local v = read_progress()
+  nav_sig = nav_signature(s, v)
+  nav_reaim(s, v)
 end)
 
 on_command("pathfind_stop", function()
-  room_route_stop()
-  pathfind_stop()
+  nav_stop()
   say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
 end)
 
