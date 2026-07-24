@@ -1018,6 +1018,16 @@ local function nearest_item_sprite(s)
   return nil
 end
 
+-- The nearest on-screen sprite of a specific type, as world pixel coordinates, or
+-- nil. sprites() is sorted nearest-first. Used to home the intro guide on a story
+-- character — Link's Uncle (115), Princess Zelda (118) — rather than a door.
+local function nearest_sprite_kind(s, kind)
+  for _, sp in ipairs(sprites()) do
+    if sp.kind == kind then return { sp.x, sp.y } end
+  end
+  return nil
+end
+
 -- ===========================================================================
 -- Cross-room dungeon routing: a room-to-room guide layered over the local
 -- pathfinder, which only reaches within the current room. Two graphs feed it. A
@@ -2060,8 +2070,8 @@ local INTRO = {
     done = function(v) return v.sword >= 1 or v.progress >= 1 end,
     act = function(s, v)
       if s.module == 0x07 and s.dungeon_room == 0x55 then
-        local it = nearest_item_sprite(s)
-        if it then pathfind_to(it[1], it[2]) end
+        local u = nearest_sprite_kind(s, 115) -- Link's Uncle
+        if u then pathfind_to(u[1], u[2]) end
         nav_say("Your uncle is in this room. Reach him for the sword.")
         return
       end
@@ -2072,6 +2082,12 @@ local INTRO = {
     hint = "Descend through the castle to the dungeon below and free Princess Zelda from her cell.",
     done = function(v) return mem.u8(0x7EF3CC) == 1 or v.progress >= 2 end,
     act = function(s, v)
+      if s.module == 0x07 and s.dungeon_room == 0x80 then
+        local z = nearest_sprite_kind(s, 118) -- Princess Zelda
+        if z then pathfind_to(z[1], z[2]) end
+        nav_say("Zelda is in this cell. Reach her.")
+        return
+      end
       head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.")
     end },
   { key = "sanctuary",
