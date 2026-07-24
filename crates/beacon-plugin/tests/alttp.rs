@@ -104,10 +104,21 @@ fn alttp_enemy_announced_once_as_it_enters_the_screen() {
         !soldier(&plugin.on_frame(&frame(60), 2)),
         "stays quiet while it remains on screen"
     );
-    plugin.on_frame(&frame(200), 3); // leaves the screen (latch resets)
+    // Weaving off screen and back does NOT re-announce: a threat is named once,
+    // ever, as long as it stays alive (its sprite slot stays occupied).
+    plugin.on_frame(&frame(200), 3);
     assert!(
-        soldier(&plugin.on_frame(&frame(60), 4)),
-        "announces again on re-entry"
+        !soldier(&plugin.on_frame(&frame(60), 4)),
+        "does not re-announce the same enemy on re-entry"
+    );
+    // The latch clears only when the slot empties (the enemy dies or despawns); a
+    // fresh enemy spawning in that freed slot is then announced.
+    let mut empty = frame(60);
+    empty[wram_offset(0x7E0DD0).unwrap()] = 0; // slot 0 inactive
+    plugin.on_frame(&empty, 5);
+    assert!(
+        soldier(&plugin.on_frame(&frame(60), 6)),
+        "a new enemy in the freed slot is announced"
     );
 }
 
@@ -322,6 +333,60 @@ fn dungeon_frame(link: (u16, u16), door: (u16, u16), walls: &[(u16, u16)]) -> Ve
 
 fn path_beacon(plugin: &LuaPlugin) -> Option<BeaconState> {
     plugin.beacons().into_iter().find(|b| b.id == "path")
+}
+
+#[test]
+fn alttp_in_combat_the_guide_hushes_and_only_the_enemy_sounds() {
+    // With an enemy within striking distance the navigation guide falls silent and
+    // the pickup/person tones drop out, leaving only the nearest enemy — so a fight
+    // is not cluttered by the route or a nearby item.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // A room with a door to route to, and an item (Green Rupee, type 217) on screen
+    // but no enemy: the guide sounds and the item beacon plays.
+    let with_enemy = |enemy: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((10, 10), (20, 10), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        let (lx, ly) = (10u16 * 8 + 4, 10u16 * 8 + 4);
+        // slot 1: an item, ~80px east (in beacon range, well outside combat range).
+        set(0x7E0DD0 + 1, 0x09);
+        set(0x7E0E20 + 1, 217); // Green Rupee (an ITEM_TYPE)
+        let ix = lx + 80;
+        set(0x7E0D10 + 1, (ix & 0xFF) as u8);
+        set(0x7E0D30 + 1, (ix >> 8) as u8);
+        set(0x7E0D00 + 1, (ly & 0xFF) as u8);
+        set(0x7E0D20 + 1, (ly >> 8) as u8);
+        if enemy {
+            // slot 0: a Green Soldier 24px east — within COMBAT_RANGE.
+            set(0x7E0DD0, 0x09);
+            set(0x7E0E20, 65);
+            let ex = lx + 24;
+            set(0x7E0D10, (ex & 0xFF) as u8);
+            set(0x7E0D30, (ex >> 8) as u8);
+            set(0x7E0D00, (ly & 0xFF) as u8);
+            set(0x7E0D20, (ly >> 8) as u8);
+        }
+        ram
+    };
+
+    // Clear of enemies: start the guide, and confirm guide + item both sound.
+    let calm = with_enemy(false);
+    plugin.on_frame(&calm, 0);
+    plugin.command("pathfind", &calm);
+    plugin.on_frame(&calm, 1);
+    assert!(path_beacon(&plugin).is_some(), "the guide sounds when clear");
+    assert!(
+        plugin.beacons().iter().any(|b| b.id == "item"),
+        "the item sounds when clear"
+    );
+
+    // Enemy steps into striking range: guide and item go silent, enemy remains.
+    plugin.on_frame(&with_enemy(true), 2);
+    let ids: Vec<String> = plugin.beacons().iter().map(|b| b.id.clone()).collect();
+    assert!(!ids.contains(&"path".to_string()), "guide hushes in combat: {ids:?}");
+    assert!(!ids.contains(&"item".to_string()), "item hushes in combat: {ids:?}");
+    assert!(ids.contains(&"enemy".to_string()), "the enemy still sounds: {ids:?}");
 }
 
 #[test]
@@ -761,8 +826,8 @@ fn alttp_a_patrolling_enemy_weaving_out_of_sight_is_not_re_announced() {
         );
     }
 
-    // But if it truly leaves the screen and comes back, that is a real new
-    // entrance and speaks again. Move the enemy far off screen for a while.
+    // Even leaving the screen entirely does not re-arm it while it stays alive:
+    // an enemy is named once, ever. Move it far off screen, then back.
     let off = {
         let mut ram = frame(false);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
@@ -775,8 +840,18 @@ fn alttp_a_patrolling_enemy_weaving_out_of_sight_is_not_re_announced() {
         plugin.on_frame(&off, f);
     }
     assert!(
-        named(&plugin.on_frame(&frame(false), 60)),
-        "a genuine re-entrance after leaving the screen speaks again"
+        !named(&plugin.on_frame(&frame(false), 60)),
+        "still silent on re-entry — the same enemy is announced only once"
+    );
+
+    // Only when it despawns (its slot empties) is the latch cleared, so a fresh
+    // enemy appearing in that slot speaks again.
+    let mut empty = frame(false);
+    empty[wram_offset(0x7E0DD0).unwrap()] = 0; // slot 0 inactive
+    plugin.on_frame(&empty, 60);
+    assert!(
+        named(&plugin.on_frame(&frame(false), 61)),
+        "a new enemy in the freed slot is announced"
     );
 }
 

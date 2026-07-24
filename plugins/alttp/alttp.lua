@@ -284,6 +284,16 @@ local function on_screen(dx, dy)
   return math.abs(dx) <= 128 and math.abs(dy) <= 116
 end
 
+-- An enemy is called out once it comes within this Manhattan distance — wider than
+-- the visible screen, so a threat is named early, while it is still approaching.
+local ENEMY_ANNOUNCE_RANGE = 240
+-- Link is "in combat" while an enemy is this close. Then the guide hushes and only
+-- the nearest enemy sounds, so a fight is not cluttered by navigation or pickups.
+local COMBAT_RANGE = 48
+-- Set each frame: whether an enemy is within COMBAT_RANGE. Global so the guide
+-- followers can fall silent while it holds, and for MCP inspection.
+combat_engaged = false
+
 -- A compass direction from an offset. y decreases upward on the SNES.
 local function direction(dx, dy)
   local ax, ay = math.abs(dx), math.abs(dy)
@@ -984,6 +994,10 @@ local function pathfind_update(s)
     return
   end
 
+  -- Hush the guide while an enemy is engaged, so the fight's audio is unobstructed;
+  -- the follower keeps tracking, and the tone returns once the enemy backs off.
+  if combat_engaged then beacon.clear("path"); return end
+
   local w = path[pathfind_wp]
   local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
   local on_course
@@ -1396,6 +1410,7 @@ local function ow_route_update(s)
     say("You have arrived.", { priority = "navigation", category = "on-demand" })
     ow_route_stop(); beacon.clear("path"); return
   end
+  if combat_engaged then beacon.clear("path"); return end -- hush the guide in a fight
   local w = path[ow_route_wp]
   local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
   local on_course
@@ -1428,16 +1443,6 @@ function on_frame(frame)
     say("You died.", { priority = "critical", category = "combat" })
     low_health_warned = false
     return
-  end
-
-  -- Damage. Only while actually in play: menu transitions that zero health
-  -- would otherwise register as being hit.
-  if in_play(now) and now.health < was.health and was.max_health > 0 then
-    local lost = (was.health - now.health) / 8.0
-    say(
-      string.format("Hit. %.1f hearts lost, %.1f left.", lost, hearts(now.health)),
-      { priority = "critical", category = "combat", rate_limit = "400ms" }
-    )
   end
 
   -- Low health, latched on the crossing.
@@ -1505,31 +1510,25 @@ function on_frame(frame)
     end
   end
 
-  -- Enemies. Announce each by name and direction as it enters the visible screen
-  -- ("Green Soldier, north-east."), once per entrance — the spatial-audio beacon
-  -- gives the continuous sense of where the nearest one is.
+  -- Enemies. Announce each threat once, by name and direction, when it first comes
+  -- within range and into the clear ("Green Soldier, north-east."); the spatial
+  -- beacon then tracks the nearest. The latch is per sprite slot and clears only
+  -- when the slot empties — the enemy dies or despawns — so a foe weaving on and
+  -- off screen, or behind cover, is never announced a second time.
   if in_play(now) then
     local list = sprites()
 
-    -- Speak an enemy as it appears on screen; reset the latch once it leaves, so
-    -- a re-entrance speaks again. The arbiter rate-limits a busy room.
     local active = {}
     for _, sp in ipairs(list) do
       active[sp.slot] = sp
     end
     for i = 0, 15 do
       local sp = active[i]
-      -- "Present" = a threat that is on the visible screen, whether or not a wall
-      -- currently hides it. An occluded enemy is still present, so it stays
-      -- latched; only leaving the screen re-arms it.
-      local present = sp ~= nil and is_enemy(sp) and on_screen(sp.dx, sp.dy)
-      if not present then
-        announced[i] = false -- off screen: a genuine re-entrance may speak again
+      if sp == nil or not is_enemy(sp) then
+        announced[i] = false -- slot free: a new enemy spawning here may speak
       elseif not announced[i]
+          and sp.dist < ENEMY_ANNOUNCE_RANGE
           and not sight_blocked(now, now.x, now.y, sp.x, sp.y) then
-        -- Announce once, when it is actually in the clear. If it first appears
-        -- occluded it waits, but it will not re-announce merely for stepping back
-        -- into line of sight after ducking behind cover.
         say(
           string.format("%s, %s.", enemy_name(sp), direction(sp.dx, sp.dy)),
           { priority = "interaction", category = "enemy" }
@@ -1539,17 +1538,22 @@ function on_frame(frame)
     end
 
     -- Spatial-audio beacons: one tone per class, on the nearest sprite of that
-    -- class within its reach. It pans toward the source and grows louder as it
-    -- closes. `list` is sorted nearest-first, so the first sprite seen for a
-    -- class is its closest one.
+    -- class within its reach. `list` is sorted nearest-first, so the first sprite
+    -- seen for a class is its closest one.
     local nearest = {}
     for _, sp in ipairs(list) do
       local c = category(sp)
       if nearest[c] == nil then nearest[c] = sp end
     end
+
+    -- In combat — an enemy within COMBAT_RANGE — only that nearest enemy sounds;
+    -- the guide and the pickup/person tones fall silent so the fight is clear.
+    local ne = nearest.enemy
+    combat_engaged = ne ~= nil and ne.dist < COMBAT_RANGE
+
     for name, kind in pairs(BEACON_KINDS) do
       local sp = nearest[name]
-      if sp and sp.dist < kind.range then
+      if sp and sp.dist < kind.range and not (combat_engaged and name ~= "enemy") then
         -- Quadratic falloff: quieter at a distance, ramping up steeply as the
         -- source closes, rather than a flat linear fade. The class gain scales it
         -- (enemies boosted so they carry over the guide), clamped to full volume.
@@ -1567,6 +1571,7 @@ function on_frame(frame)
       end
     end
   else
+    combat_engaged = false
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
       beacon.clear(name)
     end
