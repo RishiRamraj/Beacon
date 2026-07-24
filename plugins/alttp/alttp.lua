@@ -2117,15 +2117,26 @@ local CASTLE_ENTRANCE = {
   say = "Step north into the castle entrance.",
 }
 
--- The second castle entrance, reached from the courtyard after Uncle: with the
--- sword in hand Link leaves the uncle room back out to the courtyard and enters
--- the castle proper here (cutting the two bushes on the way). Its approach tile
--- (world 256, 225 — read live) sits just south of the entrance; the rooms beyond
--- it are in the dungeon graph, which routes on to Zelda's cell.
-local CASTLE_INNER_ENTRANCE = {
-  tx = 256, ty = 225,
-  say = "Step north into the castle.",
+-- The courtyard crossing after Uncle, as an ordered waypoint sequence: with the
+-- sword in hand Link leaves the uncle room back out to the courtyard, cuts through
+-- the two bushes, then enters the castle proper by the door just south of him. The
+-- guide leads to each in turn (advancing by proximity), rather than straight at the
+-- door — the intended path goes through the bushes, and routing direct would skip
+-- them. Coords are world tiles read live from the game; the rooms beyond the door
+-- are in the dungeon graph, which routes on to Zelda's cell.
+local COURTYARD = {
+  { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
+  { tx = 256, ty = 225, say = "Step north into the castle." },
 }
+local COURTYARD_REACH = 2 -- tiles; within this of a waypoint, advance to the next
+local courtyard_i = 1
+
+-- Aim the overworld route at courtyard waypoint `i` and announce it.
+local function courtyard_route(s, i)
+  local wp = COURTYARD[i]
+  ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
+  nav_say(wp.say)
+end
 
 -- Route toward an intro beat from wherever Link is. In a dungeon room the graph
 -- connects to the target, door-to-door route there (stage 2). In an indoor room
@@ -2210,7 +2221,13 @@ local INTRO = {
         nav_say("Zelda is in this cell. Reach her.")
         return
       end
-      head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.", CASTLE_INNER_ENTRANCE)
+      if s.module == 0x09 then
+        -- Courtyard: (re)start the bushes-then-door waypoint sequence.
+        courtyard_i = 1
+        courtyard_route(s, 1)
+        return
+      end
+      head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.")
     end },
   { key = "sanctuary",
     goal = "Escort Zelda to the Sanctuary",
@@ -2299,6 +2316,17 @@ nav_update = function(s)
   if sig ~= nav_sig then
     nav_sig = sig
     nav_reaim(s, v)
+  end
+  -- Advance the courtyard waypoint sequence by proximity: while the Zelda beat is
+  -- running out on the overworld, step to the next waypoint (the castle door) once
+  -- Link reaches the current one (the bushes). nav_reaim above starts it at 1.
+  local _, step = intro_step(v)
+  if step and step.key == "zelda" and s.module == 0x09 and courtyard_i < #COURTYARD then
+    local wp = COURTYARD[courtyard_i]
+    if math.abs((s.x >> 3) - wp.tx) + math.abs((s.y >> 3) - wp.ty) <= COURTYARD_REACH then
+      courtyard_i = courtyard_i + 1
+      courtyard_route(s, courtyard_i)
+    end
   end
 end
 
