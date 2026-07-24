@@ -38,10 +38,13 @@ end
 
 -- Modules whose entry is not announced by the generic module-change callout:
 -- the text box (spoken separately), the two in-play modules (obvious, and the
--- room/area callout covers location), and the non-interactive title screens.
+-- room/area callout covers location), the loading/transition modules between them
+-- (the destination speaks for itself), and the non-interactive title screens.
 local MODULE_SILENT = {
   [0x00] = true, -- intro
+  [0x06] = true, -- entering dungeon (transition)
   [0x07] = true, -- dungeon (in play)
+  [0x08] = true, -- entering overworld (transition)
   [0x09] = true, -- overworld (in play)
   [0x0e] = true, -- text box
   [0x14] = true, -- attract mode
