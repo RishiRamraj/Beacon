@@ -629,7 +629,7 @@ local IMPASSABLE = {}
 for _, a in ipairs({
   0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F, -- wall / cliff
   0x20,                                                       -- pit / hole
-  0x08, 0x09, 0x4B,                                           -- water
+  0x08, 0x4B,                                                 -- deep water (0x09 shallow is wadeable)
   0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56,                   -- solid object
 }) do IMPASSABLE[a] = true end
 
@@ -1026,6 +1026,24 @@ local function nearest_sprite_kind(s, kind)
     if sp.kind == kind then return { sp.x, sp.y } end
   end
   return nil
+end
+
+-- The nearest walkable tile to a world-pixel point, spiralling out, as a
+-- world-pixel spot. A sprite to guide to — a dying uncle slumped against a wall,
+-- a caged Zelda — often sits on an impassable tile, so aiming the pathfinder at
+-- the sprite itself yields "no path"; snap to a tile beside it instead.
+local function walkable_near(s, wx, wy)
+  local tx, ty = wx >> 3, wy >> 3
+  for r = 0, 8 do
+    for dy = -r, r do
+      for dx = -r, r do
+        if math.max(math.abs(dx), math.abs(dy)) == r and tile_passable(s, tx + dx, ty + dy) then
+          return (tx + dx) * 8 + 4, (ty + dy) * 8 + 4
+        end
+      end
+    end
+  end
+  return wx, wy
 end
 
 -- ===========================================================================
@@ -2024,12 +2042,24 @@ end
 local CASTLE_AREA = 0x1B
 local SANCTUARY_AREA, SANCTUARY_ROOM = 0x13, 0x12
 
+-- The castle entrance the intro drops into to reach Uncle — a hole (tile type
+-- 0x20) you fall into, so no sword or bush-cutting is needed here (the bush-hidden
+-- entrance is a later, sword-gated route). The hole itself reads as impassable, so
+-- the pathfinder cannot route onto it; aim instead at the walkable tile just south
+-- (world tile 304, 214 — read live from the game) and tell the player to step
+-- north in. The overworld area is Hyrule Castle 0x1B.
+local CASTLE_ENTRANCE = {
+  tx = 304, ty = 214,
+  say = "Step north into the castle entrance.",
+}
+
 -- Route toward an intro beat from wherever Link is. In a dungeon room the graph
 -- connects to the target, door-to-door route there (stage 2). In an indoor room
 -- the graph does not reach yet — Link's house at the very start — head for the
--- door out. On the overworld, take the stage-1 cross-screen path to the area, or
--- hand off to look for the entrance once standing in it.
-local function head_for(s, area, room, label)
+-- door out. On the overworld, take the stage-1 cross-screen path to the area;
+-- once standing in it, aim at a known entrance waypoint if the beat gives one,
+-- else hand off to look for the way in.
+local function head_for(s, area, room, label, entrance)
   if s.module == 0x07 then
     if room and (room == s.dungeon_room or room_path(s.dungeon_room, room)) then
       route_to_room(s, room, label)
@@ -2044,8 +2074,13 @@ local function head_for(s, area, room, label)
     if d then pathfind_to(d[1], d[2]) end
     nav_say(label .. " Head for the way out.")
   elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
-    ow_route_stop()
-    nav_say(label .. " Look for the entrance.")
+    if entrance then
+      pathfind_to(entrance.tx * 8 + 4, entrance.ty * 8 + 4)
+      nav_say(label .. " " .. entrance.say)
+    else
+      ow_route_stop()
+      nav_say(label .. " Look for the entrance.")
+    end
   else
     ow_route_to_area(area)
     nav_say(label .. " Routing there.")
@@ -2064,7 +2099,7 @@ local INTRO = {
         local c = nearest_chest_tile(s)
         if c then pathfind_to(c[1], c[2]); nav_say("Open the chest for the Lamp."); return end
       end
-      head_for(s, CASTLE_AREA, 0x55, "Head into Hyrule Castle's hidden entrance for your uncle.")
+      head_for(s, CASTLE_AREA, 0x55, "Head into Hyrule Castle's hidden entrance for your uncle.", CASTLE_ENTRANCE)
     end },
   { key = "uncle",
     goal = "Reach your uncle for the sword",
@@ -2073,11 +2108,11 @@ local INTRO = {
     act = function(s, v)
       if s.module == 0x07 and s.dungeon_room == 0x55 then
         local u = nearest_sprite_kind(s, 115) -- Link's Uncle
-        if u then pathfind_to(u[1], u[2]) end
+        if u then pathfind_to(walkable_near(s, u[1], u[2])) end
         nav_say("Your uncle is in this room. Reach him for the sword.")
         return
       end
-      head_for(s, CASTLE_AREA, 0x55, "Reach your uncle for the sword.")
+      head_for(s, CASTLE_AREA, 0x55, "Reach your uncle for the sword.", CASTLE_ENTRANCE)
     end },
   { key = "zelda",
     goal = "Free Princess Zelda",
@@ -2086,7 +2121,7 @@ local INTRO = {
     act = function(s, v)
       if s.module == 0x07 and s.dungeon_room == 0x80 then
         local z = nearest_sprite_kind(s, 118) -- Princess Zelda
-        if z then pathfind_to(z[1], z[2]) end
+        if z then pathfind_to(walkable_near(s, z[1], z[2])) end
         nav_say("Zelda is in this cell. Reach her.")
         return
       end
