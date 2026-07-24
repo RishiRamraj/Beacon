@@ -506,7 +506,9 @@ fn install_rom(lua: &Lua, rom: Rc<Vec<u8>>) -> Result<(), Error> {
 /// host reads the live set and renders the sound. `opts`: `x`/`y` (rightward and
 /// forward offset, for pan direction), `pitch` (default 1), `volume` (0-1,
 /// default 1 — the plugin sets this from distance), `tremolo` (Hz, default 0 —
-/// the amplitude pulses at this rate, so a class can carry a rhythmic signature).
+/// the amplitude pulses at this rate, so a class can carry a rhythmic signature),
+/// `ping` (bool, default false — make each tremolo cycle a sharp sonar ping over a
+/// soft floor rather than a smooth swell).
 fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
     let table = lua.create_table()?;
 
@@ -519,6 +521,7 @@ fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
             let pitch = opts.get::<Option<f64>>("pitch")?.unwrap_or(1.0) as f32;
             let volume = opts.get::<Option<f64>>("volume")?.unwrap_or(1.0) as f32;
             let tremolo = opts.get::<Option<f64>>("tremolo")?.unwrap_or(0.0) as f32;
+            let ping = opts.get::<Option<bool>>("ping")?.unwrap_or(false);
             store.borrow_mut().insert(
                 id.clone(),
                 BeaconState {
@@ -528,6 +531,7 @@ fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
                     pitch,
                     volume: volume.clamp(0.0, 1.0),
                     tremolo: tremolo.max(0.0),
+                    ping,
                 },
             );
             Ok(())

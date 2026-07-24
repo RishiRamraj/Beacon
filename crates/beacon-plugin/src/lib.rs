@@ -113,6 +113,11 @@ pub struct BeaconState {
     /// can carry a rhythmic signature independent of its pitch. 0 is a steady
     /// tone. The plugin uses faster pulsing for more dangerous things.
     pub tremolo: f32,
+    /// Envelope shape for the `tremolo` modulation. `false` (the default) is a
+    /// smooth sine swell between full and `1 - depth`. `true` makes each cycle a
+    /// sharp attack-decay *ping* over a soft constant floor — a sonar sound — used
+    /// for the steady navigation guide so it reads as a solid tone that pings.
+    pub ping: bool,
 }
 
 /// A bindable command a plugin declares.
