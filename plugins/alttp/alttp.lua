@@ -1109,9 +1109,9 @@ local hop_goal
 -- it too; both reference this upvalue, assigned once the chain is defined.
 local intro_step
 
--- Forward declaration: intro_update re-aims the engaged intro guide each frame
--- as beats complete; on_frame (defined above the chain) drives it.
-local intro_update
+-- Forward declaration: nav_update re-aims the navigation assist each frame while
+-- it is toggled on; on_frame (defined above the chain) drives it.
+local nav_update
 
 -- Learned graph: from_room -> { to_room -> {x, y} }, the absolute pixel spot in
 -- from_room where the walk into to_room happened (so aiming Link back at it
@@ -1529,9 +1529,10 @@ function on_frame(frame)
   -- Learn the dungeon's room connectivity as Link walks, and re-aim any active
   -- cross-room route at each room boundary, before the local follower runs.
   record_room_transition(now)
-  -- Advance the scripted-intro guide as beats complete, before the followers it
-  -- drives so a fresh target takes effect this frame.
-  intro_update(now)
+  -- Keep the navigation assist aimed at the objective as beats complete and Link
+  -- crosses screens, before the followers it drives so a fresh target takes effect
+  -- this frame.
+  nav_update(now)
   room_route_update(now)
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
@@ -2034,11 +2035,12 @@ local function head_for(s, area, room, label)
       route_to_room(s, room, label)
       return
     end
-    -- An interior the graph does not reach (Link's house at the start). It has no
-    -- door-attr tile to key on, so aim at a door if there is one, else south — a
-    -- house exits at its bottom edge — and let the local A* get Link there. The
-    -- auto-follow re-aims the moment he steps onto the overworld.
-    local d = nearest_door_tile(s) or room_edge_goal(s, 0, 1)
+    -- An interior the graph does not reach (Link's house at the start, or the
+    -- castle secret-entrance room whose stair down the rando omits). Aim at the
+    -- way out: a door if there is one, else a staircase (the uncle room leaves by
+    -- a down stair), else south — a house exits at its bottom edge. The local A*
+    -- gets Link there, and the auto-follow re-aims once he crosses out.
+    local d = nearest_door_tile(s) or nearest_stair_tile(s, false) or room_edge_goal(s, 0, 1)
     if d then pathfind_to(d[1], d[2]) end
     nav_say(label .. " Head for the way out.")
   elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
@@ -2109,31 +2111,74 @@ intro_step = function(v)
   return nil
 end
 
--- Auto-follow state: the beat key currently being led and the module it was aimed
--- from. Engaging the intro guide (pressing advance during the intro) sets these;
--- from then on the guide re-aims itself as the story moves, without another press.
-local intro_follow_key = nil
-local intro_follow_mod = nil
+-- The navigation assist is a global on/off toggle, bound to L (advance). While it
+-- is on it re-aims itself at the current objective across every screen, room and
+-- module change, so the route stays alive map to map instead of dying at each
+-- transition — the player flips it on once and it leads the whole way. `nav_sig`
+-- is the context it last aimed from; it re-aims only when the module or the
+-- objective changes, since the room-to-room and screen-to-screen followers handle
+-- movement within a module quietly. Global for MCP inspection.
+nav_active = false
+local nav_sig = nil
 
-local function intro_follow_stop()
-  intro_follow_key, intro_follow_mod = nil, nil
+-- Aim the guide at the current objective from wherever Link stands: the scripted
+-- intro beat while the intro runs, else the dungeon spine, else the overworld
+-- milestone. Each announces what it is heading for.
+local function nav_reaim(s, v)
+  local _, step = intro_step(v)
+  if step then
+    step.act(s, v)
+  elseif s.module == 0x07 then
+    advance_dungeon(s, v)
+  else
+    advance_overworld(s, v)
+  end
 end
 
--- Re-aim the engaged intro guide each frame. Two things trigger a re-aim: the
--- beat completing (Lamp taken -> head for the door out; sword taken -> descend to
--- Zelda), and Link crossing between the overworld and an interior (leaving the
--- house -> route to the castle; entering the castle -> door-to-door inside).
--- Within one module the stage-1/stage-2 followers keep leading on their own, so
--- re-aiming only on beat-or-module change keeps the guide from re-announcing every
--- room. Clears itself once the intro is over.
-intro_update = function(s)
-  if intro_follow_key == nil or not in_play(s) then return end
-  local v = read_progress()
+-- What the guide should be heading toward, plus which module Link is in — so it
+-- re-aims exactly when either changes and stays put otherwise. The objective is
+-- the intro beat while the intro runs; in a dungeon, the spine phase (whether the
+-- signature item, Big Key and boss are done, so grabbing the item re-aims at the
+-- Big Key); on the overworld, the current milestone.
+local function nav_signature(s, v)
   local _, step = intro_step(v)
-  if step == nil then intro_follow_stop(); return end
-  if step.key ~= intro_follow_key or s.module ~= intro_follow_mod then
-    intro_follow_key, intro_follow_mod = step.key, s.module
-    step.act(s, v)
+  local obj
+  if step then
+    obj = "in:" .. step.key
+  elseif s.module == 0x07 then
+    local nav = DUNGEON_NAV[s.dungeon_id]
+    if nav then
+      local a = nav.have() and 1 or 0
+      local b = (mem.u8(nav.bk_byte) & nav.bk_bit) ~= 0 and 1 or 0
+      local c = room_boss_beaten(nav.boss_room) and 1 or 0
+      obj = string.format("dg%d.%d%d%d", s.dungeon_id, a, b, c)
+    else
+      obj = "dg" .. s.dungeon_id
+    end
+  else
+    obj = "ms" .. (current_milestone(v))
+  end
+  return s.module .. ":" .. obj
+end
+
+-- Turn the assist off and drop every route it was driving.
+local function nav_stop()
+  nav_active = false
+  nav_sig = nil
+  room_route_stop()
+  ow_route_stop()
+  pathfind_stop()
+end
+
+-- Per-frame while the assist is on: re-aim when the module or objective changes.
+-- Runs before the followers it feeds so a fresh target takes effect this frame.
+nav_update = function(s)
+  if not nav_active or not in_play(s) then return end
+  local v = read_progress()
+  local sig = nav_signature(s, v)
+  if sig ~= nav_sig then
+    nav_sig = sig
+    nav_reaim(s, v)
   end
 end
 
@@ -2143,24 +2188,19 @@ on_command("advance", function()
     nav_say("Not in play.")
     return
   end
-  local v = read_progress()
-  local _, step = intro_step(v)
-  if step then
-    -- Engage the auto-follow so the guide advances through the remaining beats on
-    -- its own, then aim at this one now.
-    intro_follow_key, intro_follow_mod = step.key, s.module
-    step.act(s, v)
-  elseif s.module == 0x07 then
-    advance_dungeon(s, v)
-  else
-    advance_overworld(s, v)
+  if nav_active then
+    nav_stop()
+    nav_say("Navigation off.")
+    return
   end
+  nav_active = true
+  local v = read_progress()
+  nav_sig = nav_signature(s, v)
+  nav_reaim(s, v)
 end)
 
 on_command("pathfind_stop", function()
-  intro_follow_stop()
-  room_route_stop()
-  pathfind_stop()
+  nav_stop()
   say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
 end)
 
