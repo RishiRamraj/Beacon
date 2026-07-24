@@ -481,14 +481,15 @@ fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
         set(0x7EF36C, 24);
         set(0x7EF36D, 24);
         set(0x7E008A, 0x18); // current area: Kakariko (row 3, col 0)
-                             // progress bytes all zero -> first milestone is Hyrule Castle (0x1B)
+                             // progress bytes all zero -> the intro, whose first
+                             // beat sends you to Hyrule Castle (0x1B) for the sword
     }
     plugin.on_frame(&ram, 0);
     plugin.on_frame(&ram, 1);
     let out = plugin.command("advance", &ram);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
-        texts.iter().any(|t| t.contains("Routing to")),
+        texts.iter().any(|t| t.contains("Routing") && t.contains("Castle")),
         "starts routing toward the castle: {texts:?}"
     );
 
@@ -525,6 +526,7 @@ fn alttp_advance_names_the_next_canonical_dungeon_item() {
         set(0x7E040C, 0x04); // Eastern Palace
         set(0x7E00A0, room); // current room
         set(0x7EF340, bow); // Bow (0 = not yet, 1 = have)
+        set(0x7EF3C5, 2); // intro done (in a dungeon => past the opening)
         ram
     };
 
@@ -609,6 +611,7 @@ fn alttp_advance_follows_a_learned_cross_room_route() {
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E040C, 0x04); // Eastern Palace
         set(0x7E00A0, room); // current room id
+        set(0x7EF3C5, 2); // intro done (in a dungeon => past the opening)
         ram
     };
 
@@ -656,6 +659,7 @@ fn alttp_advance_routes_through_unwalked_rooms_via_the_static_graph() {
         set(0x7E040C, 0x04); // Eastern Palace
         set(0x7E00A0, 0xC9); // at the entrance room
         set(0x7EF340, 0x00); // Bow not yet held
+        set(0x7EF3C5, 2); // intro done (in a dungeon => past the opening)
     }
     plugin.on_frame(&room, 0); // prime
     plugin.on_frame(&room, 1);
@@ -687,6 +691,7 @@ fn alttp_advance_in_a_cleared_dungeon_heads_for_the_exit() {
         let mut set = |addr: u32, v: u8| room[wram_offset(addr).unwrap()] = v;
         set(0x7E040C, 0x04); // in Eastern Palace
         set(0x7EF374, 0x01); // Pendant of Courage -> Eastern cleared
+        set(0x7EF3C5, 2); // intro done (in a dungeon => past the opening)
     }
     plugin.on_frame(&room, 0);
     plugin.on_frame(&room, 1);
@@ -785,14 +790,16 @@ fn alttp_objective_tracks_the_quest_from_the_progress_bytes() {
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
-    // Fresh save: every progress byte zero -> objective is reaching Uncle.
+    // Fresh save: every progress byte zero -> the scripted intro's first beat,
+    // grabbing the Lamp, spoken as a "Getting started" step rather than a
+    // milestone (the intro chain refines milestones 1-2 into fine steps).
     let fresh = vec![0u8; 128 * 1024];
     let out = plugin.command("objective", &fresh);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
         texts
             .iter()
-            .any(|t| t.contains("Objective 1 of") && t.to_lowercase().contains("uncle")),
+            .any(|t| t.contains("Getting started, step 1 of") && t.contains("Lamp")),
         "{texts:?}"
     );
 
@@ -810,5 +817,82 @@ fn alttp_objective_tracks_the_quest_from_the_progress_bytes() {
     assert!(
         !texts.iter().any(|t| t.contains("Eastern Palace")),
         "the finished pendant dungeon is not re-suggested: {texts:?}"
+    );
+}
+
+#[test]
+fn alttp_intro_chain_walks_the_opening_beat_by_beat() {
+    // The scripted intro refines the coarse "reach uncle" / "escort Zelda"
+    // milestones into fine beats, each unlocked by a save byte: the Lamp
+    // ($7EF34A), the sword from Uncle ($7EF359), Zelda following ($7EF3CC == 1),
+    // and Zelda delivered (progress $7EF3C5 >= 2). The "objective" readout should
+    // advance through them in order, then hand off to the milestone spine.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let objective = |plugin: &mut LuaPlugin, ram: &[u8]| -> String {
+        plugin
+            .command("objective", ram)
+            .iter()
+            .map(|i| i.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    // Fresh save -> beat 1, the Lamp.
+    let fresh = vec![0u8; 128 * 1024];
+    let t = objective(&mut plugin, &fresh);
+    assert!(t.contains("step 1 of") && t.contains("Lamp"), "{t}");
+
+    // Lamp in hand -> beat 2, reaching Uncle for the sword.
+    let mut lamp = vec![0u8; 128 * 1024];
+    lamp[wram_offset(0x7EF34A).unwrap()] = 1; // Lamp
+    let t = objective(&mut plugin, &lamp);
+    assert!(t.contains("step 2 of") && t.to_lowercase().contains("uncle"), "{t}");
+
+    // Sword taken from Uncle -> beat 3, freeing Zelda.
+    let mut sword = lamp.clone();
+    sword[wram_offset(0x7EF359).unwrap()] = 1; // Fighter's Sword
+    let t = objective(&mut plugin, &sword);
+    assert!(t.contains("step 3 of") && t.contains("Zelda"), "{t}");
+
+    // Zelda following (follower indicator == 1) -> beat 4, the Sanctuary.
+    let mut following = sword.clone();
+    following[wram_offset(0x7EF3CC).unwrap()] = 1; // Zelda tagalong
+    let t = objective(&mut plugin, &following);
+    assert!(t.contains("step 4 of") && t.contains("Sanctuary"), "{t}");
+
+    // Zelda delivered (progress 2): the intro is over, the milestone spine takes
+    // over and points at the first pendant dungeon.
+    let mut delivered = vec![0u8; 128 * 1024];
+    delivered[wram_offset(0x7EF3C5).unwrap()] = 2;
+    let t = objective(&mut plugin, &delivered);
+    assert!(t.contains("Objective") && t.contains("Eastern Palace"), "{t}");
+}
+
+#[test]
+fn alttp_intro_advance_routes_into_the_castle_on_the_overworld() {
+    // With the intro active, "advance" on the overworld should route toward
+    // Hyrule Castle (area 0x1B) for the opening, not sit idle. Standing in
+    // Kakariko (0x18), same Light World, it starts a route there.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let mut ram = vec![0u8; 128 * 1024];
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // overworld
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E008A, 0x18); // Kakariko
+    }
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+    let out = plugin.command("advance", &ram);
+    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Routing") && t.contains("Castle")),
+        "the intro routes toward the castle: {texts:?}"
     );
 }

@@ -988,6 +988,27 @@ local function nearest_door_tile(s)
   return best
 end
 
+-- The nearest treasure-chest tile in the current window, as world pixel
+-- coordinates, or nil. Chests read as tile-types 0x58-0x5D (and 0x63, a minigame
+-- chest) in the game's tile detection. Used to lead to the Lamp chest in the intro.
+local function nearest_chest_tile(s)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local best, best_d
+  for y = 0, 63 do
+    for x = 0, 63 do
+      local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
+      if attr and ((attr >= 0x58 and attr <= 0x5D) or attr == 0x63) then
+        local d = math.abs(x - ltx) + math.abs(y - lty)
+        if best_d == nil or d < best_d then
+          best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+        end
+      end
+    end
+  end
+  return best
+end
+
 -- The nearest on-screen item pickup (a sprite in ITEM_TYPES), as world pixel
 -- coordinates, or nil. sprites() is sorted nearest-first, so the first match is
 -- the closest. Used by the dungeon guide to fetch a loose item in the room.
@@ -1073,6 +1094,11 @@ end
 -- needs door_toward (defined lower); room_route_update and route_to_room, defined
 -- above door_toward, reference it here and it is assigned once door_toward exists.
 local hop_goal
+
+-- Forward declaration: intro_step (the current scripted-intro beat) is defined
+-- with the advance guide far below, but the objective readout above it consults
+-- it too; both reference this upvalue, assigned once the chain is defined.
+local intro_step
 
 -- Learned graph: from_room -> { to_room -> {x, y} }, the absolute pixel spot in
 -- from_room where the walk into to_room happened (so aiming Link back at it
@@ -1631,6 +1657,14 @@ on_command("objective", function()
     say("No game state yet.", { priority = "navigation", category = "on-demand" })
     return
   end
+  local si, step, sn = intro_step(v)
+  if step then
+    say(
+      string.format("Getting started, step %d of %d: %s. %s", si, sn, step.goal, step.hint),
+      { priority = "navigation", category = "on-demand" }
+    )
+    return
+  end
   local idx, m = current_milestone(v)
   say(
     string.format("Objective %d of %d: %s. %s", idx, #MILESTONES, m.goal, m.hint),
@@ -1960,6 +1994,96 @@ local function advance_overworld(s, v)
   nav_say(string.format("Routing to %s.", m.goal))
 end
 
+-- ===========================================================================
+-- The scripted intro. Milestones 1 and 2 ("reach your uncle", "escort Zelda to
+-- the Sanctuary") are each a single progress bump, but the opening is really a
+-- chain of small beats: grab the Lamp, drop into the secret entrance to your
+-- dying uncle for the sword, descend to Zelda's cell, then lead her up and out to
+-- the Sanctuary. This refines those two milestones into fine steps that both the
+-- objective readout and the advance guide drive, so a first-time blind player is
+-- led beat by beat rather than just pointed at the castle. Each beat's completion
+-- is read from the save exactly like the milestone spine: Lamp $F34A, sword
+-- $F359, Zelda-following $F3CC == 1, Zelda-delivered progress $3C5 >= 2 (all
+-- verified against the game's own variables). The chain is active only until
+-- progress reaches 2; the milestone spine (Eastern Palace on) takes over after.
+-- Rooms are the verified intro path: secret entrance / uncle 0x55, Zelda's cell
+-- 0x80, Sanctuary 0x12 (overworld area 0x13); Hyrule Castle is area 0x1B.
+-- ===========================================================================
+local CASTLE_AREA = 0x1B
+local SANCTUARY_AREA, SANCTUARY_ROOM = 0x13, 0x12
+
+-- Route toward an intro beat from wherever Link is: in a dungeon, room-route to
+-- the given room (stage-2 door-to-door); on the overworld, head for the area
+-- (stage-1 cross-screen path), or, once standing in it, hand off to look for the
+-- way in.
+local function head_for(s, area, room, label)
+  if s.module == 0x07 then
+    if room and route_to_room(s, room, label) then return end
+    local d = nearest_door_tile(s)
+    if d then pathfind_to(d[1], d[2]) end
+    nav_say(label .. " Find the way through.")
+  elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
+    ow_route_stop()
+    nav_say(label .. " Look for the entrance.")
+  else
+    ow_route_to_area(area)
+    nav_say(label .. " Routing there.")
+  end
+end
+
+local INTRO = {
+  { key = "lamp",
+    goal = "Grab the Lamp from the chest",
+    hint = "There is a treasure chest in your house holding the Lamp — take it for the dark passages ahead.",
+    -- Met once the Lamp is held, or once you have moved past the start (sword in
+    -- hand / progress bumped), so skipping it never leaves the guide nagging.
+    done = function(v) return mem.u8(0x7EF34A) >= 1 or v.sword >= 1 or v.progress >= 1 end,
+    act = function(s, v)
+      if s.module == 0x07 then
+        local c = nearest_chest_tile(s)
+        if c then pathfind_to(c[1], c[2]); nav_say("Open the chest for the Lamp."); return end
+      end
+      head_for(s, CASTLE_AREA, 0x55, "Head into Hyrule Castle's hidden entrance for your uncle.")
+    end },
+  { key = "uncle",
+    goal = "Reach your uncle for the sword",
+    hint = "Enter Hyrule Castle by the hidden passage — the bush against the wall drops you in — and reach your dying uncle for the sword and shield.",
+    done = function(v) return v.sword >= 1 or v.progress >= 1 end,
+    act = function(s, v)
+      if s.module == 0x07 and s.dungeon_room == 0x55 then
+        local it = nearest_item_sprite(s)
+        if it then pathfind_to(it[1], it[2]) end
+        nav_say("Your uncle is in this room. Reach him for the sword.")
+        return
+      end
+      head_for(s, CASTLE_AREA, 0x55, "Reach your uncle for the sword.")
+    end },
+  { key = "zelda",
+    goal = "Free Princess Zelda",
+    hint = "Descend through the castle to the dungeon below and free Princess Zelda from her cell.",
+    done = function(v) return mem.u8(0x7EF3CC) == 1 or v.progress >= 2 end,
+    act = function(s, v)
+      head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.")
+    end },
+  { key = "sanctuary",
+    goal = "Escort Zelda to the Sanctuary",
+    hint = "Lead Zelda back up through the castle and out the hidden north passage to the Sanctuary.",
+    done = function(v) return v.progress >= 2 end,
+    act = function(s, v)
+      head_for(s, SANCTUARY_AREA, SANCTUARY_ROOM, "Escort Zelda to the Sanctuary.")
+    end },
+}
+
+-- The current intro beat: the first step not yet met, or nil once the intro is
+-- over (Zelda delivered, progress >= 2) so the milestone spine takes over.
+intro_step = function(v)
+  if v == nil or v.progress >= 2 then return nil end
+  for i, step in ipairs(INTRO) do
+    if not step.done(v) then return i, step, #INTRO end
+  end
+  return nil
+end
+
 on_command("advance", function()
   local s = prev
   if s == nil or not in_play(s) then
@@ -1967,7 +2091,10 @@ on_command("advance", function()
     return
   end
   local v = read_progress()
-  if s.module == 0x07 then
+  local _, step = intro_step(v)
+  if step then
+    step.act(s, v)
+  elseif s.module == 0x07 then
     advance_dungeon(s, v)
   else
     advance_overworld(s, v)
