@@ -322,11 +322,14 @@ local NPC_TYPES = { [22]=true, [30]=true, [31]=true, [33]=true, [47]=true, [49]=
 -- scenery and pickups are calm or steady, enemies throb fast (and faster still
 -- the tougher they are, see the emission loop). The guide tone stays steady (no
 -- tremolo) so the thing you actively steer by is never mistaken for a threat.
+-- `gain` scales the class's loudness on top of the distance falloff (clamped to
+-- 1.0). Enemies carry a boost so a threat is heard over the quieter guide tone;
+-- the calmer classes sit at unity.
 local BEACON_KINDS = {
-  enemy = { pitch = 1.0, range = 224, tremolo = 6.0 }, -- base; scaled by HP below
-  item  = { pitch = 2.0, range = 224, tremolo = 2.0 }, -- a calm "come and get me"
-  npc   = { pitch = 1.5, range = 224, tremolo = 3.5 }, -- gently active, but safe
-  minor = { pitch = 0.5, range = 24,  tremolo = 0.0 }, -- steady, incidental
+  enemy = { pitch = 1.0, range = 224, tremolo = 6.0, gain = 1.6 }, -- base; scaled by HP below
+  item  = { pitch = 2.0, range = 224, tremolo = 2.0, gain = 1.0 }, -- a calm "come and get me"
+  npc   = { pitch = 1.5, range = 224, tremolo = 3.5, gain = 1.0 }, -- gently active, but safe
+  minor = { pitch = 0.5, range = 24,  tremolo = 0.0, gain = 1.0 }, -- steady, incidental
 }
 
 -- Enemy pulse scales with toughness: the base rate plus a term in the sprite's
@@ -877,7 +880,7 @@ local pathfind_replan_in = 0
 
 local PATH_PITCH = 3.0         -- a high, distinct navigation tone
 local PATH_ALIGNED_PITCH = 3.4 -- brighter when Link faces the way to go
-local PATH_VOLUME = 0.7
+local PATH_VOLUME = 0.45        -- kept under the object beacons so threats read over the guide
 local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
 local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 
@@ -1099,6 +1102,10 @@ local hop_goal
 -- with the advance guide far below, but the objective readout above it consults
 -- it too; both reference this upvalue, assigned once the chain is defined.
 local intro_step
+
+-- Forward declaration: intro_update re-aims the engaged intro guide each frame
+-- as beats complete; on_frame (defined above the chain) drives it.
+local intro_update
 
 -- Learned graph: from_room -> { to_room -> {x, y} }, the absolute pixel spot in
 -- from_room where the walk into to_room happened (so aiming Link back at it
@@ -1485,9 +1492,10 @@ function on_frame(frame)
       local sp = nearest[name]
       if sp and sp.dist < kind.range then
         -- Quadratic falloff: quieter at a distance, ramping up steeply as the
-        -- source closes, rather than a flat linear fade.
+        -- source closes, rather than a flat linear fade. The class gain scales it
+        -- (enemies boosted so they carry over the guide), clamped to full volume.
         local t = 1 - sp.dist / kind.range
-        local vol = t * t
+        local vol = math.min(1, t * t * (kind.gain or 1))
         -- Behind a wall: muffled rather than silent, so a close but occluded
         -- source still registers without sounding like it is out in the open.
         if sight_blocked(now, now.x, now.y, sp.x, sp.y) then
@@ -1521,6 +1529,9 @@ function on_frame(frame)
   -- Learn the dungeon's room connectivity as Link walks, and re-aim any active
   -- cross-room route at each room boundary, before the local follower runs.
   record_room_transition(now)
+  -- Advance the scripted-intro guide as beats complete, before the followers it
+  -- drives so a fresh target takes effect this frame.
+  intro_update(now)
   room_route_update(now)
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
@@ -2012,16 +2023,20 @@ end
 local CASTLE_AREA = 0x1B
 local SANCTUARY_AREA, SANCTUARY_ROOM = 0x13, 0x12
 
--- Route toward an intro beat from wherever Link is: in a dungeon, room-route to
--- the given room (stage-2 door-to-door); on the overworld, head for the area
--- (stage-1 cross-screen path), or, once standing in it, hand off to look for the
--- way in.
+-- Route toward an intro beat from wherever Link is. In a dungeon room the graph
+-- connects to the target, door-to-door route there (stage 2). In an indoor room
+-- the graph does not reach yet — Link's house at the very start — head for the
+-- door out. On the overworld, take the stage-1 cross-screen path to the area, or
+-- hand off to look for the entrance once standing in it.
 local function head_for(s, area, room, label)
   if s.module == 0x07 then
-    if room and route_to_room(s, room, label) then return end
+    if room and (room == s.dungeon_room or room_path(s.dungeon_room, room)) then
+      route_to_room(s, room, label)
+      return
+    end
     local d = nearest_door_tile(s)
     if d then pathfind_to(d[1], d[2]) end
-    nav_say(label .. " Find the way through.")
+    nav_say(label .. " Head for the door out.")
   elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
     ow_route_stop()
     nav_say(label .. " Look for the entrance.")
@@ -2084,6 +2099,34 @@ intro_step = function(v)
   return nil
 end
 
+-- Auto-follow state: the beat key currently being led and the module it was aimed
+-- from. Engaging the intro guide (pressing advance during the intro) sets these;
+-- from then on the guide re-aims itself as the story moves, without another press.
+local intro_follow_key = nil
+local intro_follow_mod = nil
+
+local function intro_follow_stop()
+  intro_follow_key, intro_follow_mod = nil, nil
+end
+
+-- Re-aim the engaged intro guide each frame. Two things trigger a re-aim: the
+-- beat completing (Lamp taken -> head for the door out; sword taken -> descend to
+-- Zelda), and Link crossing between the overworld and an interior (leaving the
+-- house -> route to the castle; entering the castle -> door-to-door inside).
+-- Within one module the stage-1/stage-2 followers keep leading on their own, so
+-- re-aiming only on beat-or-module change keeps the guide from re-announcing every
+-- room. Clears itself once the intro is over.
+intro_update = function(s)
+  if intro_follow_key == nil or not in_play(s) then return end
+  local v = read_progress()
+  local _, step = intro_step(v)
+  if step == nil then intro_follow_stop(); return end
+  if step.key ~= intro_follow_key or s.module ~= intro_follow_mod then
+    intro_follow_key, intro_follow_mod = step.key, s.module
+    step.act(s, v)
+  end
+end
+
 on_command("advance", function()
   local s = prev
   if s == nil or not in_play(s) then
@@ -2093,6 +2136,9 @@ on_command("advance", function()
   local v = read_progress()
   local _, step = intro_step(v)
   if step then
+    -- Engage the auto-follow so the guide advances through the remaining beats on
+    -- its own, then aim at this one now.
+    intro_follow_key, intro_follow_mod = step.key, s.module
     step.act(s, v)
   elseif s.module == 0x07 then
     advance_dungeon(s, v)
@@ -2102,6 +2148,7 @@ on_command("advance", function()
 end)
 
 on_command("pathfind_stop", function()
+  intro_follow_stop()
   room_route_stop()
   pathfind_stop()
   say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
