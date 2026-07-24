@@ -317,27 +317,21 @@ local NPC_TYPES = { [22]=true, [30]=true, [31]=true, [33]=true, [47]=true, [49]=
 -- Per-class tone, reach, and pulse. `pitch` scales the 330 Hz base tone (higher
 -- is brighter); enemies keep the original 1.0. `range` is Manhattan pixels —
 -- about 16 to a tile, so 24 is "within a block", the near-only reach for scenery.
--- `tremolo` is the amplitude-pulse rate in Hz: a rhythmic signature that tells
--- the classes apart by ear even when they overlap. The rate rises with danger —
--- scenery and pickups are calm or steady, enemies throb fast (and faster still
--- the tougher they are, see the emission loop). The guide tone stays steady (no
--- tremolo) so the thing you actively steer by is never mistaken for a threat.
+-- `tremolo` is the amplitude-swell rate in Hz: a rhythmic signature that tells the
+-- classes apart by ear even when they overlap. Danger swells fast, reward slow:
+-- enemies pulse at 2 Hz (120 BPM), the things you collect — items and chests — at
+-- 1 Hz (60 BPM), and incidental scenery sits steady. The guide tone carries no
+-- swell at all (see the path beacon), so the thing you actively steer by is a
+-- solid tone, never mistaken for a threat or a pickup.
 -- `gain` scales the class's loudness on top of the distance falloff (clamped to
 -- 1.0). Enemies carry a boost so a threat is heard over the quieter guide tone;
 -- the calmer classes sit at unity.
 local BEACON_KINDS = {
-  enemy = { pitch = 1.0, range = 224, tremolo = 6.0, gain = 1.6 }, -- base; scaled by HP below
-  item  = { pitch = 2.0, range = 224, tremolo = 2.0, gain = 1.0 }, -- a calm "come and get me"
-  npc   = { pitch = 1.5, range = 224, tremolo = 3.5, gain = 1.0 }, -- gently active, but safe
+  enemy = { pitch = 1.0, range = 224, tremolo = 2.0, gain = 1.6 }, -- 120 BPM: danger
+  item  = { pitch = 2.0, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: a pickup
+  npc   = { pitch = 1.5, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: safe to approach
   minor = { pitch = 0.5, range = 24,  tremolo = 0.0, gain = 1.0 }, -- steady, incidental
 }
-
--- Enemy pulse scales with toughness: the base rate plus a term in the sprite's
--- health, so a stronger foe throbs faster and more urgently. Health is capped
--- before scaling so a boss's huge HP does not run the rate off into a buzz.
-local ENEMY_TREMOLO_BASE = 6.0    -- Hz, a plain enemy with little or no health
-local ENEMY_TREMOLO_PER_HP = 0.06 -- added Hz per point of (capped) health
-local ENEMY_TREMOLO_HP_CAP = 160  -- health past this does not pulse any faster
 
 -- How much a wall between the player and a source dims its beacon: muffled, not
 -- silenced, so an occluded threat still registers.
@@ -880,7 +874,8 @@ local pathfind_replan_in = 0
 
 local PATH_PITCH = 3.0         -- a high, distinct navigation tone
 local PATH_ALIGNED_PITCH = 3.4 -- brighter when Link faces the way to go
-local PATH_VOLUME = 0.45        -- kept under the object beacons so threats read over the guide
+local PATH_VOLUME = 0.30        -- kept well under the object beacons so threats read over the guide
+local PATH_PING_HZ = 0.5        -- sonar: a ping every 2 seconds over a soft steady tone
 local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
 local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 
@@ -967,6 +962,7 @@ local function pathfind_update(s)
     x = dx, y = dy,
     pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
     volume = PATH_VOLUME,
+    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
   })
 end
 
@@ -1350,6 +1346,7 @@ local function ow_route_update(s)
     x = dx, y = dy,
     pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
     volume = PATH_VOLUME,
+    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
   })
 end
 
@@ -1501,15 +1498,8 @@ function on_frame(frame)
         if sight_blocked(now, now.x, now.y, sp.x, sp.y) then
           vol = vol * BEACON_OCCLUDED_SCALE
         end
-        -- Enemies pulse faster the tougher they are; other classes use the
-        -- class's fixed rate.
-        local trem = kind.tremolo
-        if name == "enemy" then
-          local hp = sp.hp or 0
-          if hp > ENEMY_TREMOLO_HP_CAP then hp = ENEMY_TREMOLO_HP_CAP end
-          trem = ENEMY_TREMOLO_BASE + hp * ENEMY_TREMOLO_PER_HP
-        end
-        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol, tremolo = trem })
+        -- Each class swells at its own fixed rate (enemies 120 BPM, pickups 60).
+        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol, tremolo = kind.tremolo })
       else
         beacon.clear(name)
       end
@@ -2034,9 +2024,13 @@ local function head_for(s, area, room, label)
       route_to_room(s, room, label)
       return
     end
-    local d = nearest_door_tile(s)
+    -- An interior the graph does not reach (Link's house at the start). It has no
+    -- door-attr tile to key on, so aim at a door if there is one, else south — a
+    -- house exits at its bottom edge — and let the local A* get Link there. The
+    -- auto-follow re-aims the moment he steps onto the overworld.
+    local d = nearest_door_tile(s) or room_edge_goal(s, 0, 1)
     if d then pathfind_to(d[1], d[2]) end
-    nav_say(label .. " Head for the door out.")
+    nav_say(label .. " Head for the way out.")
   elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
     ow_route_stop()
     nav_say(label .. " Look for the entrance.")
