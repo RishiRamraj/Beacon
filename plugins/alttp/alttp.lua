@@ -497,6 +497,15 @@ function ow_tile_attr(map16_index, x, y)
 end
 
 -- The collision attribute of the tile containing world pixel (px, py) in the
+-- Overworld bushes read as a solid collision attribute (0x50, shared with walls),
+-- but Link's sword cuts them, so the router should pass straight through. They are
+-- identifiable only by their map16 tile id — the same one the game's own bush
+-- check keys on — so tile_attr_at reports them as a distinct passable BUSH_TILE,
+-- above the real 0x00-0xFF attribute range, that the pathfinder crosses and the
+-- guide can flag ("slash the bush").
+local BUSH_MAP16 = { [0x036] = true, [0x72A] = true }
+local BUSH_TILE = 0x1B0
+
 -- current area, or nil if it cannot be read. Dungeons index the WRAM grid
 -- directly; the overworld goes through the same scroll-offset + ROM decode the
 -- map render uses.
@@ -512,7 +521,9 @@ local function tile_attr_at(s, px, py)
     local byte_off = (t >> 1) * 2
     local lo, hi = mem.u8(OW_TILE_TABLE + byte_off), mem.u8(OW_TILE_TABLE + byte_off + 1)
     if lo == nil or hi == nil then return nil end
-    return ow_tile_attr(lo | (hi << 8), ow_tx, py)
+    local m16 = lo | (hi << 8)
+    if BUSH_MAP16[m16] then return BUSH_TILE end
+    return ow_tile_attr(m16, ow_tx, py)
   end
   return nil
 end
