@@ -871,6 +871,48 @@ fn alttp_intro_chain_walks_the_opening_beat_by_beat() {
 }
 
 #[test]
+fn alttp_intro_guide_auto_advances_when_a_beat_completes() {
+    // Engaging the intro guide (advance) arms an auto-follow: once the Lamp is
+    // picked up, the guide re-aims at the next beat on its own on the next frame,
+    // with no further key press. In the starting house — an interior the dungeon
+    // graph does not reach — that next beat sends Link to the door out.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // House interior: module 0x07, room 0x0104, with a chest tile and a door.
+    let house = |lamp: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((32, 40), (32, 6), &[]); // door tile at (32,6)
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x04); // room 0x0104, low byte
+        set(0x7E00A1, 0x01); // room 0x0104, high byte
+        set(0x7EF34A, lamp); // Lamp ($7EF34A)
+        set(0x7F2000 + 20 * 64 + 20, 0x58); // a chest tile
+        ram
+    };
+
+    // Prime, then engage the guide on the Lamp beat.
+    plugin.on_frame(&house(0), 0);
+    plugin.on_frame(&house(0), 1);
+    let out = plugin.command("advance", &house(0));
+    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Lamp")),
+        "engages on the Lamp beat: {texts:?}"
+    );
+
+    // Lamp now in hand: the next frame auto-advances to the door-out beat, no
+    // second key press.
+    let out = plugin.on_frame(&house(1), 2);
+    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.to_lowercase().contains("door") || t.to_lowercase().contains("uncle")),
+        "auto-advances to the next beat once the Lamp is taken: {texts:?}"
+    );
+}
+
+#[test]
 fn alttp_intro_advance_routes_into_the_castle_on_the_overworld() {
     // With the intro active, "advance" on the overworld should route toward
     // Hyrule Castle (area 0x1B) for the opening, not sit idle. Standing in
