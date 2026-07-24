@@ -528,6 +528,27 @@ local function tile_attr_at(s, px, py)
   return nil
 end
 
+-- Cue the player to slash a bush the guide is leading them into. The router treats
+-- bushes as passable (the sword cuts them), but the player still has to swing to
+-- get through, so when Link faces a bush tile while the assist is on, say so once,
+-- resetting when he faces open ground again. Global `nav_active` gates it so the
+-- cue only sounds while actually being guided.
+local bush_cued = false
+local function bush_cue(s)
+  if s == nil or s.module ~= 0x09 or not nav_active then bush_cued = false; return end
+  local dir = s.direction
+  local ax = s.x + 8 + (dir == 4 and -12 or dir == 6 and 12 or 0)
+  local ay = s.y + 12 + (dir == 0 and -12 or dir == 2 and 12 or 0)
+  if tile_attr_at(s, ax, ay) == BUSH_TILE then
+    if not bush_cued then
+      say("Slash the bush.", { priority = "navigation", category = "on-demand" })
+      bush_cued = true
+    end
+  else
+    bush_cued = false
+  end
+end
+
 -- ===========================================================================
 -- Full-overworld collision from ROM. The live $7E2000 table only holds the
 -- loaded screens, so to route to a distant objective we decode any area's map16
@@ -596,7 +617,9 @@ local function ow_rom_attr(w, px, py)
   local m = ow_area(area); if m == nil then return nil end
   local lx, ly = (px & 0x1FF) >> 4, (py & 0x1FF) >> 4
   local n = (ly >> 1) * 16 + (lx >> 1); local cn = 1 + (lx & 1) + ((ly & 1) << 1)
-  return ow_tile_attr(ow_map16(m[n], cn), px >> 3, py)
+  local m16 = ow_map16(m[n], cn)
+  if BUSH_MAP16[m16] then return BUSH_TILE end -- Link cuts bushes; route through
+  return ow_tile_attr(m16, px >> 3, py)
 end
 
 -- Whether a wall lies on the straight line between two world points, so a sprite
@@ -1562,6 +1585,7 @@ function on_frame(frame)
   -- crosses screens, before the followers it drives so a fresh target takes effect
   -- this frame.
   nav_update(now)
+  bush_cue(now)
   room_route_update(now)
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
@@ -2093,6 +2117,16 @@ local CASTLE_ENTRANCE = {
   say = "Step north into the castle entrance.",
 }
 
+-- The second castle entrance, reached from the courtyard after Uncle: with the
+-- sword in hand Link leaves the uncle room back out to the courtyard and enters
+-- the castle proper here (cutting the two bushes on the way). Its approach tile
+-- (world 256, 225 — read live) sits just south of the entrance; the rooms beyond
+-- it are in the dungeon graph, which routes on to Zelda's cell.
+local CASTLE_INNER_ENTRANCE = {
+  tx = 256, ty = 225,
+  say = "Step north into the castle.",
+}
+
 -- Route toward an intro beat from wherever Link is. In a dungeon room the graph
 -- connects to the target, door-to-door route there (stage 2). In an indoor room
 -- the graph does not reach yet — Link's house at the very start — head for the
@@ -2123,7 +2157,10 @@ local function head_for(s, area, room, label, entrance)
     nav_say(label .. " Head for the way out.")
   elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
     if entrance then
-      pathfind_to(entrance.tx * 8 + 4, entrance.ty * 8 + 4)
+      -- Cross-screen router, not the local pathfinder: the entrance can sit a tile
+      -- into the next 512px block (the large castle area splits into several), and
+      -- the ROM decode routes through the bushes on the way (BUSH_TILE is passable).
+      ow_route_to(entrance.tx * 8 + 4, entrance.ty * 8 + 4)
       nav_say(label .. " " .. entrance.say)
     else
       ow_route_stop()
@@ -2173,7 +2210,7 @@ local INTRO = {
         nav_say("Zelda is in this cell. Reach her.")
         return
       end
-      head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.")
+      head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.", CASTLE_INNER_ENTRANCE)
     end },
   { key = "sanctuary",
     goal = "Escort Zelda to the Sanctuary",
