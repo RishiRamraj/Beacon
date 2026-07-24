@@ -38,10 +38,13 @@ end
 
 -- Modules whose entry is not announced by the generic module-change callout:
 -- the text box (spoken separately), the two in-play modules (obvious, and the
--- room/area callout covers location), and the non-interactive title screens.
+-- room/area callout covers location), the loading/transition modules between them
+-- (the destination speaks for itself), and the non-interactive title screens.
 local MODULE_SILENT = {
   [0x00] = true, -- intro
+  [0x06] = true, -- entering dungeon (transition)
   [0x07] = true, -- dungeon (in play)
+  [0x08] = true, -- entering overworld (transition)
   [0x09] = true, -- overworld (in play)
   [0x0e] = true, -- text box
   [0x14] = true, -- attract mode
@@ -284,6 +287,16 @@ local function on_screen(dx, dy)
   return math.abs(dx) <= 128 and math.abs(dy) <= 116
 end
 
+-- An enemy is called out once it comes within this Manhattan distance — wider than
+-- the visible screen, so a threat is named early, while it is still approaching.
+local ENEMY_ANNOUNCE_RANGE = 240
+-- Link is "in combat" while an enemy is this close. Then the guide hushes and only
+-- the nearest enemy sounds, so a fight is not cluttered by navigation or pickups.
+local COMBAT_RANGE = 48
+-- Set each frame: whether an enemy is within COMBAT_RANGE. Global so the guide
+-- followers can fall silent while it holds, and for MCP inspection.
+combat_engaged = false
+
 -- A compass direction from an offset. y decreases upward on the SNES.
 local function direction(dx, dy)
   local ax, ay = math.abs(dx), math.abs(dy)
@@ -497,6 +510,15 @@ function ow_tile_attr(map16_index, x, y)
 end
 
 -- The collision attribute of the tile containing world pixel (px, py) in the
+-- Overworld bushes read as a solid collision attribute (0x50, shared with walls),
+-- but Link's sword cuts them, so the router should pass straight through. They are
+-- identifiable only by their map16 tile id — the same one the game's own bush
+-- check keys on — so tile_attr_at reports them as a distinct passable BUSH_TILE,
+-- above the real 0x00-0xFF attribute range, that the pathfinder crosses and the
+-- guide can flag ("slash the bush").
+local BUSH_MAP16 = { [0x036] = true, [0x72A] = true }
+local BUSH_TILE = 0x1B0
+
 -- current area, or nil if it cannot be read. Dungeons index the WRAM grid
 -- directly; the overworld goes through the same scroll-offset + ROM decode the
 -- map render uses.
@@ -512,9 +534,32 @@ local function tile_attr_at(s, px, py)
     local byte_off = (t >> 1) * 2
     local lo, hi = mem.u8(OW_TILE_TABLE + byte_off), mem.u8(OW_TILE_TABLE + byte_off + 1)
     if lo == nil or hi == nil then return nil end
-    return ow_tile_attr(lo | (hi << 8), ow_tx, py)
+    local m16 = lo | (hi << 8)
+    if BUSH_MAP16[m16] then return BUSH_TILE end
+    return ow_tile_attr(m16, ow_tx, py)
   end
   return nil
+end
+
+-- Cue the player to slash a bush the guide is leading them into. The router treats
+-- bushes as passable (the sword cuts them), but the player still has to swing to
+-- get through, so when Link faces a bush tile while the assist is on, say so once,
+-- resetting when he faces open ground again. Global `nav_active` gates it so the
+-- cue only sounds while actually being guided.
+local bush_cued = false
+local function bush_cue(s)
+  if s == nil or s.module ~= 0x09 or not nav_active then bush_cued = false; return end
+  local dir = s.direction
+  local ax = s.x + 8 + (dir == 4 and -12 or dir == 6 and 12 or 0)
+  local ay = s.y + 12 + (dir == 0 and -12 or dir == 2 and 12 or 0)
+  if tile_attr_at(s, ax, ay) == BUSH_TILE then
+    if not bush_cued then
+      say("Slash the bush.", { priority = "navigation", category = "on-demand" })
+      bush_cued = true
+    end
+  else
+    bush_cued = false
+  end
 end
 
 -- ===========================================================================
@@ -585,7 +630,9 @@ local function ow_rom_attr(w, px, py)
   local m = ow_area(area); if m == nil then return nil end
   local lx, ly = (px & 0x1FF) >> 4, (py & 0x1FF) >> 4
   local n = (ly >> 1) * 16 + (lx >> 1); local cn = 1 + (lx & 1) + ((ly & 1) << 1)
-  return ow_tile_attr(ow_map16(m[n], cn), px >> 3, py)
+  local m16 = ow_map16(m[n], cn)
+  if BUSH_MAP16[m16] then return BUSH_TILE end -- Link cuts bushes; route through
+  return ow_tile_attr(m16, px >> 3, py)
 end
 
 -- Whether a wall lies on the straight line between two world points, so a sprite
@@ -629,7 +676,7 @@ local IMPASSABLE = {}
 for _, a in ipairs({
   0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F, -- wall / cliff
   0x20,                                                       -- pit / hole
-  0x08, 0x09, 0x4B,                                           -- water
+  0x08, 0x4B,                                                 -- deep water (0x09 shallow is wadeable)
   0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56,                   -- solid object
 }) do IMPASSABLE[a] = true end
 
@@ -950,6 +997,10 @@ local function pathfind_update(s)
     return
   end
 
+  -- Hush the guide while an enemy is engaged, so the fight's audio is unobstructed;
+  -- the follower keeps tracking, and the tone returns once the enemy backs off.
+  if combat_engaged then beacon.clear("path"); return end
+
   local w = path[pathfind_wp]
   local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
   local on_course
@@ -1026,6 +1077,24 @@ local function nearest_sprite_kind(s, kind)
     if sp.kind == kind then return { sp.x, sp.y } end
   end
   return nil
+end
+
+-- The nearest walkable tile to a world-pixel point, spiralling out, as a
+-- world-pixel spot. A sprite to guide to — a dying uncle slumped against a wall,
+-- a caged Zelda — often sits on an impassable tile, so aiming the pathfinder at
+-- the sprite itself yields "no path"; snap to a tile beside it instead.
+local function walkable_near(s, wx, wy)
+  local tx, ty = wx >> 3, wy >> 3
+  for r = 0, 8 do
+    for dy = -r, r do
+      for dx = -r, r do
+        if math.max(math.abs(dx), math.abs(dy)) == r and tile_passable(s, tx + dx, ty + dy) then
+          return (tx + dx) * 8 + 4, (ty + dy) * 8 + 4
+        end
+      end
+    end
+  end
+  return wx, wy
 end
 
 -- ===========================================================================
@@ -1344,6 +1413,7 @@ local function ow_route_update(s)
     say("You have arrived.", { priority = "navigation", category = "on-demand" })
     ow_route_stop(); beacon.clear("path"); return
   end
+  if combat_engaged then beacon.clear("path"); return end -- hush the guide in a fight
   local w = path[ow_route_wp]
   local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
   local on_course
@@ -1376,16 +1446,6 @@ function on_frame(frame)
     say("You died.", { priority = "critical", category = "combat" })
     low_health_warned = false
     return
-  end
-
-  -- Damage. Only while actually in play: menu transitions that zero health
-  -- would otherwise register as being hit.
-  if in_play(now) and now.health < was.health and was.max_health > 0 then
-    local lost = (was.health - now.health) / 8.0
-    say(
-      string.format("Hit. %.1f hearts lost, %.1f left.", lost, hearts(now.health)),
-      { priority = "critical", category = "combat", rate_limit = "400ms" }
-    )
   end
 
   -- Low health, latched on the crossing.
@@ -1453,31 +1513,25 @@ function on_frame(frame)
     end
   end
 
-  -- Enemies. Announce each by name and direction as it enters the visible screen
-  -- ("Green Soldier, north-east."), once per entrance — the spatial-audio beacon
-  -- gives the continuous sense of where the nearest one is.
+  -- Enemies. Announce each threat once, by name and direction, when it first comes
+  -- within range and into the clear ("Green Soldier, north-east."); the spatial
+  -- beacon then tracks the nearest. The latch is per sprite slot and clears only
+  -- when the slot empties — the enemy dies or despawns — so a foe weaving on and
+  -- off screen, or behind cover, is never announced a second time.
   if in_play(now) then
     local list = sprites()
 
-    -- Speak an enemy as it appears on screen; reset the latch once it leaves, so
-    -- a re-entrance speaks again. The arbiter rate-limits a busy room.
     local active = {}
     for _, sp in ipairs(list) do
       active[sp.slot] = sp
     end
     for i = 0, 15 do
       local sp = active[i]
-      -- "Present" = a threat that is on the visible screen, whether or not a wall
-      -- currently hides it. An occluded enemy is still present, so it stays
-      -- latched; only leaving the screen re-arms it.
-      local present = sp ~= nil and is_enemy(sp) and on_screen(sp.dx, sp.dy)
-      if not present then
-        announced[i] = false -- off screen: a genuine re-entrance may speak again
+      if sp == nil or not is_enemy(sp) then
+        announced[i] = false -- slot free: a new enemy spawning here may speak
       elseif not announced[i]
+          and sp.dist < ENEMY_ANNOUNCE_RANGE
           and not sight_blocked(now, now.x, now.y, sp.x, sp.y) then
-        -- Announce once, when it is actually in the clear. If it first appears
-        -- occluded it waits, but it will not re-announce merely for stepping back
-        -- into line of sight after ducking behind cover.
         say(
           string.format("%s, %s.", enemy_name(sp), direction(sp.dx, sp.dy)),
           { priority = "interaction", category = "enemy" }
@@ -1487,17 +1541,22 @@ function on_frame(frame)
     end
 
     -- Spatial-audio beacons: one tone per class, on the nearest sprite of that
-    -- class within its reach. It pans toward the source and grows louder as it
-    -- closes. `list` is sorted nearest-first, so the first sprite seen for a
-    -- class is its closest one.
+    -- class within its reach. `list` is sorted nearest-first, so the first sprite
+    -- seen for a class is its closest one.
     local nearest = {}
     for _, sp in ipairs(list) do
       local c = category(sp)
       if nearest[c] == nil then nearest[c] = sp end
     end
+
+    -- In combat — an enemy within COMBAT_RANGE — only that nearest enemy sounds;
+    -- the guide and the pickup/person tones fall silent so the fight is clear.
+    local ne = nearest.enemy
+    combat_engaged = ne ~= nil and ne.dist < COMBAT_RANGE
+
     for name, kind in pairs(BEACON_KINDS) do
       local sp = nearest[name]
-      if sp and sp.dist < kind.range then
+      if sp and sp.dist < kind.range and not (combat_engaged and name ~= "enemy") then
         -- Quadratic falloff: quieter at a distance, ramping up steeply as the
         -- source closes, rather than a flat linear fade. The class gain scales it
         -- (enemies boosted so they carry over the guide), clamped to full volume.
@@ -1515,6 +1574,7 @@ function on_frame(frame)
       end
     end
   else
+    combat_engaged = false
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
       beacon.clear(name)
     end
@@ -1533,6 +1593,7 @@ function on_frame(frame)
   -- crosses screens, before the followers it drives so a fresh target takes effect
   -- this frame.
   nav_update(now)
+  bush_cue(now)
   room_route_update(now)
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
@@ -1830,6 +1891,35 @@ local function door_toward(s, ddx, ddy)
   return best
 end
 
+-- Any room-leaving tile — an in-plane door (0x30-0x37), a room entrance/exit
+-- (0x8E-0x8F, the game's TileBehavior_Entrance), or a staircase (0x1D-0x1F up,
+-- 0x3D-0x3F down) — best aligned with a room-grid heading. Used to leave a room
+-- the graph does not connect: a room can have several exits (the uncle room has
+-- both a down stair and a south entrance passage), so the heading toward the
+-- target room picks the right one rather than the nearest.
+local function is_exit_attr(a)
+  return a ~= nil and ((a >= 0x30 and a <= 0x37) or a == 0x8E or a == 0x8F
+    or (a >= 0x1D and a <= 0x1F) or (a >= 0x3D and a <= 0x3F))
+end
+local function exit_toward(s, ddx, ddy)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
+  local best, best_score
+  for y = 0, 63 do
+    for x = 0, 63 do
+      if is_exit_attr(tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)) then
+        local rx, ry = x - ltx, y - lty
+        local dist = math.abs(rx) + math.abs(ry)
+        local score = (ddx == 0 and ddy == 0) and -dist or (rx * ddx + ry * ddy - dist * 0.01)
+        if best_score == nil or score > best_score then
+          best_score, best = score, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+        end
+      end
+    end
+  end
+  return best
+end
+
 -- The tile-types of a floor-changing spiral staircase, from the game's own tile
 -- detection (zelda3 tile_detect.c, TileDetect_ExecuteInner): north/up stairs read
 -- as 0x1D-0x1F, down stairs as 0x3D-0x3F. (The 0x30-0x37 the door finder keys on
@@ -2024,28 +2114,77 @@ end
 local CASTLE_AREA = 0x1B
 local SANCTUARY_AREA, SANCTUARY_ROOM = 0x13, 0x12
 
+-- The castle entrance the intro drops into to reach Uncle — a hole (tile type
+-- 0x20) you fall into, so no sword or bush-cutting is needed here (the bush-hidden
+-- entrance is a later, sword-gated route). The hole itself reads as impassable, so
+-- the pathfinder cannot route onto it; aim instead at the walkable tile just south
+-- (world tile 304, 214 — read live from the game) and tell the player to step
+-- north in. The overworld area is Hyrule Castle 0x1B.
+local CASTLE_ENTRANCE = {
+  tx = 304, ty = 214,
+  say = "Step north into the castle entrance.",
+}
+
+-- The courtyard crossing after Uncle, as an ordered waypoint sequence: with the
+-- sword in hand Link leaves the uncle room back out to the courtyard, cuts through
+-- the two bushes, then enters the castle proper by the door just south of him. The
+-- guide leads to each in turn (advancing by proximity), rather than straight at the
+-- door — the intended path goes through the bushes, and routing direct would skip
+-- them. Coords are world tiles read live from the game; the rooms beyond the door
+-- are in the dungeon graph, which routes on to Zelda's cell.
+local COURTYARD = {
+  { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
+  { tx = 256, ty = 225, say = "Step north into the castle." },
+}
+local COURTYARD_REACH = 2 -- tiles; within this of a waypoint, advance to the next
+local courtyard_i = 1
+
+-- Aim the overworld route at courtyard waypoint `i` and announce it.
+local function courtyard_route(s, i)
+  local wp = COURTYARD[i]
+  ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
+  nav_say(wp.say)
+end
+
 -- Route toward an intro beat from wherever Link is. In a dungeon room the graph
 -- connects to the target, door-to-door route there (stage 2). In an indoor room
 -- the graph does not reach yet — Link's house at the very start — head for the
--- door out. On the overworld, take the stage-1 cross-screen path to the area, or
--- hand off to look for the entrance once standing in it.
-local function head_for(s, area, room, label)
+-- door out. On the overworld, take the stage-1 cross-screen path to the area;
+-- once standing in it, aim at a known entrance waypoint if the beat gives one,
+-- else hand off to look for the way in.
+local function head_for(s, area, room, label, entrance)
   if s.module == 0x07 then
     if room and (room == s.dungeon_room or room_path(s.dungeon_room, room)) then
       route_to_room(s, room, label)
       return
     end
     -- An interior the graph does not reach (Link's house at the start, or the
-    -- castle secret-entrance room whose stair down the rando omits). Aim at the
-    -- way out: a door if there is one, else a staircase (the uncle room leaves by
-    -- a down stair), else south — a house exits at its bottom edge. The local A*
-    -- gets Link there, and the auto-follow re-aims once he crosses out.
-    local d = nearest_door_tile(s) or nearest_stair_tile(s, false) or room_edge_goal(s, 0, 1)
+    -- castle secret-entrance room whose onward passage the rando omits). Head for
+    -- the exit — door, entrance passage or staircase — that points toward the
+    -- target room on the dungeon-room grid (low nibble = column, high = row), so a
+    -- room with several exits picks the right one. Fall back to that heading's
+    -- edge. The local A* gets Link there; the auto-follow re-aims once he crosses.
+    local ddx, ddy = 0, 1 -- default heading: south (a house exits at its bottom)
+    if room and s.dungeon_room <= 0xFF then
+      -- Both are standard dungeon rooms on the 16-wide grid; head toward the target.
+      ddx = (room & 0x0F) - (s.dungeon_room & 0x0F)
+      ddy = (room >> 4) - (s.dungeon_room >> 4)
+    end
+    local d = exit_toward(s, ddx, ddy)
+      or room_edge_goal(s, ddx > 0 and 1 or ddx < 0 and -1 or 0, ddy >= 0 and 1 or -1)
     if d then pathfind_to(d[1], d[2]) end
     nav_say(label .. " Head for the way out.")
   elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
-    ow_route_stop()
-    nav_say(label .. " Look for the entrance.")
+    if entrance then
+      -- Cross-screen router, not the local pathfinder: the entrance can sit a tile
+      -- into the next 512px block (the large castle area splits into several), and
+      -- the ROM decode routes through the bushes on the way (BUSH_TILE is passable).
+      ow_route_to(entrance.tx * 8 + 4, entrance.ty * 8 + 4)
+      nav_say(label .. " " .. entrance.say)
+    else
+      ow_route_stop()
+      nav_say(label .. " Look for the entrance.")
+    end
   else
     ow_route_to_area(area)
     nav_say(label .. " Routing there.")
@@ -2064,7 +2203,7 @@ local INTRO = {
         local c = nearest_chest_tile(s)
         if c then pathfind_to(c[1], c[2]); nav_say("Open the chest for the Lamp."); return end
       end
-      head_for(s, CASTLE_AREA, 0x55, "Head into Hyrule Castle's hidden entrance for your uncle.")
+      head_for(s, CASTLE_AREA, 0x55, "Head into Hyrule Castle's hidden entrance for your uncle.", CASTLE_ENTRANCE)
     end },
   { key = "uncle",
     goal = "Reach your uncle for the sword",
@@ -2073,11 +2212,11 @@ local INTRO = {
     act = function(s, v)
       if s.module == 0x07 and s.dungeon_room == 0x55 then
         local u = nearest_sprite_kind(s, 115) -- Link's Uncle
-        if u then pathfind_to(u[1], u[2]) end
+        if u then pathfind_to(walkable_near(s, u[1], u[2])) end
         nav_say("Your uncle is in this room. Reach him for the sword.")
         return
       end
-      head_for(s, CASTLE_AREA, 0x55, "Reach your uncle for the sword.")
+      head_for(s, CASTLE_AREA, 0x55, "Reach your uncle for the sword.", CASTLE_ENTRANCE)
     end },
   { key = "zelda",
     goal = "Free Princess Zelda",
@@ -2086,8 +2225,14 @@ local INTRO = {
     act = function(s, v)
       if s.module == 0x07 and s.dungeon_room == 0x80 then
         local z = nearest_sprite_kind(s, 118) -- Princess Zelda
-        if z then pathfind_to(z[1], z[2]) end
+        if z then pathfind_to(walkable_near(s, z[1], z[2])) end
         nav_say("Zelda is in this cell. Reach her.")
+        return
+      end
+      if s.module == 0x09 then
+        -- Courtyard: (re)start the bushes-then-door waypoint sequence.
+        courtyard_i = 1
+        courtyard_route(s, 1)
         return
       end
       head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.")
@@ -2179,6 +2324,17 @@ nav_update = function(s)
   if sig ~= nav_sig then
     nav_sig = sig
     nav_reaim(s, v)
+  end
+  -- Advance the courtyard waypoint sequence by proximity: while the Zelda beat is
+  -- running out on the overworld, step to the next waypoint (the castle door) once
+  -- Link reaches the current one (the bushes). nav_reaim above starts it at 1.
+  local _, step = intro_step(v)
+  if step and step.key == "zelda" and s.module == 0x09 and courtyard_i < #COURTYARD then
+    local wp = COURTYARD[courtyard_i]
+    if math.abs((s.x >> 3) - wp.tx) + math.abs((s.y >> 3) - wp.ty) <= COURTYARD_REACH then
+      courtyard_i = courtyard_i + 1
+      courtyard_route(s, courtyard_i)
+    end
   end
 end
 
