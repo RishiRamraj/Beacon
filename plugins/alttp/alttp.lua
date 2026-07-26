@@ -287,6 +287,54 @@ local function on_screen(dx, dy)
   return math.abs(dx) <= 128 and math.abs(dy) <= 116
 end
 
+-- ── Kill-rooms ──────────────────────────────────────────────────────────────
+-- Some dungeon rooms lock progress until their enemies are defeated. The room's
+-- two header tag bytes ($7E00AE/$AF) say how: derived from the ALttP room-tag
+-- routines (zelda3src dungeon.c), tags 0x01-0x0A open doors or drop trapdoors on
+-- clear, 0x26 removes a blocking statue, and 0x29-0x32 reveal a chest. When one is
+-- set and enemies remain, the guide leads to the next enemy instead of a (locked)
+-- door and states the requirement.
+local KILL_HDR_TAG = 0x7E00AE       -- two bytes: tag[0], tag[1]
+local SPRITE_FLAGS4 = 0x7E0F60      -- bit 0x40 set = ignored by the room-clear check
+local OVERLORD_TYPE = 0x7E0B00      -- spawner overlords; 0x14/0x18 hold the room open
+local KILL_TAGS = {}
+for _, t in ipairs({ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+                     0x26, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32 }) do
+  KILL_TAGS[t] = true
+end
+
+-- Is Link in a dungeon room gated on defeating enemies?
+local function kill_room(s)
+  if s.module ~= 0x07 then return false end
+  return KILL_TAGS[mem.u8(KILL_HDR_TAG)] == true or KILL_TAGS[mem.u8(KILL_HDR_TAG + 1)] == true
+end
+
+-- The nearest live enemy still counting toward the room clear (state set, and not
+-- flagged out of the tally, matching Sprite_CheckIfRoomIsClear), or nil. Overlord
+-- spawners (0x14/0x18) also hold a room; reported separately since they have no
+-- position to walk to.
+local function nearest_pending_enemy(s)
+  local best, bd
+  for i = 0, 15 do
+    local st = mem.u8(SPRITE.state + i)
+    if st ~= nil and st ~= 0 and (mem.u8(SPRITE_FLAGS4 + i) & 0x40) == 0 then
+      local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
+      local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
+      local d = math.abs(sx - s.x) + math.abs(sy - s.y)
+      if bd == nil or d < bd then best, bd = { sx, sy }, d end
+    end
+  end
+  return best
+end
+
+local function overlords_pending()
+  for i = 0, 7 do
+    local t = mem.u8(OVERLORD_TYPE + i)
+    if t == 0x14 or t == 0x18 then return true end
+  end
+  return false
+end
+
 -- An enemy is called out once it comes within this Manhattan distance — wider than
 -- the visible screen, so a threat is named early, while it is still approaching.
 local ENEMY_ANNOUNCE_RANGE = 240
@@ -2136,14 +2184,44 @@ local COURTYARD = {
   { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
   { tx = 256, ty = 225, say = "Step north into the castle." },
 }
-local COURTYARD_REACH = 2 -- tiles; within this of a waypoint, advance to the next
-local courtyard_i = 1
 
--- Aim the overworld route at courtyard waypoint `i` and announce it.
-local function courtyard_route(s, i)
-  local wp = COURTYARD[i]
+-- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
+-- world-tile waypoints. The overworld guide homes on the active one
+-- (nav_chain[nav_chain_i]) and the map renderer draws the whole remaining chain —
+-- the active waypoint white, the rest pink, with straight segments linking them —
+-- so the player sees where the route continues past the immediate target (the
+-- bushes, then on to the castle door). Cleared to nil when a plain single target
+-- is in play. Globals so eval_lua and the renderer can inspect them.
+nav_chain = nil
+nav_chain_i = 1
+local CHAIN_REACH = 2 -- tiles; within this of the active waypoint, advance the chain
+
+-- Aim the overworld route at the active chain waypoint and announce it.
+local function chain_route(s)
+  local wp = nav_chain and nav_chain[nav_chain_i]
+  if not wp then return end
   ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
   nav_say(wp.say)
+end
+
+-- Begin a chain at waypoint `i` (default 1) and route toward it.
+local function chain_start(s, chain, i)
+  nav_chain = chain
+  nav_chain_i = i or 1
+  chain_route(s)
+end
+
+-- Step to the next waypoint and re-route; a no-op past the end.
+local function chain_advance(s)
+  if not nav_chain or nav_chain_i >= #nav_chain then return end
+  nav_chain_i = nav_chain_i + 1
+  chain_route(s)
+end
+
+-- Drop the chain (a plain single-target route replaces it).
+local function chain_stop()
+  nav_chain = nil
+  nav_chain_i = 1
 end
 
 -- Route toward an intro beat from wherever Link is. In a dungeon room the graph
@@ -2230,9 +2308,8 @@ local INTRO = {
         return
       end
       if s.module == 0x09 then
-        -- Courtyard: (re)start the bushes-then-door waypoint sequence.
-        courtyard_i = 1
-        courtyard_route(s, 1)
+        -- Courtyard: (re)start the bushes-then-door waypoint chain.
+        chain_start(s, COURTYARD, 1)
         return
       end
       head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.")
@@ -2265,11 +2342,15 @@ end
 -- movement within a module quietly. Global for MCP inspection.
 nav_active = false
 local nav_sig = nil
+-- The dungeon room we last spoke a kill-room requirement for, so it is stated once
+-- per room rather than every frame while enemies remain.
+local kill_announced_room = nil
 
 -- Aim the guide at the current objective from wherever Link stands: the scripted
 -- intro beat while the intro runs, else the dungeon spine, else the overworld
 -- milestone. Each announces what it is heading for.
 local function nav_reaim(s, v)
+  chain_stop() -- each objective rebuilds its own chain; the zelda beat sets one
   local _, step = intro_step(v)
   if step then
     step.act(s, v)
@@ -2310,6 +2391,8 @@ end
 local function nav_stop()
   nav_active = false
   nav_sig = nil
+  kill_announced_room = nil
+  chain_stop()
   room_route_stop()
   ow_route_stop()
   pathfind_stop()
@@ -2325,17 +2408,101 @@ nav_update = function(s)
     nav_sig = sig
     nav_reaim(s, v)
   end
-  -- Advance the courtyard waypoint sequence by proximity: while the Zelda beat is
-  -- running out on the overworld, step to the next waypoint (the castle door) once
-  -- Link reaches the current one (the bushes). nav_reaim above starts it at 1.
-  local _, step = intro_step(v)
-  if step and step.key == "zelda" and s.module == 0x09 and courtyard_i < #COURTYARD then
-    local wp = COURTYARD[courtyard_i]
-    if math.abs((s.x >> 3) - wp.tx) + math.abs((s.y >> 3) - wp.ty) <= COURTYARD_REACH then
-      courtyard_i = courtyard_i + 1
-      courtyard_route(s, courtyard_i)
+  -- Kill-room: if this room gates progress on defeating enemies and any remain,
+  -- state the requirement once and lead to the nearest one — the doors are locked,
+  -- so the ordinary door route would only mislead. The enemy retargets only when it
+  -- has moved a couple of tiles, to avoid replanning every frame; once close, the
+  -- combat beacon takes over the final approach. When the last enemy falls, re-aim
+  -- at the now-open door.
+  if kill_room(s) then
+    local e = nearest_pending_enemy(s)
+    if e or overlords_pending() then
+      if kill_announced_room ~= s.dungeon_room then
+        nav_say("Defeat all enemies to open the doors.")
+        kill_announced_room = s.dungeon_room
+      end
+      if e then
+        local gx, gy = walkable_near(s, e[1], e[2])
+        if pathfind_goal == nil
+          or math.abs(pathfind_goal[1] - (gx >> 3)) + math.abs(pathfind_goal[2] - (gy >> 3)) >= 2 then
+          route_set_goal(s, gx, gy)
+        end
+      end
+      return
+    end
+    if kill_announced_room == s.dungeon_room then
+      kill_announced_room = nil
+      nav_reaim(s, v) -- cleared: resume routing, now that the doors have opened
     end
   end
+  -- Advance the visual waypoint chain by proximity: once Link reaches the active
+  -- waypoint, step to the next and re-route (bushes → castle door). Only a chain in
+  -- play has this; nav_reaim clears it for plain single-target objectives.
+  if nav_chain and s.module == 0x09 and nav_chain_i < #nav_chain then
+    local wp = nav_chain[nav_chain_i]
+    if math.abs((s.x >> 3) - wp.tx) + math.abs((s.y >> 3) - wp.ty) <= CHAIN_REACH then
+      chain_advance(s)
+    end
+  end
+end
+
+-- ── Waypoint recording (mapping phase) ──────────────────────────────────────
+-- Tooling for building waypoint chains by playing: the user drives Link to a spot
+-- and Claude captures it with rec_here("what to say there") over eval_lua. REC
+-- accumulates across calls; rec_dump prints the run as a pasteable chain literal.
+-- These are globals so eval_lua reaches them, and their bodies close over `prev`
+-- (the latest frame) and `mem` from the file scope. State resets on reload_plugin
+-- — dump before reloading. Recording never runs during normal play.
+REC = REC or {}
+
+-- Capture Link's current spot as a waypoint. Tile coords use the same >>3 world
+-- tile the chain proximity test compares against, so a recorded spot re-triggers
+-- where it was taken. `say` is the line the guide speaks on reaching it.
+function rec_here(say)
+  local s = prev
+  if s == nil then return "not in play" end
+  local e = {
+    module = s.module,
+    ow_area = mem.u8(0x7E008A) & 0x3F, -- overworld screen id (LW/DW share the low 6 bits)
+    room = s.dungeon_room,
+    tx = s.x >> 3, ty = s.y >> 3,
+    dir = s.direction,
+    say = say or "",
+  }
+  REC[#REC + 1] = e
+  return string.format("#%d  module=%02X ow_area=%02X room=%04X  tx=%d ty=%d dir=%d  | %s",
+    #REC, e.module, e.ow_area, e.room or 0xFFFF, e.tx, e.ty, e.dir, e.say)
+end
+
+function rec_undo()
+  if #REC == 0 then return "nothing recorded" end
+  local e = REC[#REC]; REC[#REC] = nil
+  return string.format("removed (tx=%d ty=%d) — %d left", e.tx, e.ty, #REC)
+end
+
+function rec_clear() REC = {}; return "cleared" end
+
+function rec_list()
+  if #REC == 0 then return "(empty)" end
+  local out = {}
+  for i, e in ipairs(REC) do
+    out[i] = string.format("#%d module=%02X ow_area=%02X room=%04X tx=%d ty=%d dir=%d | %s",
+      i, e.module, e.ow_area, e.room or 0xFFFF, e.tx, e.ty, e.dir, e.say)
+  end
+  return table.concat(out, "\n")
+end
+
+-- The recorded run as a pasteable chain literal (world tiles + the say lines).
+function rec_dump()
+  if #REC == 0 then return "-- (no waypoints recorded)" end
+  local out = { "{" }
+  for _, e in ipairs(REC) do
+    out[#out + 1] = string.format(
+      "  { tx = %d, ty = %d, say = %q },  -- module %02X ow_area %02X room %04X dir %d",
+      e.tx, e.ty, e.say, e.module, e.ow_area, e.room or 0xFFFF, e.dir)
+  end
+  out[#out + 1] = "}"
+  return table.concat(out, "\n")
 end
 
 on_command("advance", function()
@@ -2527,13 +2694,33 @@ function on_draw(canvas)
     -- World tiles are placed relative to Link's block, so off-window corners clip.
     if s.module == 0x09 and ow_route_goal and ow_route_path then
       local bx, by = s.x - s.x % 512, s.y - s.y % 512
-      local function oplot(wt)
-        return fx + (wt[1] * 8 + 4 - bx) * fw // 512, fy + (wt[2] * 8 + 4 - by) * fw // 512
+      local function oplot(tx, ty)
+        return fx + (tx * 8 + 4 - bx) * fw // 512, fy + (ty * 8 + 4 - by) * fw // 512
       end
+      -- The active route to the immediate target, string-pulled, in pink.
       for i = 1, #ow_route_path - 1 do
-        local ax, ay = oplot(ow_route_path[i])
-        local cx2, cy2 = oplot(ow_route_path[i + 1])
+        local ax, ay = oplot(ow_route_path[i][1], ow_route_path[i][2])
+        local cx2, cy2 = oplot(ow_route_path[i + 1][1], ow_route_path[i + 1][2])
         canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+      end
+      if nav_chain then
+        -- Past the active target, draw the rest of the chain: straight pink
+        -- segments linking the remaining waypoints, then a marker on each — the
+        -- next waypoint white, the rest pink — so the route reads ahead (bushes →
+        -- castle door) and the immediate goal stands out.
+        for i = nav_chain_i, #nav_chain - 1 do
+          local ax, ay = oplot(nav_chain[i].tx, nav_chain[i].ty)
+          local cx2, cy2 = oplot(nav_chain[i + 1].tx, nav_chain[i + 1].ty)
+          canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+        end
+        for i = nav_chain_i, #nav_chain do
+          local px, py = oplot(nav_chain[i].tx, nav_chain[i].ty)
+          canvas:rect(px - 1, py - 1, 3, 3, (i == nav_chain_i) and 0xFFFFFF or 0xFF60D0)
+        end
+      else
+        -- A plain single target: mark its destination white.
+        local px, py = oplot(ow_route_goal[1], ow_route_goal[2])
+        canvas:rect(px - 1, py - 1, 3, 3, 0xFFFFFF)
       end
     end
 

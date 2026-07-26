@@ -988,6 +988,109 @@ fn alttp_intro_guide_auto_advances_when_a_beat_completes() {
 }
 
 #[test]
+fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
+    // On the overworld during the "free Zelda" beat, engaging the guide arms a
+    // two-waypoint chain (the bushes, then the castle door). The chain drives the
+    // white/pink map rendering; here we check the data model: it starts at
+    // waypoint 1 and steps to 2 once Link reaches the first spot.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Overworld, Zelda beat: Lamp and sword in hand, Zelda not yet following,
+    // progress below 2 — so intro_step() lands on "zelda". Link parked away from
+    // the first waypoint (world tile 282,225) so the chain does not pre-advance.
+    let frame = |x: u16, y: u16| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // overworld module
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24); // health, so in_play holds
+        set(0x7EF36D, 24);
+        set(0x7E008A, 0x1B); // Hyrule Castle area
+        set(0x7EF34A, 1); // Lamp held -> lamp beat done
+        set(0x7EF359, 1); // sword held -> uncle beat done
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // progress < 2
+        set(0x7E0022, (x & 0xFF) as u8);
+        set(0x7E0023, (x >> 8) as u8);
+        set(0x7E0020, (y & 0xFF) as u8);
+        set(0x7E0021, (y >> 8) as u8);
+        ram
+    };
+
+    let away = frame(100 * 8, 100 * 8);
+    plugin.on_frame(&away, 0);
+    plugin.on_frame(&away, 1);
+    plugin.command("advance", &away); // engage the guide -> arms the chain
+
+    let armed = plugin.eval("return #nav_chain .. ',' .. nav_chain_i", &away).unwrap();
+    assert_eq!(armed, "2,1", "Zelda beat arms a 2-waypoint chain at index 1: {armed}");
+
+    // Drive Link onto the first waypoint (282,225); a frame there advances to 2.
+    let at_wp1 = frame(282 * 8, 225 * 8);
+    plugin.on_frame(&at_wp1, 2);
+    let advanced = plugin.eval("return tostring(nav_chain_i)", &at_wp1).unwrap();
+    assert_eq!(advanced, "2", "reaching waypoint 1 advances the chain to 2: {advanced}");
+}
+
+#[test]
+fn alttp_kill_room_states_the_requirement_and_leads_to_the_enemy() {
+    // A dungeon room whose header carries a kill tag (0x0A: clear the room to open
+    // the doors) with an enemy still alive: the guide should state the requirement
+    // and aim the pathfinder at the enemy, not the (locked) door. Once the enemy is
+    // gone, it stops nagging and resumes normal routing.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Link at tile (20,20), a door up at (20,6), and a Green Soldier out at tile
+    // (30,20) — on screen but past combat range, so the guide leads toward it.
+    let frame = |enemy_state: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7EF3C5, 2); // progress past the intro, so the dungeon spine is active
+        set(0x7E040C, 0x02); // a dungeon id
+        set(0x7E00AE, 0x0A); // room-clear kill tag
+        set(0x7E0DD0, enemy_state); // slot 0 state
+        set(0x7E0E20, 65); // Green Soldier
+        set(0x7E0D10, 0xF0); // x lo -> 240
+        set(0x7E0D30, 0x00); // x hi
+        set(0x7E0D00, 0xA0); // y lo -> 160
+        set(0x7E0D20, 0x00); // y hi
+        set(0x7E0E50, 4); // health
+        ram
+    };
+
+    let live = frame(0x09);
+    plugin.on_frame(&live, 0);
+    plugin.on_frame(&live, 1);
+    plugin.command("advance", &live); // engage the guide
+    let out = plugin.on_frame(&live, 2);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Defeat all enemies")),
+        "states the kill requirement: {texts:?}"
+    );
+
+    // The pathfinder is aimed at the enemy's tile (30,20), not the door at (20,6).
+    let goal = plugin
+        .eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &live,
+        )
+        .unwrap();
+    assert_eq!(goal, "30,20", "leads to the enemy, not the locked door: {goal}");
+
+    // Enemy defeated (slot inactive): the requirement is not repeated.
+    let cleared = frame(0x00);
+    let out2 = plugin.on_frame(&cleared, 3);
+    let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        !texts2.iter().any(|t| t.contains("Defeat all enemies")),
+        "stops nagging once the room is clear: {texts2:?}"
+    );
+}
+
+#[test]
 fn alttp_nav_assist_toggles_on_and_off_with_advance() {
     // The navigation assist (L / advance) is a global on/off toggle: the first
     // press turns it on and aims at the objective, the second turns it off. It is
