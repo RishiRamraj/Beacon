@@ -533,9 +533,9 @@ fn alttp_explore_routes_toward_unwalked_ground() {
 #[test]
 fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
     // On the overworld, "advance" starts a route toward the current milestone's
-    // area when it is in the same world, and flags the other world otherwise.
-    // A fresh save (progress 0) points at Hyrule Castle (area 0x1B), same (Light)
-    // world as the player, so it announces that it is routing there.
+    // area when it is in the same world, and flags the other world otherwise. Past
+    // the intro (progress 2, Zelda delivered), the milestone spine points at the
+    // first pendant dungeon in the same (Light) world, so it announces routing there.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -547,16 +547,15 @@ fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
         set(0x7EF36C, 24);
         set(0x7EF36D, 24);
         set(0x7E008A, 0x18); // current area: Kakariko (row 3, col 0)
-                             // progress bytes all zero -> the intro, whose first
-                             // beat sends you to Hyrule Castle (0x1B) for the sword
+        set(0x7EF3C5, 2); // progress: intro over, the milestone spine is active
     }
     plugin.on_frame(&ram, 0);
     plugin.on_frame(&ram, 1);
     let out = plugin.command("advance", &ram);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
-        texts.iter().any(|t| t.contains("Routing") && t.contains("Castle")),
-        "starts routing toward the castle: {texts:?}"
+        texts.iter().any(|t| t.contains("Routing")),
+        "starts routing toward the objective: {texts:?}"
     );
 
     // Post-Agahnim: all three pendants, the Master Sword, Agahnim beaten, no
@@ -1143,11 +1142,12 @@ fn alttp_nav_assist_toggles_on_and_off_with_advance() {
     plugin.on_frame(&ram, 0);
     plugin.on_frame(&ram, 1);
 
-    // First press: on, and it routes toward the objective.
+    // First press: on, and it speaks some guidance (here, with no Lamp, the intro
+    // turns Link back for the lantern).
     let on: Vec<String> = plugin.command("advance", &ram).iter().map(|i| i.text.clone()).collect();
     assert!(
-        on.iter().any(|t| t.contains("Routing")),
-        "first L turns the assist on and routes: {on:?}"
+        !on.is_empty(),
+        "first L turns the assist on and guides: {on:?}"
     );
 
     // Second press: off.
@@ -1159,10 +1159,10 @@ fn alttp_nav_assist_toggles_on_and_off_with_advance() {
 }
 
 #[test]
-fn alttp_intro_advance_routes_into_the_castle_on_the_overworld() {
-    // With the intro active, "advance" on the overworld should route toward
-    // Hyrule Castle (area 0x1B) for the opening, not sit idle. Standing in
-    // Kakariko (0x18), same Light World, it starts a route there.
+fn alttp_intro_without_the_lamp_backtracks_to_the_house() {
+    // The Lamp goal completes only when the Lamp is actually held. Skipping it and
+    // wandering out onto the overworld should turn Link around toward his house for
+    // the lantern, not let him press on to the castle.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -1173,14 +1173,14 @@ fn alttp_intro_advance_routes_into_the_castle_on_the_overworld() {
         set(0x7E0011, 0x00);
         set(0x7EF36C, 24);
         set(0x7EF36D, 24);
-        set(0x7E008A, 0x18); // Kakariko
+        set(0x7E008A, 0x18); // wandered off to Kakariko, still no Lamp
     }
     plugin.on_frame(&ram, 0);
     plugin.on_frame(&ram, 1);
     let out = plugin.command("advance", &ram);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
-        texts.iter().any(|t| t.contains("Routing") && t.contains("Castle")),
-        "the intro routes toward the castle: {texts:?}"
+        texts.iter().any(|t| t.to_lowercase().contains("lantern")),
+        "backtracks for the lantern instead of pressing on: {texts:?}"
     );
 }

@@ -2204,6 +2204,7 @@ end
 -- 0x80, Sanctuary 0x12 (overworld area 0x13); Hyrule Castle is area 0x1B.
 -- ===========================================================================
 local CASTLE_AREA = 0x1B
+local HOUSE_AREA = 0x2C -- Link's house sits on this overworld area (its interior is room 0x104)
 local SANCTUARY_AREA, SANCTUARY_ROOM = 0x13, 0x12
 
 -- The castle entrance the intro drops into to reach Uncle — a hole (tile type
@@ -2346,80 +2347,104 @@ local function head_for(s, area, room, label, entrance)
   end
 end
 
-local INTRO = {
-  { key = "lamp",
-    goal = "Grab the Lamp from the chest",
+-- ── The main-quest goal engine ──────────────────────────────────────────────
+-- Guidance is data, not per-goal code. GOALS lists the quest's checkpoints in
+-- order; each is a plain record — where it lives, what it says, and the save byte
+-- that marks it done. A single dispatcher (route_to) puts any goal onto Link's
+-- current map, so the same handful of lines drive every step: take the first unmet
+-- goal and route to it, letting the map transitions and approach chains carry Link
+-- there. A goal approached from the wrong side (the Lamp, once Link has wandered
+-- off) routes him back the way he came — skipping it turns him around rather than
+-- stranding the guide.
+
+-- A goal's completion test, as data: mem[addr] >= n.
+local function met(p) return mem.u8(p[1]) >= p[2] end
+
+-- Resolve a goal to a world-pixel target on Link's current map: a dynamic lookup
+-- (the chest, a named sprite) or a fixed tile, else nil.
+local function goal_point(s, g)
+  if g.find == "chest" then return nearest_chest_tile(s) end
+  if g.find == "sprite" then
+    local sp = nearest_sprite_kind(s, g.kind)
+    if sp then local wx, wy = walkable_near(s, sp[1], sp[2]); return { wx, wy } end
+    return nil
+  end
+  if g.tx then return { g.tx * 8 + 4, g.ty * 8 + 4 } end
+  return nil
+end
+
+-- Put goal `g` onto Link's current map — the only place that branches on context,
+-- shared by every goal. In its dungeon room, pathfind to the target; elsewhere in
+-- the same dungeon, walk the room graph; not in the dungeon yet, take its authored
+-- overworld approach chain (cues + the entrance to drop through), double back to a
+-- home area if it names one (the Lamp), or — inside another interior — head for the
+-- way out. Overworld goals route cross-screen or to the area.
+local function route_to(s, g)
+  if g.room then
+    if s.module == 0x07 and s.dungeon_room == g.room then
+      local p = goal_point(s, g)
+      if p then pathfind_to(p[1], p[2], g.arrival) end
+      if g.lead then nav_say(g.lead) end
+      return
+    end
+    if s.module == 0x07 and room_path(s.dungeon_room, g.room) then
+      route_to_room(s, g.room, g.lead or g.arrival or "Continue on.")
+      return
+    end
+    if g.chain and s.module == 0x09 then
+      if nav_chain ~= g.chain then chain_start(s, g.chain, 1) end
+    elseif g.entrance_area and s.module == 0x09 then
+      ow_route_to_area(g.entrance_area)
+      if g.recover then nav_say(g.recover) end
+    else
+      -- Inside some interior with no in-dungeon path to the goal: head for the exit.
+      local d = exit_toward(s, 0, 1) or nearest_door_tile(s)
+      if d then pathfind_to(d[1], d[2]) end
+      if g.leave then nav_say(g.leave) end
+    end
+    return
+  end
+  -- An overworld goal.
+  if s.module == 0x09 and ow_parent(s.ow_screen & 0x3F) == ow_parent(g.area & 0x3F) then
+    if g.tx then ow_route_to(g.tx * 8 + 4, g.ty * 8 + 4) end
+    if g.lead then nav_say(g.lead) end
+  elseif s.module == 0x09 then
+    ow_route_to_area(g.area)
+    if g.lead then nav_say(g.lead) end
+  else
+    local d = exit_toward(s, 0, 1) or nearest_door_tile(s)
+    if d then pathfind_to(d[1], d[2]) end
+    if g.leave then nav_say(g.leave) end
+  end
+end
+
+-- The quest's opening beats, in order. Pure data; route_to interprets each.
+local GOALS = {
+  { id = "lamp", goal = "Grab the Lamp from the chest",
     hint = "There is a treasure chest in your house holding the Lamp — take it for the dark passages ahead.",
-    -- Met once the Lamp is held, or once you have moved past the start (sword in
-    -- hand / progress bumped), so skipping it never leaves the guide nagging.
-    done = function(v) return mem.u8(0x7EF34A) >= 1 or v.sword >= 1 or v.progress >= 1 end,
-    act = function(s, v)
-      if s.module == 0x07 then
-        local c = nearest_chest_tile(s)
-        if c then pathfind_to(c[1], c[2], "Open the chest."); nav_say("Get the lantern."); return end
-      end
-      head_for(s, CASTLE_AREA, 0x55, "Head into Hyrule Castle's hidden entrance for your uncle.", CASTLE_ENTRANCE)
-    end },
-  { key = "uncle",
-    goal = "Reach your uncle for the sword",
+    done = { 0x7EF34A, 1 }, room = 0x104, find = "chest",
+    lead = "Get the lantern.", arrival = "Open the chest.",
+    entrance_area = HOUSE_AREA, recover = "Go back for the lantern." },
+  { id = "uncle", goal = "Reach your uncle for the sword",
     hint = "Enter Hyrule Castle by the hidden passage — the bush against the wall drops you in — and reach your dying uncle for the sword and shield.",
-    done = function(v) return v.sword >= 1 or v.progress >= 1 end,
-    act = function(s, v)
-      if s.module == 0x07 and s.dungeon_room == 0x55 then
-        local u = nearest_sprite_kind(s, 115) -- Link's Uncle
-        if u then pathfind_to(walkable_near(s, u[1], u[2])) end
-        nav_say("Find your uncle.")
-        return
-      end
-      if s.module == 0x07 and s.dungeon_room == 0x104 then
-        -- Just took the Lamp and still in Link's house: guide out the front door.
-        local d = exit_toward(s, 0, 1) or nearest_door_tile(s)
-        if d then pathfind_to(d[1], d[2]) end
-        nav_say("Leave the house.")
-        return
-      end
-      if s.module == 0x09 then
-        -- On the overworld: drive the authored approach chain (its arrival cues
-        -- carry the guidance) rather than restating the objective. Starts at the
-        -- house exit and leads across screens toward the castle entrance.
-        if nav_chain ~= UNCLE_APPROACH then chain_start(s, UNCLE_APPROACH, 1) end
-        return
-      end
-      head_for(s, CASTLE_AREA, 0x55, "Reach your uncle for the sword.", CASTLE_ENTRANCE)
-    end },
-  { key = "zelda",
-    goal = "Free Princess Zelda",
+    done = { 0x7EF359, 1 }, room = 0x55, find = "sprite", kind = 115,
+    chain = UNCLE_APPROACH, leave = "Leave the house.", arrival = "Find your uncle." },
+  { id = "zelda", goal = "Free Princess Zelda",
     hint = "Descend through the castle to the dungeon below and free Princess Zelda from her cell.",
-    done = function(v) return mem.u8(0x7EF3CC) == 1 or v.progress >= 2 end,
-    act = function(s, v)
-      if s.module == 0x07 and s.dungeon_room == 0x80 then
-        local z = nearest_sprite_kind(s, 118) -- Princess Zelda
-        if z then pathfind_to(walkable_near(s, z[1], z[2])) end
-        nav_say("Zelda is in this cell. Reach her.")
-        return
-      end
-      if s.module == 0x09 then
-        -- Courtyard: (re)start the bushes-then-door waypoint chain.
-        chain_start(s, COURTYARD, 1)
-        return
-      end
-      head_for(s, CASTLE_AREA, 0x80, "Free Princess Zelda from her cell.")
-    end },
-  { key = "sanctuary",
-    goal = "Escort Zelda to the Sanctuary",
+    done = { 0x7EF3CC, 1 }, room = 0x80, find = "sprite", kind = 118,
+    chain = COURTYARD, leave = "Leave the room.", arrival = "Reach Zelda." },
+  { id = "sanct", goal = "Escort Zelda to the Sanctuary",
     hint = "Lead Zelda back up through the castle and out the hidden north passage to the Sanctuary.",
-    done = function(v) return v.progress >= 2 end,
-    act = function(s, v)
-      head_for(s, SANCTUARY_AREA, SANCTUARY_ROOM, "Escort Zelda to the Sanctuary.")
-    end },
+    done = { 0x7EF3C5, 2 }, room = SANCTUARY_ROOM, entrance_area = SANCTUARY_AREA,
+    leave = "Head for the Sanctuary." },
 }
 
--- The current intro beat: the first step not yet met, or nil once the intro is
--- over (Zelda delivered, progress >= 2) so the milestone spine takes over.
+-- The current intro goal: index, record, and count of the first goal not yet met,
+-- or nil once Zelda is delivered (progress >= 2) so the milestone spine takes over.
 intro_step = function(v)
   if v == nil or v.progress >= 2 then return nil end
-  for i, step in ipairs(INTRO) do
-    if not step.done(v) then return i, step, #INTRO end
+  for i, g in ipairs(GOALS) do
+    if not met(g.done) then return i, g, #GOALS end
   end
   return nil
 end
@@ -2441,10 +2466,10 @@ local kill_announced_room = nil
 -- intro beat while the intro runs, else the dungeon spine, else the overworld
 -- milestone. Each announces what it is heading for.
 local function nav_reaim(s, v)
-  chain_stop() -- each objective rebuilds its own chain; the zelda beat sets one
-  local _, step = intro_step(v)
-  if step then
-    step.act(s, v)
+  chain_stop() -- each goal rebuilds its own approach chain if it has one
+  local _, g = intro_step(v)
+  if g then
+    route_to(s, g)
   elseif s.module == 0x07 then
     advance_dungeon(s, v)
   else
@@ -2458,10 +2483,10 @@ end
 -- signature item, Big Key and boss are done, so grabbing the item re-aims at the
 -- Big Key); on the overworld, the current milestone.
 local function nav_signature(s, v)
-  local _, step = intro_step(v)
+  local _, g = intro_step(v)
   local obj
-  if step then
-    obj = "in:" .. step.key
+  if g then
+    obj = "in:" .. g.id
   elseif s.module == 0x07 then
     local nav = DUNGEON_NAV[s.dungeon_id]
     if nav then
