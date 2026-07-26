@@ -2458,9 +2458,9 @@ end
 -- movement within a module quietly. Global for MCP inspection.
 nav_active = false
 local nav_sig = nil
--- The dungeon room we last spoke a kill-room requirement for, so it is stated once
--- per room rather than every frame while enemies remain.
-local kill_announced_room = nil
+-- The "<room>:<objective>" we last announced, so a short-term room objective is
+-- stated once on entry rather than every frame while it is unmet.
+local room_obj_announced = nil
 
 -- Aim the guide at the current objective from wherever Link stands: the scripted
 -- intro beat while the intro runs, else the dungeon spine, else the overworld
@@ -2503,11 +2503,39 @@ local function nav_signature(s, v)
   return s.module .. ":" .. obj
 end
 
+-- ── Short-term room objectives ──────────────────────────────────────────────
+-- Some rooms gate progress on a task done in place — clearing the enemies to open
+-- the doors, and later the likes of pushing a block or lighting torches. Each is a
+-- data record: a detector for "present and unmet", the line to state on entering,
+-- and where to lead (a world pixel, or nothing). While one is active it overrides
+-- the quest goal; when it clears, the goal resumes. Kill-rooms are the first,
+-- built on the room-tag and live-enemy checks defined earlier.
+local ROOM_OBJECTIVES = {
+  { id = "kill",
+    cue = "Defeat all enemies to open the doors.",
+    active = function(s)
+      return kill_room(s) and (nearest_pending_enemy(s) ~= nil or overlords_pending())
+    end,
+    target = function(s)
+      local e = nearest_pending_enemy(s)
+      if e then return walkable_near(s, e[1], e[2]) end
+    end },
+}
+
+-- The active short-term objective in Link's current room, or nil. Dungeon-only.
+local function room_objective(s)
+  if s.module ~= 0x07 then return nil end
+  for _, o in ipairs(ROOM_OBJECTIVES) do
+    if o.active(s) then return o end
+  end
+  return nil
+end
+
 -- Turn the assist off and drop every route it was driving.
 local function nav_stop()
   nav_active = false
   nav_sig = nil
-  kill_announced_room = nil
+  room_obj_announced = nil
   chain_stop()
   room_route_stop()
   ow_route_stop()
@@ -2524,32 +2552,28 @@ nav_update = function(s)
     nav_sig = sig
     nav_reaim(s, v)
   end
-  -- Kill-room: if this room gates progress on defeating enemies and any remain,
-  -- state the requirement once and lead to the nearest one — the doors are locked,
-  -- so the ordinary door route would only mislead. The enemy retargets only when it
-  -- has moved a couple of tiles, to avoid replanning every frame; once close, the
-  -- combat beacon takes over the final approach. When the last enemy falls, re-aim
-  -- at the now-open door.
-  if kill_room(s) then
-    local e = nearest_pending_enemy(s)
-    if e or overlords_pending() then
-      if kill_announced_room ~= s.dungeon_room then
-        nav_say("Defeat all enemies to open the doors.")
-        kill_announced_room = s.dungeon_room
-      end
-      if e then
-        local gx, gy = walkable_near(s, e[1], e[2])
-        if pathfind_goal == nil
-          or math.abs(pathfind_goal[1] - (gx >> 3)) + math.abs(pathfind_goal[2] - (gy >> 3)) >= 2 then
-          route_set_goal(s, gx, gy)
-        end
-      end
-      return
+  -- Short-term room objective: while this room gates progress on a task done in
+  -- place (clearing its enemies, ...), it overrides the quest goal — stated once on
+  -- entry, leading to whatever satisfies it, which retargets only when it moves a
+  -- couple of tiles (once close, the combat beacon takes the final approach). When
+  -- it clears, re-aim at the quest goal (now, e.g., with the doors open).
+  local ro = room_objective(s)
+  if ro then
+    local key = s.dungeon_room .. ":" .. ro.id
+    if room_obj_announced ~= key then
+      nav_say(ro.cue)
+      room_obj_announced = key
     end
-    if kill_announced_room == s.dungeon_room then
-      kill_announced_room = nil
-      nav_reaim(s, v) -- cleared: resume routing, now that the doors have opened
+    local tx, ty = ro.target(s)
+    if tx and (pathfind_goal == nil
+      or math.abs(pathfind_goal[1] - (tx >> 3)) + math.abs(pathfind_goal[2] - (ty >> 3)) >= 2) then
+      route_set_goal(s, tx, ty)
     end
+    return
+  end
+  if room_obj_announced ~= nil then
+    room_obj_announced = nil
+    nav_reaim(s, v) -- objective cleared: resume the quest goal
   end
   -- Drive the waypoint chain. The chain never self-clears: it stays alive on its
   -- last waypoint, re-leading Link back if he strays, until the objective changes
