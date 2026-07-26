@@ -735,6 +735,42 @@ local function tile_passable(s, wtx, wty)
   return true
 end
 
+-- Every tile attribute Link physically collides with, taken from the game's own
+-- classifier (zelda3src tile_detect.c: the cases flagging solid collision, plus
+-- deep water and pits he cannot walk onto). Used to paint the map so the player
+-- feels every obstacle, not just a hand-picked few. Some tiles are solid only
+-- indoors (walls, shutter doors) and open ground outdoors, so the check takes the
+-- context. Rendered in a neutral obstacle grey where no feature colour applies.
+local COLLIDE_COLOR = 0x7C7C88
+local COLLIDE_ALWAYS, COLLIDE_INDOOR = {}, {}
+do
+  local function set(t, ids) for _, a in ipairs(ids) do t[a] = true end end
+  local function range(t, lo, hi) for a = lo, hi do t[a] = true end end
+  set(COLLIDE_ALWAYS, {
+    0x01, 0x02, 0x03, 0x26, 0x43, -- walls / standard collision
+    0x27,                          -- hookshot posts: logs, pegs
+    0x42, 0x44, 0x46,              -- gravestone, spike, hylian plaque
+    0x57, 0x63, 0x67,              -- bonk rocks, minigame chest, crystal peg
+    0x08, 0x0b, 0x4b,              -- deep water
+    0x20,                          -- pit / hole
+  })
+  range(COLLIDE_ALWAYS, 0x50, 0x5D) -- liftables (rocks/pots), chests
+  range(COLLIDE_ALWAYS, 0x70, 0x7F) -- manipulable pots / skulls
+  range(COLLIDE_ALWAYS, 0xB0, 0xBD) -- pit variants
+  range(COLLIDE_ALWAYS, 0xC0, 0xCF) -- torches
+  range(COLLIDE_ALWAYS, 0xF0, 0xFF) -- flaggable doors
+  set(COLLIDE_INDOOR, { 0x04 })     -- indoor wall
+  range(COLLIDE_INDOOR, 0x6C, 0x6F) -- solid indoors (open grass outdoors)
+  range(COLLIDE_INDOOR, 0x80, 0x8D) -- indoor collision
+  range(COLLIDE_INDOOR, 0x90, 0xAF) -- shutter / toggle doors
+end
+
+local function is_collidable(attr, indoors)
+  if attr == nil then return false end
+  if COLLIDE_ALWAYS[attr] then return true end
+  return indoors and COLLIDE_INDOOR[attr] == true
+end
+
 -- A* from one world tile to another, both inside Link's current 512-pixel (64
 -- tile) window. Returns a list of world tiles {tx, ty} from start to goal, or nil
 -- if unreachable / out of the window. 4-connected, Manhattan heuristic, binary
@@ -966,6 +1002,7 @@ pathfind_goal = nil   -- {tx, ty}
 local pathfind_wp = 1
 local pathfind_area = nil
 local pathfind_replan_in = 0
+local pathfind_arrival = nil -- what to say on reaching the goal, else a generic line
 
 local PATH_PITCH = 3.0         -- a high, distinct navigation tone
 local PATH_ALIGNED_PITCH = 3.4 -- brighter when Link faces the way to go
@@ -989,17 +1026,18 @@ local function pathfind_replan(s)
   return true
 end
 
--- Begin guiding Link to a world-pixel destination. Global for MCP / other cues.
-function pathfind_to(wx, wy)
+-- Begin guiding Link to a world-pixel destination. `arrival`, if given, is spoken
+-- on reaching it in place of the generic line. Global for MCP / other cues.
+function pathfind_to(wx, wy, arrival)
   local s = prev
   if s == nil or not in_play(s) then
     say("Cannot navigate now.", { priority = "navigation", category = "on-demand" })
     return false
   end
+  pathfind_arrival = arrival
   pathfind_goal = { wx >> 3, wy >> 3 }
   if pathfind_replan(s) then
     pathfind_active = true
-    say("Following the guide.", { priority = "navigation", category = "on-demand" })
     return true
   end
   pathfind_goal = nil
@@ -1013,6 +1051,7 @@ function pathfind_stop()
   pathfind_active = false
   pathfind_path = nil
   pathfind_goal = nil
+  pathfind_arrival = nil
   beacon.clear("path")
 end
 
@@ -1040,7 +1079,9 @@ local function pathfind_update(s)
     end
   end
   if pathfind_wp > #path then
-    say("You have arrived.", { priority = "navigation", category = "on-demand" })
+    if pathfind_arrival then
+      say(pathfind_arrival, { priority = "navigation", category = "on-demand" })
+    end
     pathfind_stop()
     return
   end
@@ -1312,7 +1353,6 @@ local function room_route_update(s)
     local it = nearest_item_sprite(s)
     local d = it or nearest_door_tile(s)
     if d then route_set_goal(s, d[1], d[2]) end
-    say("You've reached the room.", { priority = "navigation", category = "on-demand" })
     return
   end
   local path = room_path(s.dungeon_room, route_room)
@@ -1458,7 +1498,6 @@ local function ow_route_update(s)
     end
   end
   if ow_route_wp > #path then
-    say("You have arrived.", { priority = "navigation", category = "on-demand" })
     ow_route_stop(); beacon.clear("path"); return
   end
   if combat_engaged then beacon.clear("path"); return end -- hush the guide in a fight
@@ -1535,7 +1574,12 @@ function on_frame(frame)
   -- screens, intro (0x00) and attract mode (0x14), which the player never chose
   -- to enter. Announcing any of these is just noise.
   if now.module ~= was.module and not MODULE_SILENT[now.module] then
-    say(module_name(now.module), { priority = "navigation", category = "area" })
+    -- Only announce named modules; the unlisted transition modules Link passes
+    -- through (e.g. leaving a house) would otherwise be read out as "unknown".
+    local nm = module_name(now.module)
+    if nm ~= "unknown" then
+      say(nm, { priority = "navigation", category = "area" })
+    end
   end
 
   -- Light and dark world.
@@ -2173,6 +2217,18 @@ local CASTLE_ENTRANCE = {
   say = "Step north into the castle entrance.",
 }
 
+-- The overworld approach from Link's house to the castle entrance, as the player's
+-- own authored cues (mapped live by playing). The uncle beat drives this chain once
+-- Link is in the castle overworld area, so the guide speaks these cues rather than
+-- restating the objective. Each cue is an `arrival` line — spoken when Link reaches
+-- that spot (in place of the generic "you have arrived"), the guide leading there
+-- silently over the sonar path. The last waypoint is the castle-entrance bush.
+local UNCLE_APPROACH = {
+  { tx = 280, ty = 316, arrival = "South of the castle.", cue = true },
+  { tx = 304, ty = 213, arrival = "Pick up the bush." },
+  { tx = 304, ty = 212, arrival = "Enter the tunnel.", after_lift = true },
+}
+
 -- The courtyard crossing after Uncle, as an ordered waypoint sequence: with the
 -- sword in hand Link leaves the uncle room back out to the courtyard, cuts through
 -- the two bushes, then enters the castle proper by the door just south of him. The
@@ -2192,36 +2248,57 @@ local COURTYARD = {
 -- so the player sees where the route continues past the immediate target (the
 -- bushes, then on to the castle door). Cleared to nil when a plain single target
 -- is in play. Globals so eval_lua and the renderer can inspect them.
+-- A waypoint chain: an ordered list of {tx, ty, ...} world-tile waypoints. Two
+-- kinds:
+--   * hard targets — the guide routes to each in turn (bushes, a door, the
+--     entrance); nav_chain_i tracks the active one and the map draws the route
+--     white/pink to it.
+--   * cues (`cue = true`) — spoken when Link passes near, but never routed to, so
+--     a contextual "south of the castle" line doesn't drag the route off toward a
+--     spot Link is already beside. The route always aims at the next hard target.
+-- A waypoint's `arrival` line is spoken on reaching it (in place of a generic
+-- arrival); a `say` line, if present, is spoken as the guide sets off toward it.
 nav_chain = nil
 nav_chain_i = 1
-local CHAIN_REACH = 2 -- tiles; within this of the active waypoint, advance the chain
+local chain_cued = {} -- cue index -> announced, so each cue speaks once per chain
+local CHAIN_REACH = 2 -- tiles; within this of a hard target, count it reached
+local CUE_REACH = 10 -- tiles; within this of a cue, speak it
 
--- Aim the overworld route at the active chain waypoint and announce it.
+-- The first hard (non-cue) waypoint at or after index i; #chain+1 if none remain.
+local function chain_next_hard(chain, i)
+  while i <= #chain and chain[i].cue do i = i + 1 end
+  return i
+end
+
+-- Aim the overworld route at the active hard waypoint.
 local function chain_route(s)
   local wp = nav_chain and nav_chain[nav_chain_i]
   if not wp then return end
   ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
-  nav_say(wp.say)
+  if wp.say then nav_say(wp.say) end
 end
 
--- Begin a chain at waypoint `i` (default 1) and route toward it.
+-- Begin a chain, aiming at the first hard target at or after `i` (default 1).
 local function chain_start(s, chain, i)
   nav_chain = chain
-  nav_chain_i = i or 1
+  chain_cued = {}
+  nav_chain_i = chain_next_hard(chain, i or 1)
   chain_route(s)
 end
 
--- Step to the next waypoint and re-route; a no-op past the end.
+-- Step to the next hard target and re-route; leaves nav_chain_i past the end when
+-- none remain (the caller ends the chain).
 local function chain_advance(s)
-  if not nav_chain or nav_chain_i >= #nav_chain then return end
-  nav_chain_i = nav_chain_i + 1
-  chain_route(s)
+  if not nav_chain then return end
+  nav_chain_i = chain_next_hard(nav_chain, nav_chain_i + 1)
+  if nav_chain_i <= #nav_chain then chain_route(s) end
 end
 
 -- Drop the chain (a plain single-target route replaces it).
 local function chain_stop()
   nav_chain = nil
   nav_chain_i = 1
+  chain_cued = {}
 end
 
 -- Route toward an intro beat from wherever Link is. In a dungeon room the graph
@@ -2279,7 +2356,7 @@ local INTRO = {
     act = function(s, v)
       if s.module == 0x07 then
         local c = nearest_chest_tile(s)
-        if c then pathfind_to(c[1], c[2]); nav_say("Open the chest for the Lamp."); return end
+        if c then pathfind_to(c[1], c[2], "Open the chest."); nav_say("Get the lantern."); return end
       end
       head_for(s, CASTLE_AREA, 0x55, "Head into Hyrule Castle's hidden entrance for your uncle.", CASTLE_ENTRANCE)
     end },
@@ -2291,7 +2368,21 @@ local INTRO = {
       if s.module == 0x07 and s.dungeon_room == 0x55 then
         local u = nearest_sprite_kind(s, 115) -- Link's Uncle
         if u then pathfind_to(walkable_near(s, u[1], u[2])) end
-        nav_say("Your uncle is in this room. Reach him for the sword.")
+        nav_say("Find your uncle.")
+        return
+      end
+      if s.module == 0x07 and s.dungeon_room == 0x104 then
+        -- Just took the Lamp and still in Link's house: guide out the front door.
+        local d = exit_toward(s, 0, 1) or nearest_door_tile(s)
+        if d then pathfind_to(d[1], d[2]) end
+        nav_say("Leave the house.")
+        return
+      end
+      if s.module == 0x09 then
+        -- On the overworld: drive the authored approach chain (its arrival cues
+        -- carry the guidance) rather than restating the objective. Starts at the
+        -- house exit and leads across screens toward the castle entrance.
+        if nav_chain ~= UNCLE_APPROACH then chain_start(s, UNCLE_APPROACH, 1) end
         return
       end
       head_for(s, CASTLE_AREA, 0x55, "Reach your uncle for the sword.", CASTLE_ENTRANCE)
@@ -2435,13 +2526,44 @@ nav_update = function(s)
       nav_reaim(s, v) -- cleared: resume routing, now that the doors have opened
     end
   end
-  -- Advance the visual waypoint chain by proximity: once Link reaches the active
-  -- waypoint, step to the next and re-route (bushes → castle door). Only a chain in
-  -- play has this; nav_reaim clears it for plain single-target objectives.
-  if nav_chain and s.module == 0x09 and nav_chain_i < #nav_chain then
+  -- Drive the waypoint chain. The chain never self-clears: it stays alive on its
+  -- last waypoint, re-leading Link back if he strays, until the objective changes
+  -- and nav_reaim/chain_stop drops it (e.g. he enters the tunnel -> module 0x07).
+  -- That way the guide is never left idle mid-approach.
+  if nav_chain and s.module == 0x09 then
+    local ltx, lty = s.x >> 3, s.y >> 3
+    -- Soft cues: speak once as Link passes near, without ever routing to them.
+    for c, wp in ipairs(nav_chain) do
+      if wp.cue and not chain_cued[c]
+        and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CUE_REACH then
+        if wp.arrival then nav_say(wp.arrival) end
+        chain_cued[c] = true
+      end
+    end
+    -- Active hard target: on arrival speak its cue once (latched in chain_cued) and
+    -- step to the next hard target; on the last one, stay put and keep guiding. A
+    -- waypoint flagged `after_lift` holds its cue until Link has actually lifted the
+    -- object in front of him ($7E0309, the lift/carry state) — so at the tunnel the
+    -- "enter the tunnel" line lands after the bush is up, not on top of "pick it up".
     local wp = nav_chain[nav_chain_i]
-    if math.abs((s.x >> 3) - wp.tx) + math.abs((s.y >> 3) - wp.ty) <= CHAIN_REACH then
-      chain_advance(s)
+    if wp and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH
+      and (not wp.after_lift or mem.u8(0x7E0309) ~= 0) then
+      if not chain_cued[nav_chain_i] then
+        if wp.arrival then nav_say(wp.arrival) end
+        chain_cued[nav_chain_i] = true
+      end
+      local nxt = chain_next_hard(nav_chain, nav_chain_i + 1)
+      if nxt <= #nav_chain then
+        nav_chain_i = nxt
+        chain_route(s)
+      end
+    end
+    -- Keep the audio guide on the active waypoint even after the route follower
+    -- auto-stops on reaching it, so backing off re-leads there (no re-announcement).
+    wp = nav_chain[nav_chain_i]
+    if wp and ow_route_goal == nil
+      and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) > CHAIN_REACH then
+      ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
     end
   end
 end
@@ -2621,7 +2743,8 @@ function on_draw(canvas)
         for ty = 0, 63 do
           for tx = 0, 63 do
             local attr = string.byte(data, ty * 64 + tx + 1)
-            local color = TILE_COLOR[attr] or (attr == 0x04 and INDOOR_WALL_04 or nil)
+            local color = TILE_COLOR[attr] or (attr == 0x04 and INDOOR_WALL_04)
+              or (is_collidable(attr, true) and COLLIDE_COLOR) or nil
             if color then cell(tx, ty, color) end
           end
         end
@@ -2648,7 +2771,8 @@ function on_draw(canvas)
             local byte_off = (t >> 1) * 2
             if byte_off >= 0 and byte_off + 2 <= 8192 then
               local map16 = string.byte(ow, byte_off + 1) | (string.byte(ow, byte_off + 2) << 8)
-              local color = TILE_COLOR[ow_tile_attr(map16, ow_tx, py)]
+              local attr = ow_tile_attr(map16, ow_tx, py)
+              local color = TILE_COLOR[attr] or (is_collidable(attr, false) and COLLIDE_COLOR) or nil
               if color then cell(tx, ty, color) end
             end
           end

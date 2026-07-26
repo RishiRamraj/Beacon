@@ -415,7 +415,7 @@ fn alttp_pathfinder_routes_around_a_wall_to_a_door() {
 }
 
 #[test]
-fn alttp_pathfinder_announces_arrival_at_the_goal() {
+fn alttp_pathfinder_clears_the_guide_on_arrival() {
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -431,12 +431,13 @@ fn alttp_pathfinder_announces_arrival_at_the_goal() {
         guide.dy
     );
 
-    // Walk Link onto the door tile: the follower reports arrival and clears.
+    // Walk Link onto the door tile: the guide falls silent (no generic arrival
+    // chatter) and the beacon clears.
     let at_door = dungeon_frame((10, 15), (10, 15), &[]);
     let out = plugin.on_frame(&at_door, 2);
     assert!(
-        out.iter().any(|i| i.text.contains("arrived")),
-        "arrival is announced: {:?}",
+        !out.iter().any(|i| i.text.contains("arrived")),
+        "no generic arrival prompt: {:?}",
         out.iter().map(|i| &i.text).collect::<Vec<_>>()
     );
     assert!(
@@ -971,19 +972,51 @@ fn alttp_intro_guide_auto_advances_when_a_beat_completes() {
     let out = plugin.command("advance", &house(0));
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
-        texts.iter().any(|t| t.contains("Lamp")),
-        "engages on the Lamp beat: {texts:?}"
+        texts.iter().any(|t| t.to_lowercase().contains("lantern")),
+        "engages on the Lamp beat, cueing the lantern: {texts:?}"
     );
 
-    // Lamp now in hand: the next frame auto-advances to the door-out beat, no
-    // second key press.
+    // Lamp now in hand: the next frame auto-advances to the leave-the-house beat,
+    // no second key press.
     let out = plugin.on_frame(&house(1), 2);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
-        texts
-            .iter()
-            .any(|t| t.to_lowercase().contains("door") || t.to_lowercase().contains("uncle")),
+        texts.iter().any(|t| t.to_lowercase().contains("house")),
         "auto-advances to the next beat once the Lamp is taken: {texts:?}"
+    );
+}
+
+#[test]
+fn alttp_intro_chest_speaks_a_custom_arrival_cue() {
+    // The Lamp beat routes to the chest with a per-waypoint arrival cue: reaching it
+    // says "Open the chest." in place of the generic "You have arrived."
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let house = |link: (u16, u16)| -> Vec<u8> {
+        let mut ram = dungeon_frame(link, (32, 6), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x04); // room 0x0104
+        set(0x7E00A1, 0x01);
+        set(0x7EF34A, 0); // Lamp not yet taken -> still the Lamp beat
+        set(0x7F2000 + 20 * 64 + 20, 0x58); // chest tile at (20,20)
+        ram
+    };
+
+    plugin.on_frame(&house((32, 40)), 0);
+    plugin.on_frame(&house((32, 40)), 1);
+    plugin.command("advance", &house((32, 40))); // engage -> routes to the chest
+
+    // Reach the chest: the custom arrival cue replaces the generic line.
+    let out = plugin.on_frame(&house((20, 20)), 2);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Open the chest")),
+        "custom arrival cue at the chest: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("You have arrived")),
+        "generic arrival is replaced: {texts:?}"
     );
 }
 
