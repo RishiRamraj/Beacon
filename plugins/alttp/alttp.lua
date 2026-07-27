@@ -79,67 +79,6 @@ local function read_state()
   }
 end
 
--- The game's critical path, as an ordered spine of objectives. The local guide
--- (#28) navigates tactically within a room but has no idea where the player
--- *should* be heading; this is the strategic layer that gives it a destination.
--- Order and gating are cross-checked against a thorough walkthrough; each step's
--- `done` predicate reads the quest-progress bytes so the current objective is
--- inferred from the save, not tracked separately. `done` is evaluated in order
--- and the first unfinished step is the current one.
---
--- The three pendants collectively gate the Master Sword and individually mark
--- their dungeons (Courage=Eastern, Power=Desert, Wisdom=Hera); the seven
--- crystals likewise mark the Dark World dungeons. The intro spine (grab the
--- Lamp, reach Uncle, escort Zelda, beat Agahnim) rides on the $3C5 progress
--- byte, which the game advances 0->1->2->3 at exactly those beats.
-local MILESTONES = {
-  { goal = "Reach your uncle for the sword",
-    hint = "Leave the house and head north into Hyrule Castle. Grab the Lamp on the way, find your dying uncle for the sword and shield, then free Princess Zelda in the cell below.",
-    done = function(v) return v.progress >= 1 end },
-  { goal = "Escort Zelda to the Sanctuary",
-    hint = "Take Zelda up through the castle and out the hidden north passage to the Sanctuary. Then seek out Sahasrahla to begin the hunt for the three Pendants.",
-    done = function(v) return v.progress >= 2 end },
-  { goal = "Eastern Palace, the first pendant",
-    hint = "The big green palace at the far east edge of the Light World. Clear it for the Bow and the Pendant of Courage; Sahasrahla then gives you the Pegasus Boots.",
-    done = function(v) return v.pendants & 0x01 ~= 0 end },
-  { goal = "Desert Palace, the second pendant",
-    hint = "The Desert of Mystery in the southwest. Read the stone tablet there with the Book of Mudora to open the way in. Clear it for the Power Glove and the Pendant of Power.",
-    done = function(v) return v.pendants & 0x04 ~= 0 end },
-  { goal = "Tower of Hera, the third pendant",
-    hint = "The summit of Death Mountain, to the north. Take the Magic Mirror from the old man on the climb and the Moon Pearl inside. Clear it for the Pendant of Wisdom.",
-    done = function(v) return v.pendants & 0x02 ~= 0 end },
-  { goal = "Claim the Master Sword",
-    hint = "Deep in the Lost Woods, northwest. With all three Pendants, pull the Master Sword from its pedestal in the grove.",
-    done = function(v) return v.sword >= 2 end },
-  { goal = "Hyrule Castle Tower, defeat Agahnim",
-    hint = "The Master Sword breaks the barrier around the castle's front tower. Climb to the top and defeat Agahnim; the fight casts you into the Dark World.",
-    done = function(v) return v.progress >= 3 end },
-  { goal = "Palace of Darkness, the first crystal",
-    hint = "Northeast Dark World, near the Pyramid. You need the Moon Pearl to stay human and the Bow. Clear it for the Magic Hammer.",
-    done = function(v) return v.crystals & 0x02 ~= 0 end },
-  { goal = "Swamp Palace, the second crystal",
-    hint = "The southern Dark World swamp. First open the dam in the Light World swamp to lower the water, then Mirror across. Clear it for the Hookshot.",
-    done = function(v) return v.crystals & 0x10 ~= 0 end },
-  { goal = "Skull Woods, the third crystal",
-    hint = "The northwest Dark World woods, the counterpart of the Lost Woods. Clear it for the Fire Rod.",
-    done = function(v) return v.crystals & 0x40 ~= 0 end },
-  { goal = "Thieves' Town, the fourth crystal",
-    hint = "The Village of Outcasts in the west Dark World. Clear it for the Titan's Mitt, which lifts the heavy dark rocks gating the last three dungeons.",
-    done = function(v) return v.crystals & 0x20 ~= 0 end },
-  { goal = "Ice Palace, the fifth crystal",
-    hint = "The island in the far southeast Dark World. Clear it for the Blue Mail.",
-    done = function(v) return v.crystals & 0x04 ~= 0 end },
-  { goal = "Misery Mire, the sixth crystal",
-    hint = "The southwest Dark World. Stand at the entrance and use the Ether Medallion to open it. Clear it for the Cane of Somaria.",
-    done = function(v) return v.crystals & 0x01 ~= 0 end },
-  { goal = "Turtle Rock, the seventh crystal",
-    hint = "The summit of the Dark World Death Mountain, east. Use the Quake Medallion at the Light World Lake of Ill Omen to open it. Clear it for the Mirror Shield.",
-    done = function(v) return v.crystals & 0x08 ~= 0 end },
-  { goal = "Ganon's Tower, then Ganon",
-    hint = "With all seven Crystals the seal on Ganon's Tower, atop the Dark World Death Mountain, lifts. Beat Agahnim again at the top, then finish Ganon at the Pyramid with the Silver Arrows.",
-    done = function(_) return false end },
-}
-
 -- The quest-progress bytes the objective logic reads. Kept separate from
 -- read_state's moment-to-moment fields since it is only consulted on demand.
 local function read_progress()
@@ -151,15 +90,6 @@ local function read_progress()
     crystals = mem.u8(A.crystals.addr),
     sword = mem.u8(A.sword.addr),
   }
-end
-
--- The first unfinished milestone: the player's current objective. Returns its
--- index and record; the last is terminal (never "done") so this always yields.
-local function current_milestone(v)
-  for i, m in ipairs(MILESTONES) do
-    if not m.done(v) then return i, m end
-  end
-  return #MILESTONES, MILESTONES[#MILESTONES]
 end
 
 -- Whether the dungeon Link is standing in has already been cleared, keyed by the
@@ -1262,10 +1192,13 @@ end
 -- above door_toward, reference it here and it is assigned once door_toward exists.
 local hop_goal
 
--- Forward declaration: intro_step (the current scripted-intro beat) is defined
--- with the advance guide far below, but the objective readout above it consults
--- it too; both reference this upvalue, assigned once the chain is defined.
+-- Forward declaration: the goal engine (GOALS, current_goal, INTRO_GOALS, and the
+-- scripted-intro helper intro_step) is defined with the advance guide far below,
+-- but the objective readout above it consults these too; all reference these
+-- upvalues, assigned once the goal table is defined.
 local intro_step
+local current_goal
+local INTRO_GOALS
 
 -- Forward declaration: nav_update re-aims the navigation assist each frame while
 -- it is toggled on; on_frame (defined above the chain) drives it.
@@ -1830,9 +1763,10 @@ on_command("objective", function()
     )
     return
   end
-  local idx, m = current_milestone(v)
+  -- Past the intro: number the post-intro goals from 1 (the pendant hunt onward).
+  local idx, g, total = current_goal(v)
   say(
-    string.format("Objective %d of %d: %s. %s", idx, #MILESTONES, m.goal, m.hint),
+    string.format("Objective %d of %d: %s. %s", idx - INTRO_GOALS, total - INTRO_GOALS, g.goal, g.hint),
     { priority = "navigation", category = "on-demand" }
   )
 end)
@@ -1863,7 +1797,8 @@ end)
 --   * DUNGEON_NAV[dungeon_id] — each dungeon's signature item, Big Key and boss
 --     rooms, from a thorough walkthrough cross-checked against the randomizer's
 --     room table and the disassembly's underworld-room list.
---   * MILESTONE_AREA[milestone] — the overworld area each story step sends you to.
+--   * each GOAL's `area` — the overworld area that story step sends you to, from
+--     the researched entrance table.
 -- The pathfinder only navigates within the current room, and dungeon room ids
 -- stack floors in one grid, so a cross-room heading is a rough hint, not a path:
 -- the guide names the goal and points you the right way, guiding precisely only
@@ -1872,28 +1807,6 @@ end)
 local nav_say = function(text)
   say(text, { priority = "navigation", category = "on-demand" })
 end
-
--- Milestone index -> the overworld area its destination sits in. The area byte
--- carries the +0x40 Dark World offset, so it doubles as the world marker. From
--- the Archipelago randomizer entrance table, cross-checked against the
--- disassembly's overworld-area names (both agree on every value).
-local MILESTONE_AREA = {
-  [1]  = 0x1B, -- Hyrule Castle (reach uncle, free Zelda)
-  [2]  = 0x13, -- Sanctuary
-  [3]  = 0x1E, -- Eastern Palace
-  [4]  = 0x30, -- Desert Palace
-  [5]  = 0x03, -- Tower of Hera (west Death Mountain)
-  [6]  = 0x00, -- Master Sword pedestal (Lost Woods)
-  [7]  = 0x1B, -- Hyrule Castle Tower (Agahnim)
-  [8]  = 0x5E, -- Palace of Darkness
-  [9]  = 0x7B, -- Swamp Palace
-  [10] = 0x40, -- Skull Woods
-  [11] = 0x58, -- Thieves' Town
-  [12] = 0x75, -- Ice Palace
-  [13] = 0x70, -- Misery Mire
-  [14] = 0x47, -- Turtle Rock
-  [15] = 0x43, -- Ganon's Tower
-}
 
 -- Compass heading from one overworld area to another on the 8-wide area grid. An
 -- area byte's low three bits are the column, the next three the row; the 0x40 bit
@@ -2153,39 +2066,41 @@ local function advance_dungeon(s, v)
   end
 end
 
--- On the overworld: head for the current story milestone's destination — a
--- compass heading across the area grid toward it, and a note when it is in the
--- other world. If already in the target area, point at finding the entrance.
-local function advance_overworld(s, v)
-  room_route_stop() -- drop any stale dungeon route when out on the overworld
-  if v == nil then nav_say("No game state yet."); return end
-  local idx, m = current_milestone(v)
-  local area = MILESTONE_AREA[idx]
-  if area == nil then
-    nav_say(string.format("Next: %s. %s", m.goal, m.hint))
+-- Guide toward an overworld goal by its area (a field on the goal record): a
+-- compass heading and a note when it lies in the other world, a cross-screen route
+-- when it is elsewhere in this one, or "look for the entrance" once Link stands in
+-- it. Inside a dungeon or interior, head for the way out first. Shared by every
+-- overworld or dungeon-entrance goal via route_to.
+local function route_to_area(s, g)
+  local area = g.area
+  if s.module ~= 0x09 then
+    room_route_stop()
+    local d = nearest_door_tile(s)
+    if d then pathfind_to(d[1], d[2]) end
+    nav_say(string.format("Leave here, then on to %s.", g.goal))
     return
   end
-  -- If the destination is in the other world, we can't draw a path across the
-  -- mirror — name it and give a heading instead.
-  local other_world = (s.ow_screen & 0x40) ~= (area & 0x40)
-  if other_world then
+  room_route_stop() -- drop any stale dungeon route when out on the overworld
+  if area == nil then nav_say(string.format("Next: %s. %s", g.goal, g.hint)); return end
+  if (s.ow_screen & 0x40) ~= (area & 0x40) then
+    -- The destination is in the other world; we cannot draw a path across the
+    -- mirror, so name it and give a heading.
     local dir = area_heading(s.ow_screen, area)
     local which = (area & 0x40) ~= 0 and "Dark World" or "Light World"
-    nav_say(string.format("Next: %s. Head %s, then cross to the %s.", m.goal, dir or "toward it", which))
+    nav_say(string.format("Next: %s. Head %s, then cross to the %s.", g.goal, dir or "toward it", which))
     return
   end
-  -- Already on the destination screen (comparing parents, so a large 2x2 area
-  -- counts wherever Link stands in it): the objective is here, so stop routing
-  -- and hand off — the exact entrance is a per-objective waypoint, still to come.
   if ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
+    -- Already on the destination screen (parents compared, so a large 2x2 area
+    -- counts wherever Link stands in it): hand off — the exact entrance is a
+    -- per-goal waypoint, still to come.
     ow_route_stop()
-    nav_say(string.format("You're at %s. Look for the entrance.", m.goal))
+    nav_say(string.format("You're at %s. Look for the entrance.", g.goal))
     return
   end
-  -- Same world, elsewhere: draw a path onto the destination screen (nearest
-  -- reachable tile there), rather than a possibly-walled centre.
+  -- Same world, elsewhere: route onto the destination screen.
   ow_route_to_area(area)
-  nav_say(string.format("Routing to %s.", m.goal))
+  nav_say(string.format("Routing to %s.", g.goal))
 end
 
 -- ===========================================================================
@@ -2358,7 +2273,22 @@ end
 -- stranding the guide.
 
 -- A goal's completion test, as data: mem[addr] >= n.
-local function met(p) return mem.u8(p[1]) >= p[2] end
+-- A completion condition on a save byte: {addr, n} means mem[addr] >= n, or
+-- {addr, bit = mask} means the flag is set. A `done` may be one condition, or a
+-- list of them satisfied if ANY holds — used where the direct byte is not monotonic
+-- (Zelda's follower flag clears once she is delivered, so progress covers it).
+local function cond_met(c)
+  local val = mem.u8(c[1]) or 0
+  if c.bit then return (val & c.bit) ~= 0 end
+  return val >= c[2]
+end
+local function met(done)
+  if type(done[1]) == "table" then
+    for _, c in ipairs(done) do if cond_met(c) then return true end end
+    return false
+  end
+  return cond_met(done)
+end
 
 -- Resolve a goal to a world-pixel target on Link's current map: a dynamic lookup
 -- (the chest, a named sprite) or a fixed tile, else nil.
@@ -2374,12 +2304,13 @@ local function goal_point(s, g)
 end
 
 -- Put goal `g` onto Link's current map — the only place that branches on context,
--- shared by every goal. In its dungeon room, pathfind to the target; elsewhere in
--- the same dungeon, walk the room graph; not in the dungeon yet, take its authored
--- overworld approach chain (cues + the entrance to drop through), double back to a
--- home area if it names one (the Lamp), or — inside another interior — head for the
--- way out. Overworld goals route cross-screen or to the area.
-local function route_to(s, g)
+-- shared by every goal. A room goal (the intro): in its room, pathfind to the
+-- target; elsewhere in the same dungeon, walk the room graph; not in the dungeon
+-- yet, take its authored overworld approach chain, double back to a home area if it
+-- names one (the Lamp), or — inside another interior — head for the way out. A
+-- dungeon goal (the palaces): inside, run the dungeon's item→Big-Key→boss spine;
+-- outside, route to its overworld area. Any other goal is a plain overworld spot.
+local function route_to(s, g, v)
   if g.room then
     if s.module == 0x07 and s.dungeon_room == g.room then
       local p = goal_point(s, g)
@@ -2404,48 +2335,98 @@ local function route_to(s, g)
     end
     return
   end
-  -- An overworld goal.
-  if s.module == 0x09 and ow_parent(s.ow_screen & 0x3F) == ow_parent(g.area & 0x3F) then
-    if g.tx then ow_route_to(g.tx * 8 + 4, g.ty * 8 + 4) end
-    if g.lead then nav_say(g.lead) end
-  elseif s.module == 0x09 then
-    ow_route_to_area(g.area)
-    if g.lead then nav_say(g.lead) end
-  else
-    local d = exit_toward(s, 0, 1) or nearest_door_tile(s)
-    if d then pathfind_to(d[1], d[2]) end
-    if g.leave then nav_say(g.leave) end
+  if g.dungeon and s.module == 0x07 then
+    advance_dungeon(s, v) -- inside the target dungeon: item -> Big Key -> boss -> exit
+    return
   end
+  route_to_area(s, g) -- head toward the goal's overworld area (or pedestal)
 end
 
 -- The quest's opening beats, in order. Pure data; route_to interprets each.
 local GOALS = {
   { id = "lamp", goal = "Grab the Lamp from the chest",
     hint = "There is a treasure chest in your house holding the Lamp — take it for the dark passages ahead.",
-    done = { 0x7EF34A, 1 }, room = 0x104, find = "chest",
+    -- Held, or the intro is over (progress >= 2): the wider intro is bounded by
+    -- that byte, so the Lamp only nags — and backtracks — until then.
+    done = { { 0x7EF34A, 1 }, { 0x7EF3C5, 2 } }, room = 0x104, find = "chest",
     lead = "Get the lantern.", arrival = "Open the chest.",
     entrance_area = HOUSE_AREA, recover = "Go back for the lantern." },
   { id = "uncle", goal = "Reach your uncle for the sword",
     hint = "Enter Hyrule Castle by the hidden passage — the bush against the wall drops you in — and reach your dying uncle for the sword and shield.",
-    done = { 0x7EF359, 1 }, room = 0x55, find = "sprite", kind = 115,
+    done = { { 0x7EF359, 1 }, { 0x7EF3C5, 2 } }, room = 0x55, find = "sprite", kind = 115,
     chain = UNCLE_APPROACH, leave = "Leave the house.", arrival = "Find your uncle." },
   { id = "zelda", goal = "Free Princess Zelda",
     hint = "Descend through the castle to the dungeon below and free Princess Zelda from her cell.",
-    done = { 0x7EF3CC, 1 }, room = 0x80, find = "sprite", kind = 118,
+    -- Her follower flag clears once she is delivered, so progress >= 2 also counts.
+    done = { { 0x7EF3CC, 1 }, { 0x7EF3C5, 2 } }, room = 0x80, find = "sprite", kind = 118,
     chain = COURTYARD, leave = "Leave the room.", arrival = "Reach Zelda." },
   { id = "sanct", goal = "Escort Zelda to the Sanctuary",
     hint = "Lead Zelda back up through the castle and out the hidden north passage to the Sanctuary.",
     done = { 0x7EF3C5, 2 }, room = SANCTUARY_ROOM, entrance_area = SANCTUARY_AREA,
     leave = "Head for the Sanctuary." },
+  -- Post-intro: the pendant hunt, the Master Sword, Agahnim, the seven crystals,
+  -- then Ganon. Each `dungeon` goal routes to its overworld area, then runs the
+  -- item -> Big Key -> boss spine once Link is inside (route_to -> advance_dungeon);
+  -- the Master Sword is a plain overworld spot. Areas from the researched entrance
+  -- table (the old MILESTONE_AREA); done bits are the pendant/crystal bitfields.
+  { id = "eastern", goal = "Eastern Palace, the first pendant",
+    hint = "The big green palace at the far east edge of the Light World. Clear it for the Bow and the Pendant of Courage; Sahasrahla then gives you the Pegasus Boots.",
+    done = { 0x7EF374, bit = 0x01 }, area = 0x1E, dungeon = true },
+  { id = "desert", goal = "Desert Palace, the second pendant",
+    hint = "The Desert of Mystery in the southwest. Read the stone tablet there with the Book of Mudora to open the way in. Clear it for the Power Glove and the Pendant of Power.",
+    done = { 0x7EF374, bit = 0x04 }, area = 0x30, dungeon = true },
+  { id = "hera", goal = "Tower of Hera, the third pendant",
+    hint = "The summit of Death Mountain, to the north. Take the Magic Mirror from the old man on the climb and the Moon Pearl inside. Clear it for the Pendant of Wisdom.",
+    done = { 0x7EF374, bit = 0x02 }, area = 0x03, dungeon = true },
+  { id = "mastersword", goal = "Claim the Master Sword",
+    hint = "Deep in the Lost Woods, northwest. With all three Pendants, pull the Master Sword from its pedestal in the grove.",
+    done = { 0x7EF359, 2 }, area = 0x00 },
+  { id = "agahnim", goal = "Hyrule Castle Tower, defeat Agahnim",
+    hint = "The Master Sword breaks the barrier around the castle's front tower. Climb to the top and defeat Agahnim; the fight casts you into the Dark World.",
+    done = { 0x7EF3C5, 3 }, area = 0x1B, dungeon = true },
+  { id = "pod", goal = "Palace of Darkness, the first crystal",
+    hint = "Northeast Dark World, near the Pyramid. You need the Moon Pearl to stay human and the Bow. Clear it for the Magic Hammer.",
+    done = { 0x7EF37A, bit = 0x02 }, area = 0x5E, dungeon = true },
+  { id = "swamp", goal = "Swamp Palace, the second crystal",
+    hint = "The southern Dark World swamp. First open the dam in the Light World swamp to lower the water, then Mirror across. Clear it for the Hookshot.",
+    done = { 0x7EF37A, bit = 0x10 }, area = 0x7B, dungeon = true },
+  { id = "skull", goal = "Skull Woods, the third crystal",
+    hint = "The northwest Dark World woods, the counterpart of the Lost Woods. Clear it for the Fire Rod.",
+    done = { 0x7EF37A, bit = 0x40 }, area = 0x40, dungeon = true },
+  { id = "thieves", goal = "Thieves' Town, the fourth crystal",
+    hint = "The Village of Outcasts in the west Dark World. Clear it for the Titan's Mitt, which lifts the heavy dark rocks gating the last three dungeons.",
+    done = { 0x7EF37A, bit = 0x20 }, area = 0x58, dungeon = true },
+  { id = "ice", goal = "Ice Palace, the fifth crystal",
+    hint = "The island in the far southeast Dark World. Clear it for the Blue Mail.",
+    done = { 0x7EF37A, bit = 0x04 }, area = 0x75, dungeon = true },
+  { id = "mire", goal = "Misery Mire, the sixth crystal",
+    hint = "The southwest Dark World. Stand at the entrance and use the Ether Medallion to open it. Clear it for the Cane of Somaria.",
+    done = { 0x7EF37A, bit = 0x01 }, area = 0x70, dungeon = true },
+  { id = "turtle", goal = "Turtle Rock, the seventh crystal",
+    hint = "The summit of the Dark World Death Mountain, east. Use the Quake Medallion at the Light World Lake of Ill Omen to open it. Clear it for the Mirror Shield.",
+    done = { 0x7EF37A, bit = 0x08 }, area = 0x47, dungeon = true },
+  { id = "ganon", goal = "Ganon's Tower, then Ganon",
+    hint = "With all seven Crystals the seal on Ganon's Tower, atop the Dark World Death Mountain, lifts. Beat Agahnim again at the top, then finish Ganon at the Pyramid with the Silver Arrows.",
+    done = { 0x7EF3C5, 99 }, area = 0x43, dungeon = true }, -- terminal: never met
 }
 
--- The current intro goal: index, record, and count of the first goal not yet met,
--- or nil once Zelda is delivered (progress >= 2) so the milestone spine takes over.
-intro_step = function(v)
-  if v == nil or v.progress >= 2 then return nil end
+INTRO_GOALS = 4 -- the first four goals are the scripted intro
+
+-- The current quest goal: the first not yet met (Ganon is terminal, never met, so
+-- this always yields). Returns its index, record and the goal count.
+current_goal = function(v)
   for i, g in ipairs(GOALS) do
     if not met(g.done) then return i, g, #GOALS end
   end
+  return #GOALS, GOALS[#GOALS], #GOALS
+end
+
+-- The scripted-intro beat, for the objective readout only: the current goal while
+-- it is one of the opening four and Zelda is not yet delivered, else nil.
+intro_step = function(v)
+  if v == nil or v.progress >= 2 then return nil end
+  local i, g = current_goal(v)
+  if i <= INTRO_GOALS then return i, g, INTRO_GOALS end
   return nil
 end
 
@@ -2462,43 +2443,31 @@ local nav_sig = nil
 -- stated once on entry rather than every frame while it is unmet.
 local room_obj_announced = nil
 
--- Aim the guide at the current objective from wherever Link stands: the scripted
--- intro beat while the intro runs, else the dungeon spine, else the overworld
--- milestone. Each announces what it is heading for.
+-- Aim the guide at the current quest goal from wherever Link stands. One line now:
+-- the goal engine picks the first unmet goal and route_to puts it on Link's map,
+-- whether that is an intro room, a dungeon to clear, or an overworld destination.
 local function nav_reaim(s, v)
   chain_stop() -- each goal rebuilds its own approach chain if it has one
-  local _, g = intro_step(v)
-  if g then
-    route_to(s, g)
-  elseif s.module == 0x07 then
-    advance_dungeon(s, v)
-  else
-    advance_overworld(s, v)
-  end
+  local _, g = current_goal(v)
+  route_to(s, g, v)
 end
 
 -- What the guide should be heading toward, plus which module Link is in — so it
--- re-aims exactly when either changes and stays put otherwise. The objective is
--- the intro beat while the intro runs; in a dungeon, the spine phase (whether the
--- signature item, Big Key and boss are done, so grabbing the item re-aims at the
--- Big Key); on the overworld, the current milestone.
+-- re-aims exactly when either changes and stays put otherwise. The objective is the
+-- current goal's id; inside a dungeon it also carries the spine phase (whether the
+-- signature item, Big Key and boss are done), so grabbing the item re-aims at the
+-- Big Key without waiting for the goal itself to complete.
 local function nav_signature(s, v)
-  local _, g = intro_step(v)
-  local obj
-  if g then
-    obj = "in:" .. g.id
-  elseif s.module == 0x07 then
+  local _, g = current_goal(v)
+  local obj = g and g.id or "done"
+  if s.module == 0x07 then
     local nav = DUNGEON_NAV[s.dungeon_id]
     if nav then
       local a = nav.have() and 1 or 0
       local b = (mem.u8(nav.bk_byte) & nav.bk_bit) ~= 0 and 1 or 0
       local c = room_boss_beaten(nav.boss_room) and 1 or 0
-      obj = string.format("dg%d.%d%d%d", s.dungeon_id, a, b, c)
-    else
-      obj = "dg" .. s.dungeon_id
+      obj = string.format("%s.dg%d.%d%d%d", obj, s.dungeon_id, a, b, c)
     end
-  else
-    obj = "ms" .. (current_milestone(v))
   end
   return s.module .. ":" .. obj
 end
