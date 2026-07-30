@@ -338,19 +338,15 @@ impl Session {
     }
 
     /// Runs a plugin command against the current frame's memory and speaks the
-    /// answer immediately. Empty output falls back to an acknowledgement, so a
-    /// bound key is never silent.
+    /// answer immediately. Empty output stays silent — a command with nothing to
+    /// say says nothing, rather than a filler acknowledgement.
     pub fn run_command(&mut self, name: &str) {
         let intents = match self.emu.main_ram() {
             Ok(ram) => self.plugin.command(name, ram),
             Err(_) => Vec::new(),
         };
-        if intents.is_empty() {
-            self.say_now("Nothing to report.");
-        } else {
-            for intent in intents {
-                self.say_now(intent.text);
-            }
+        for intent in intents {
+            self.say_now(intent.text);
         }
     }
 
