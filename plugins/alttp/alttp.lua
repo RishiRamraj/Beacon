@@ -2175,11 +2175,32 @@ local chain_cued = {} -- cue index -> announced, so each cue speaks once per cha
 local chain_reached = {}
 local CHAIN_REACH = 2 -- tiles; within this of a hard target, count it reached
 local CUE_REACH = 10 -- tiles; within this of a cue, speak it
+-- On re-arm, a hard waypoint within this many tiles of Link counts as already
+-- reached: standing beside the castle door he came back through resumes there
+-- rather than routing back to an earlier waypoint. Kept well under the spacing
+-- between waypoints so it never skips one Link is only passing near.
+local RESUME_REACH = 12
 
 -- The first hard (non-cue) waypoint at or after index i; #chain+1 if none remain.
 local function chain_next_hard(chain, i)
   while i <= #chain and chain[i].cue do i = i + 1 end
   return i
+end
+
+-- Where a (re)armed chain should resume: no earlier than the first hard target,
+-- the furthest hard target already reached, or the furthest hard target Link is
+-- currently standing next to. The last covers coming back onto the map beside a
+-- mid-chain waypoint (the door) without ever having tripped the earlier ones.
+local function chain_resume_index(chain, s)
+  local idx = math.max(chain_next_hard(chain, 1), chain_reached[chain] or 0)
+  local ltx, lty = s.x >> 3, s.y >> 3
+  for i = idx, #chain do
+    if not chain[i].cue
+       and math.abs(ltx - chain[i].tx) + math.abs(lty - chain[i].ty) <= RESUME_REACH then
+      idx = i
+    end
+  end
+  return idx
 end
 
 -- Aim the overworld route at the active hard waypoint, recording it as the
@@ -2192,13 +2213,13 @@ local function chain_route(s)
   if wp.say then nav_say(wp.say) end
 end
 
--- Begin a chain, aiming at the first hard target at or after `i` (default 1), but
--- never behind the furthest point already reached on this chain — so resuming it
--- after a dungeon trip picks up where Link left off instead of at the start.
+-- Begin a chain. With an explicit `i`, aim at the first hard target at or after
+-- it; otherwise resume where Link left off (chain_resume_index) rather than at the
+-- start — so re-entering the map after a dungeon trip picks up mid-approach.
 local function chain_start(s, chain, i)
   nav_chain = chain
   chain_cued = {}
-  nav_chain_i = math.max(chain_next_hard(chain, i or 1), chain_reached[chain] or 0)
+  nav_chain_i = i and chain_next_hard(chain, i) or chain_resume_index(chain, s)
   chain_route(s)
 end
 
@@ -2323,7 +2344,7 @@ local function route_to(s, g, v)
       return
     end
     if g.chain and s.module == 0x09 then
-      if nav_chain ~= g.chain then chain_start(s, g.chain, 1) end
+      if nav_chain ~= g.chain then chain_start(s, g.chain) end
     elseif g.entrance_area and s.module == 0x09 then
       ow_route_to_area(g.entrance_area)
       if g.recover then nav_say(g.recover) end

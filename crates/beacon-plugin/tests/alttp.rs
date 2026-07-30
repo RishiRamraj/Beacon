@@ -1104,6 +1104,50 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
 }
 
 #[test]
+fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
+    // The player reaches the castle by the door directly, never touching the
+    // bushes, then backtracks out to the courtyard just south of the door. Arming
+    // the chain there must aim at the door (waypoint 2) — the one Link is standing
+    // next to — not send him back northeast to the bushes (waypoint 1).
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let frame = |x: u16, y: u16| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // overworld
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E008A, 0x1B); // Hyrule Castle area
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // progress < 2 -> Zelda beat
+        set(0x7E0022, (x & 0xFF) as u8);
+        set(0x7E0023, (x >> 8) as u8);
+        set(0x7E0020, (y & 0xFF) as u8);
+        set(0x7E0021, (y >> 8) as u8);
+        ram
+    };
+
+    // Link just south of the castle door (tile 256,225); the bushes are 26 tiles
+    // east — far outside the resume reach.
+    let at_door = frame(256 * 8, 232 * 8);
+    plugin.on_frame(&at_door, 0);
+    plugin.on_frame(&at_door, 1);
+    plugin.command("advance", &at_door); // engage -> arm the chain here
+
+    let armed = plugin
+        .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
+        .unwrap();
+    assert_eq!(
+        armed, "2,2",
+        "arms at the door Link is beside, not back at the bushes: {armed}"
+    );
+}
+
+#[test]
 fn alttp_kill_room_states_the_requirement_and_leads_to_the_enemy() {
     // A dungeon room whose header carries a kill tag (0x0A: clear the room to open
     // the doors) with an enemy still alive: the guide should state the requirement
