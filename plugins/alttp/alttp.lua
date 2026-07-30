@@ -2154,6 +2154,7 @@ local COURTYARD = {
   { tx = 72, ty = 415, room = 0x61, say = "Find Zelda." },
   { tx = 47, ty = 391, room = 0x60 },
   { tx = 56, ty = 335, room = 0x50 },
+  { tx = 95, ty = 11, room = 0x01 },
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
