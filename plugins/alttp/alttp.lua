@@ -228,15 +228,19 @@ for _, t in ipairs({ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
 end
 
 -- Rooms to treat as kill-rooms even though the game sets no clear-tag on them: a
--- guard here drops a small key for the locked exit, so the guide should lead Link
--- to defeat it first. Keyed by dungeon room id. (Only matters while enemies are
--- live — the objective also requires a pending enemy.)
-local FORCE_KILL_ROOMS = { [0x72] = true }
+-- guard there drops a small key for the locked exit, so the guide should lead Link
+-- to defeat it first. Keyed by dungeon room id; the value is `true` for the whole
+-- room, or `{ ty_max = <tile> }` to scope it to the top of a room the game reuses
+-- for two areas (0x72's upper guard/key/chest section is a kill-room, its lower
+-- section is not). Only matters while enemies are live — the objective also
+-- requires a pending enemy.
+local FORCE_KILL_ROOMS = { [0x72] = { ty_max = 480 } }
 
 -- Is Link in a dungeon room gated on defeating enemies?
 local function kill_room(s)
   if s.module ~= 0x07 then return false end
-  if FORCE_KILL_ROOMS[s.dungeon_room] then return true end
+  local fk = FORCE_KILL_ROOMS[s.dungeon_room]
+  if fk == true or (type(fk) == "table" and (s.y >> 3) <= fk.ty_max) then return true end
   return KILL_TAGS[mem.u8(KILL_HDR_TAG)] == true or KILL_TAGS[mem.u8(KILL_HDR_TAG + 1)] == true
 end
 
