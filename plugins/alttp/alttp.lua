@@ -3010,8 +3010,10 @@ function on_draw(canvas)
     -- A dungeon chain's waypoints in this room, drawn like the overworld chain:
     -- pink segments linking consecutive same-room waypoints, then a marker on each
     -- — the active one white, the rest pink — so a room with several points reads
-    -- as a path, not loose dots.
-    if s.module == 0x07 and nav_chain then
+    -- as a path, not loose dots. Hidden while a room sub-goal is active (clear the
+    -- guard, grab the key, open the chest): the exit waypoint only shows once the
+    -- chain is actually the guidance, not the moment Link walks in.
+    if s.module == 0x07 and nav_chain and room_objective(s) == nil then
       local prev_pt
       for i, wp in ipairs(nav_chain) do
         if wp.room == s.dungeon_room then
