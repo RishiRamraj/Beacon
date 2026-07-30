@@ -2176,6 +2176,7 @@ local COURTYARD = {
   { tx = 95, ty = 11, room = 0x01 },
   { tx = 159, ty = 472, room = 0x72 }, -- south-door exit (after the guard/key/chest)
   { tx = 149, ty = 507, room = 0x72 }, -- lower section of the same room id
+  { tx = 129, ty = 560, room = 0x82 },
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
