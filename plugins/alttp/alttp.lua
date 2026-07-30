@@ -2209,6 +2209,10 @@ local chain_reached = {}
 -- hop when Link crosses into the next room).
 local chain_said = {}
 local chain_last_room = nil
+-- Frames until the dungeon leg re-checks which of a room's waypoints Link can
+-- reach (a waypoint behind a locked door is unreachable until it opens). Throttled
+-- so the reachability probe — an A* per candidate — does not run every frame.
+local chain_probe_in = 0
 local CHAIN_REACH = 2 -- tiles; within this of a hard target, count it reached
 local CUE_REACH = 10 -- tiles; within this of a cue, speak it
 -- On re-arm, a hard waypoint within this many tiles of Link counts as already
@@ -2713,35 +2717,37 @@ nav_update = function(s)
         ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
       end
     else
-      -- Dungeon leg. The quest is one long linear route; in whatever room Link is
-      -- in, head to the LAST chain waypoint of that room — its exit toward the next.
-      -- That rule needs no progress bookkeeping and is backtrack-proof: re-enter any
-      -- room and it points at that room's last waypoint again. A room's sub-goal
-      -- (kill its enemies, ...) already took precedence above, before this block.
+      -- Dungeon leg. The quest is one long linear route; in whatever room Link is in,
+      -- head to the LAST chain waypoint of that room he can currently REACH. A
+      -- waypoint behind a locked door is unreachable, so the guide leads to the door
+      -- (an earlier waypoint) until it is opened, then advances to the one beyond.
+      -- No progress bookkeeping and backtrack-proof: any room re-aims at its last
+      -- reachable waypoint. A room's sub-goal already took precedence above.
       local reaimed = chain_last_room ~= s.dungeon_room
-      local target
-      for i, wp in ipairs(nav_chain) do
-        if wp.room == s.dungeon_room then target = i end -- last match in this room wins
-      end
-      if target then
-        local wp = nav_chain[target]
-        nav_chain_i = target
-        if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH then
-          if wp.arrival and not chain_cued[target] then nav_say(wp.arrival); chain_cued[target] = true end
-        else
-          if wp.say and not chain_said[target] then nav_say(wp.say); chain_said[target] = true end
-          -- Route to the nearest passable tile to the waypoint, not the marker tile
-          -- itself: a spot recorded from where Link stood often lands on his head / an
-          -- edge tile the pathfinder rejects as a goal, which left the route dead.
-          local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4)
-          local gtx, gty = gx >> 3, gy >> 3
-          -- Re-aim whenever the pathfinder is not actively following THAT tile: it
-          -- died / a plan failed (retry as Link moves, not stuck), the target changed,
-          -- or Link crossed rooms. route_set_goal is quiet — a retry costs only a
-          -- re-plan, never chatter.
-          local aimed = pathfind_goal and pathfind_goal[1] == gtx and pathfind_goal[2] == gty
-          if not pathfind_active or not aimed or reaimed then
-            route_set_goal(s, gx, gy)
+      chain_probe_in = chain_probe_in - 1
+      -- Keep following a still-valid route; re-pick the target only when not
+      -- following one, when Link changed rooms, or on the throttled re-probe (which
+      -- catches a door that just opened, making a further waypoint reachable).
+      local cur = nav_chain[nav_chain_i]
+      local following = pathfind_active and cur and cur.room == s.dungeon_room and not reaimed
+      if not following or chain_probe_in <= 0 then
+        chain_probe_in = 12
+        local pick, pgx, pgy
+        for i, wp in ipairs(nav_chain) do
+          if wp.room == s.dungeon_room then
+            local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4)
+            if plan_path(s, ltx, lty, gx >> 3, gy >> 3) then pick, pgx, pgy = i, gx, gy end
+          end
+        end
+        if pick then
+          nav_chain_i = pick
+          local wp = nav_chain[pick]
+          if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH then
+            if wp.arrival and not chain_cued[pick] then nav_say(wp.arrival); chain_cued[pick] = true end
+            pathfind_stop() -- arrived; go quiet until the next waypoint opens up
+          else
+            if wp.say and not chain_said[pick] then nav_say(wp.say); chain_said[pick] = true end
+            route_set_goal(s, pgx, pgy)
           end
         end
       end
