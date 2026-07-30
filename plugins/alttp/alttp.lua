@@ -2666,35 +2666,36 @@ nav_update = function(s)
         ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
       end
     else
-      -- Dungeon leg: purely the chained waypoints, no room-graph routing. Lead to
-      -- the first waypoint in Link's current room he has not reached yet (a room may
-      -- hold several, walked in order); once all of the room's are reached, re-lead
-      -- to the last so a backtrack still guides. Reaching one goes quiet until the
-      -- next — he walks through to the next room himself, where its waypoints take
-      -- over. A room with no waypoint gets no chain guidance. The chain stays armed
-      -- across the dungeon (room changes do not change the signature).
+      -- Dungeon leg. The quest is one long linear route; in whatever room Link is
+      -- in, head to the LAST chain waypoint of that room — its exit toward the next.
+      -- That rule needs no progress bookkeeping and is backtrack-proof: re-enter any
+      -- room and it points at that room's last waypoint again. A room's sub-goal
+      -- (kill its enemies, ...) already took precedence above, before this block.
       local reaimed = chain_last_room ~= s.dungeon_room
-      local first_unreached, last_here
+      local target
       for i, wp in ipairs(nav_chain) do
-        if wp.room == s.dungeon_room then
-          last_here = i
-          if first_unreached == nil and (chain_reached[nav_chain] or 0) < i then
-            first_unreached = i
-          end
-        end
+        if wp.room == s.dungeon_room then target = i end -- last match in this room wins
       end
-      local target = first_unreached or last_here
       if target then
         local wp = nav_chain[target]
         nav_chain_i = target
-        if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) > CHAIN_REACH then
-          if wp.say and first_unreached and not chain_said[target] then
-            nav_say(wp.say); chain_said[target] = true
-          end
-          if pathfind_goal == nil or reaimed then route_set_goal(s, wp.tx * 8 + 4, wp.ty * 8 + 4) end
-        else
+        if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH then
           if wp.arrival and not chain_cued[target] then nav_say(wp.arrival); chain_cued[target] = true end
-          chain_reached[nav_chain] = math.max(chain_reached[nav_chain] or 0, target)
+        else
+          if wp.say and not chain_said[target] then nav_say(wp.say); chain_said[target] = true end
+          -- Route to the nearest passable tile to the waypoint, not the marker tile
+          -- itself: a spot recorded from where Link stood often lands on his head / an
+          -- edge tile the pathfinder rejects as a goal, which left the route dead.
+          local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4)
+          local gtx, gty = gx >> 3, gy >> 3
+          -- Re-aim whenever the pathfinder is not actively following THAT tile: it
+          -- died / a plan failed (retry as Link moves, not stuck), the target changed,
+          -- or Link crossed rooms. route_set_goal is quiet — a retry costs only a
+          -- re-plan, never chatter.
+          local aimed = pathfind_goal and pathfind_goal[1] == gtx and pathfind_goal[2] == gty
+          if not pathfind_active or not aimed or reaimed then
+            route_set_goal(s, gx, gy)
+          end
         end
       end
       chain_last_room = s.dungeon_room
