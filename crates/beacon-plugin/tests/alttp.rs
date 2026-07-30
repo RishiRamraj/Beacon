@@ -289,7 +289,7 @@ fn alttp_an_unopened_chest_sounds_like_an_item_until_it_is_opened() {
         set(0x7E0023, 0x01); // Link X = 0x0100 -> tile 32
         set(0x7E0020, 0x00);
         set(0x7E0021, 0x01); // Link Y = 0x0100 -> tile 32
-        // Chest tile at (tx=39, ty=32), 7 tiles (56 px) east on the same row.
+                             // Chest tile at (tx=39, ty=32), 7 tiles (56 px) east on the same row.
         set(0x7F2000 + 32 * 64 + 39, if opened { 0x00 } else { 0x58 });
         ram
     };
@@ -1012,8 +1012,8 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "2,1",
-        "Zelda beat arms a 2-waypoint chain at index 1: {armed}"
+        armed, "3,1",
+        "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
     // Drive Link onto the first waypoint (282,225); a frame there advances to 2.
@@ -1098,7 +1098,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "2,2",
+        resumed, "3,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1142,8 +1142,57 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "2,2",
+        armed, "3,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
+    );
+}
+
+#[test]
+fn alttp_zelda_chain_leads_into_the_castle_and_hands_off_at_find_zelda() {
+    // The courtyard chain continues past the door into the castle: a dungeon
+    // waypoint in room 0x61 that says "Find Zelda". Reaching it retires the chain
+    // and hands back to the room-graph route on toward Zelda's cell.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Inside the castle, room 0x61, Zelda beat. `ltx,lty` are world tiles.
+    let frame = |ltx: u16, lty: u16| -> Vec<u8> {
+        let mut ram = dungeon_frame((ltx, lty), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x61); // dungeon room 0x61
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // progress < 2 -> Zelda beat
+        ram
+    };
+
+    // Just west of the waypoint (world tile 72,415): arming aims at it (index 3)
+    // and announces "Find Zelda".
+    let approach = frame(71, 415);
+    plugin.on_frame(&approach, 0);
+    plugin.on_frame(&approach, 1);
+    let out = plugin.command("advance", &approach);
+    assert_eq!(
+        plugin
+            .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
+            .unwrap(),
+        "3,3",
+        "arms the dungeon waypoint (index 3) when Link is in room 0x61"
+    );
+    assert!(
+        out.iter().any(|i| i.text.contains("Find Zelda")),
+        "announces the waypoint phrase: {:?}",
+        out.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+
+    // Standing on the waypoint retires the chain (handed off to the room route).
+    let at = frame(72, 415);
+    plugin.on_frame(&at, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain)", &at).unwrap(),
+        "nil",
+        "reaching Find Zelda retires the chain"
     );
 }
 
