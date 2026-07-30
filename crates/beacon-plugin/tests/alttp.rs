@@ -270,6 +270,56 @@ fn alttp_a_wall_muffles_an_enemys_beacon() {
     );
 }
 
+#[test]
+fn alttp_an_unopened_chest_sounds_like_an_item_until_it_is_opened() {
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // A dungeon frame with a chest tile 56 px east of Link and no sprites.
+    // `opened` swaps the chest tile-type (0x58) for plain floor (0x00), the way
+    // the game rewrites the tile once the chest has been looted.
+    let frame = |opened: bool| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x07); // dungeon module (uses the $7F2000 tile grid)
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E0022, 0x00);
+        set(0x7E0023, 0x01); // Link X = 0x0100 -> tile 32
+        set(0x7E0020, 0x00);
+        set(0x7E0021, 0x01); // Link Y = 0x0100 -> tile 32
+        // Chest tile at (tx=39, ty=32), 7 tiles (56 px) east on the same row.
+        set(0x7F2000 + 32 * 64 + 39, if opened { 0x00 } else { 0x58 });
+        ram
+    };
+
+    // Unopened: a "chest" beacon, panned east, at the item pitch, audible.
+    plugin.on_frame(&frame(false), 0);
+    plugin.on_frame(&frame(false), 1);
+    let b = plugin.beacons();
+    let chest = b
+        .iter()
+        .find(|b| b.id == "chest")
+        .expect("a beacon on the unopened chest");
+    assert!(chest.dx > 0.0, "panned east toward the chest");
+    assert!(
+        chest.volume > 0.0 && chest.volume <= 1.0,
+        "audible volume, got {}",
+        chest.volume
+    );
+    assert_eq!(chest.pitch, 2.0, "sounds at the item pitch");
+
+    // Opened: the tile-type changed, so the chest no longer matches and its
+    // beacon goes quiet.
+    plugin.on_frame(&frame(true), 2);
+    plugin.on_frame(&frame(true), 3);
+    assert!(
+        !plugin.beacons().iter().any(|b| b.id == "chest"),
+        "no chest beacon once it is opened"
+    );
+}
+
 // A dungeon frame: Link at (link_tx, link_ty), a door tile at (door_tx,
 // door_ty), and wall tiles, all in the $7F2000 collision grid. No sprites.
 fn dungeon_frame(link: (u16, u16), door: (u16, u16), walls: &[(u16, u16)]) -> Vec<u8> {

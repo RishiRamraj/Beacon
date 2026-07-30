@@ -1567,11 +1567,36 @@ function on_frame(frame)
         beacon.clear(name)
       end
     end
+
+    -- Treasure chests are tiles, not sprites, so they sit outside the class loop
+    -- above. Sound the nearest unopened chest with the item tone — a chest is a
+    -- pickup you walk to. An opened chest changes tile-type and no longer matches,
+    -- so the tone drops on its own the moment it is looted. Hushed in combat and
+    -- muffled behind a wall, exactly like the other pickup beacons.
+    local chest = nearest_chest_tile(now)
+    local ck = BEACON_KINDS.item
+    if chest and not combat_engaged then
+      local dx, dy = chest[1] - now.x, chest[2] - now.y
+      local dist = math.abs(dx) + math.abs(dy)
+      if dist < ck.range then
+        local t = 1 - dist / ck.range
+        local vol = math.min(1, t * t * (ck.gain or 1))
+        if sight_blocked(now, now.x, now.y, chest[1], chest[2]) then
+          vol = vol * BEACON_OCCLUDED_SCALE
+        end
+        beacon.set("chest", { x = dx, y = dy, pitch = ck.pitch, volume = vol, tremolo = ck.tremolo })
+      else
+        beacon.clear("chest")
+      end
+    else
+      beacon.clear("chest")
+    end
   else
     combat_engaged = false
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
       beacon.clear(name)
     end
+    beacon.clear("chest")
   end
 
   -- Remember where Link has been, for the explore command.
