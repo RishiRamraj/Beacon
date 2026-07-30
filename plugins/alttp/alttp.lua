@@ -2153,6 +2153,7 @@ local COURTYARD = {
   { tx = 256, ty = 225, say = "Step north into the castle." },
   { tx = 72, ty = 415, room = 0x61, say = "Find Zelda." },
   { tx = 52, ty = 415, room = 0x60 },
+  { tx = 46, ty = 392, room = 0x60 },
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
@@ -2665,26 +2666,35 @@ nav_update = function(s)
         ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
       end
     else
-      -- Dungeon leg: purely the chained waypoints, no room-graph routing. If Link's
-      -- current room has a chain waypoint, lead to its tile (re-leading even after a
-      -- backtrack). Once he is on it, announce and go quiet — he walks through to the
-      -- next room himself, where that room's waypoint takes over. A room with no
-      -- waypoint gets no chain guidance. The chain stays armed across the dungeon
-      -- (room changes do not change the signature), so the driver alone drives it.
+      -- Dungeon leg: purely the chained waypoints, no room-graph routing. Lead to
+      -- the first waypoint in Link's current room he has not reached yet (a room may
+      -- hold several, walked in order); once all of the room's are reached, re-lead
+      -- to the last so a backtrack still guides. Reaching one goes quiet until the
+      -- next — he walks through to the next room himself, where its waypoints take
+      -- over. A room with no waypoint gets no chain guidance. The chain stays armed
+      -- across the dungeon (room changes do not change the signature).
       local reaimed = chain_last_room ~= s.dungeon_room
-      local here_idx
+      local first_unreached, last_here
       for i, wp in ipairs(nav_chain) do
-        if wp.room == s.dungeon_room then here_idx = i; break end
+        if wp.room == s.dungeon_room then
+          last_here = i
+          if first_unreached == nil and (chain_reached[nav_chain] or 0) < i then
+            first_unreached = i
+          end
+        end
       end
-      if here_idx then
-        local wp = nav_chain[here_idx]
-        nav_chain_i = here_idx
+      local target = first_unreached or last_here
+      if target then
+        local wp = nav_chain[target]
+        nav_chain_i = target
         if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) > CHAIN_REACH then
-          if wp.say and not chain_said[here_idx] then nav_say(wp.say); chain_said[here_idx] = true end
+          if wp.say and first_unreached and not chain_said[target] then
+            nav_say(wp.say); chain_said[target] = true
+          end
           if pathfind_goal == nil or reaimed then route_set_goal(s, wp.tx * 8 + 4, wp.ty * 8 + 4) end
         else
-          if wp.arrival and not chain_cued[here_idx] then nav_say(wp.arrival); chain_cued[here_idx] = true end
-          chain_reached[nav_chain] = math.max(chain_reached[nav_chain] or 0, here_idx)
+          if wp.arrival and not chain_cued[target] then nav_say(wp.arrival); chain_cued[target] = true end
+          chain_reached[nav_chain] = math.max(chain_reached[nav_chain] or 0, target)
         end
       end
       chain_last_room = s.dungeon_room
