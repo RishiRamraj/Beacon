@@ -2168,6 +2168,11 @@ local COURTYARD = {
 nav_chain = nil
 nav_chain_i = 1
 local chain_cued = {} -- cue index -> announced, so each cue speaks once per chain
+-- Furthest hard index reached per chain (keyed by the chain table). Persists
+-- across a dungeon excursion — chain_stop drops the live chain but not this — so
+-- re-entering the map resumes at the waypoint Link had got to (the castle door he
+-- came back through), never restarting him at the first (the already-cut bushes).
+local chain_reached = {}
 local CHAIN_REACH = 2 -- tiles; within this of a hard target, count it reached
 local CUE_REACH = 10 -- tiles; within this of a cue, speak it
 
@@ -2177,19 +2182,23 @@ local function chain_next_hard(chain, i)
   return i
 end
 
--- Aim the overworld route at the active hard waypoint.
+-- Aim the overworld route at the active hard waypoint, recording it as the
+-- furthest reached so a later re-arm of this chain resumes here.
 local function chain_route(s)
   local wp = nav_chain and nav_chain[nav_chain_i]
   if not wp then return end
+  chain_reached[nav_chain] = math.max(chain_reached[nav_chain] or 0, nav_chain_i)
   ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
   if wp.say then nav_say(wp.say) end
 end
 
--- Begin a chain, aiming at the first hard target at or after `i` (default 1).
+-- Begin a chain, aiming at the first hard target at or after `i` (default 1), but
+-- never behind the furthest point already reached on this chain — so resuming it
+-- after a dungeon trip picks up where Link left off instead of at the start.
 local function chain_start(s, chain, i)
   nav_chain = chain
   chain_cued = {}
-  nav_chain_i = chain_next_hard(chain, i or 1)
+  nav_chain_i = math.max(chain_next_hard(chain, i or 1), chain_reached[chain] or 0)
   chain_route(s)
 end
 

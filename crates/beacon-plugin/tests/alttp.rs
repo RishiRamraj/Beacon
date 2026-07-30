@@ -1029,6 +1029,81 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
 }
 
 #[test]
+fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
+    // The bug: after Link went through the castle door (into the dungeon) and
+    // then backtracked out to the courtyard, re-arming the chain sent him all the
+    // way back to the first waypoint — the already-cut bushes. It must resume at
+    // the door he came back through.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Overworld, Zelda beat (same quest state as the courtyard-chain test).
+    let ow = |x: u16, y: u16| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // overworld module
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E008A, 0x1B); // Hyrule Castle area
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // progress < 2
+        set(0x7E0022, (x & 0xFF) as u8);
+        set(0x7E0023, (x >> 8) as u8);
+        set(0x7E0020, (y & 0xFF) as u8);
+        set(0x7E0021, (y >> 8) as u8);
+        ram
+    };
+    // A castle-interior frame (module 0x07) with the same quest state, in some
+    // room that is not Zelda's cell — the dip through the door.
+    let inside = || -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x07); // dungeon module
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3CC, 0);
+        set(0x7EF3C5, 0);
+        set(0x7E00A0, 0x00); // some room, not Zelda's cell (0x80)
+        set(0x7E0022, 0x00);
+        set(0x7E0023, 0x01);
+        set(0x7E0020, 0x00);
+        set(0x7E0021, 0x01);
+        ram
+    };
+
+    // Arm the chain, then drive Link onto the bushes so it advances to the door.
+    let away = ow(100 * 8, 100 * 8);
+    plugin.on_frame(&away, 0);
+    plugin.on_frame(&away, 1);
+    plugin.command("advance", &away); // engage -> arms chain at 1
+    plugin.on_frame(&ow(282 * 8, 225 * 8), 2); // reach wp1 -> advance to 2
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain_i)", &away).unwrap(),
+        "2",
+        "reaching the bushes advances to the door"
+    );
+
+    // Dip into the castle (module change re-aims and drops the chain), then come
+    // back out to the courtyard (module change re-arms it).
+    plugin.on_frame(&inside(), 3);
+    plugin.on_frame(&away, 4);
+
+    let resumed = plugin
+        .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
+        .unwrap();
+    assert_eq!(
+        resumed, "2,2",
+        "the chain resumes at the door, not back at the bushes: {resumed}"
+    );
+}
+
+#[test]
 fn alttp_kill_room_states_the_requirement_and_leads_to_the_enemy() {
     // A dungeon room whose header carries a kill tag (0x0A: clear the room to open
     // the doors) with an enemy still alive: the guide should state the requirement
