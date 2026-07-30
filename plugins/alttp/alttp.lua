@@ -2764,6 +2764,27 @@ function on_draw(canvas)
   canvas:line(fx + fw, fy, fx + fw, fy + fw, 0x304058)
 
   if in_play(s) then
+    -- The 512-pixel window's origin, in world pixels. On the overworld it is
+    -- centred on Link (tile-aligned) so he stays in the middle of the map as he
+    -- walks, instead of drifting to the edge of a fixed 512-pixel block. In a
+    -- dungeon it stays anchored to the room's block, which the WRAM collision grid
+    -- is indexed against, so the walls keep lining up.
+    local winx, winy
+    if s.module == 0x09 then
+      winx = (((s.x + 8) >> 3) - 32) * 8
+      winy = (((s.y + 8) >> 3) - 32) * 8
+    else
+      winx = s.x - s.x % 512
+      winy = s.y - s.y % 512
+    end
+    -- World pixel -> playfield screen coords, and whether a point is in the window.
+    local function plot(wpx, wpy)
+      return fx + (wpx - winx) * fw // 512, fy + (wpy - winy) * fw // 512
+    end
+    local function inwin(wpx, wpy)
+      return wpx >= winx and wpx < winx + 512 and wpy >= winy and wpy < winy + 512
+    end
+
     -- The area's real shape first, under everything else. A 64x64 tile grid maps
     -- exactly onto the 512-pixel playfield the sprites are plotted in (64 tiles x
     -- 8 px = 512), so walls and doors line up with the objects standing on them.
@@ -2799,8 +2820,8 @@ function on_draw(canvas)
       if mask_x ~= 0 and mask_y ~= 0 and #ow == 8192 then
         local base_y = mem.u16(0x7E0708)
         local base_x = mem.u16(0x7E070C)
-        local block_x = s.x - (s.x % 512)
-        local block_y = s.y - (s.y % 512)
+        local block_x = winx
+        local block_y = winy
         for ty = 0, 63 do
           for tx = 0, 63 do
             local px = block_x + tx * 8
@@ -2828,26 +2849,23 @@ function on_draw(canvas)
       minor = 0x40C0F0,
     }
     for _, sp in ipairs(sprites()) do
-      local px = fx + (sp.x % 512) * fw // 512
-      local py = fy + (sp.y % 512) * fw // 512
-      canvas:rect(px - 1, py - 1, 3, 3, class_col[category(sp)])
+      if inwin(sp.x, sp.y) then
+        local px, py = plot(sp.x, sp.y)
+        canvas:rect(px - 1, py - 1, 3, 3, class_col[category(sp)])
+      end
     end
 
     -- The active guidance route: the same corners the audio beacon leads through,
     -- drawn as a magenta line with a dot at each corner and the current target
     -- brightened — so the guide is legible on the map too.
     if pathfind_active and pathfind_path then
-      local function plot(wt)
-        return fx + ((wt[1] * 8 + 4) % 512) * fw // 512,
-               fy + ((wt[2] * 8 + 4) % 512) * fw // 512
-      end
       for i = 1, #pathfind_path - 1 do
-        local ax, ay = plot(pathfind_path[i])
-        local bx, by = plot(pathfind_path[i + 1])
+        local ax, ay = plot(pathfind_path[i][1] * 8 + 4, pathfind_path[i][2] * 8 + 4)
+        local bx, by = plot(pathfind_path[i + 1][1] * 8 + 4, pathfind_path[i + 1][2] * 8 + 4)
         canvas:line(ax, ay, bx, by, 0xFF60D0)
       end
       for i, wt in ipairs(pathfind_path) do
-        local px, py = plot(wt)
+        local px, py = plot(wt[1] * 8 + 4, wt[2] * 8 + 4)
         canvas:rect(px - 1, py - 1, 3, 3, (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
       end
     end
@@ -2856,9 +2874,8 @@ function on_draw(canvas)
     -- window; the segment leaving the screen edge points on toward the next area.
     -- World tiles are placed relative to Link's block, so off-window corners clip.
     if s.module == 0x09 and ow_route_goal and ow_route_path then
-      local bx, by = s.x - s.x % 512, s.y - s.y % 512
       local function oplot(tx, ty)
-        return fx + (tx * 8 + 4 - bx) * fw // 512, fy + (ty * 8 + 4 - by) * fw // 512
+        return plot(tx * 8 + 4, ty * 8 + 4)
       end
       -- The active route to the immediate target, string-pulled, in pink.
       for i = 1, #ow_route_path - 1 do
@@ -2890,9 +2907,8 @@ function on_draw(canvas)
     -- Dropped waypoint markers in this area, as small orange squares.
     local here = area_id(s)
     for _, m in pairs(markers) do
-      if m.area == here then
-        local px = fx + ((m.tx * 8 + 4) % 512) * fw // 512
-        local py = fy + ((m.ty * 8 + 4) % 512) * fw // 512
+      if m.area == here and inwin(m.tx * 8 + 4, m.ty * 8 + 4) then
+        local px, py = plot(m.tx * 8 + 4, m.ty * 8 + 4)
         canvas:rect(px - 1, py - 1, 3, 3, 0xFF9020)
       end
     end
@@ -2901,8 +2917,7 @@ function on_draw(canvas)
     -- 16x16 sprite's top-left corner — often up in a wall tile a row or two above
     -- where he visibly stands, so the raw point reads a tile off from the ground
     -- (and the bush/entrance) beneath his feet.
-    local lx = fx + ((s.x + 8) % 512) * fw // 512
-    local ly = fy + ((s.y + 8) % 512) * fw // 512
+    local lx, ly = plot(s.x + 8, s.y + 8)
     canvas:rect(lx - 2, ly - 2, 5, 5, 0x40FF60) -- Link
 
     -- A short line in the direction he faces.
