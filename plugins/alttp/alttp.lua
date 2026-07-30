@@ -244,6 +244,12 @@ end
 -- flagged out of the tally, matching Sprite_CheckIfRoomIsClear), or nil. Overlord
 -- spawners (0x14/0x18) also hold a room; reported separately since they have no
 -- position to walk to.
+-- Half-screen reach for the room-clear check: a sprite loaded from an adjacent
+-- room, or walled off in another part of the room, sits well outside the visible
+-- screen and must not hold the room "uncleared" forever. Kept generous (a bit
+-- past the 256x224 screen) so an on-screen enemy near a room edge still counts.
+local ENEMY_ONSCREEN = 144
+
 local function nearest_pending_enemy(s)
   local best, bd
   for i = 0, 15 do
@@ -251,8 +257,10 @@ local function nearest_pending_enemy(s)
     if st ~= nil and st ~= 0 and (mem.u8(SPRITE_FLAGS4 + i) & 0x40) == 0 then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
-      local d = math.abs(sx - s.x) + math.abs(sy - s.y)
-      if bd == nil or d < bd then best, bd = { sx, sy }, d end
+      if math.abs(sx - s.x) <= ENEMY_ONSCREEN and math.abs(sy - s.y) <= ENEMY_ONSCREEN then
+        local d = math.abs(sx - s.x) + math.abs(sy - s.y)
+        if bd == nil or d < bd then best, bd = { sx, sy }, d end
+      end
     end
   end
   return best
