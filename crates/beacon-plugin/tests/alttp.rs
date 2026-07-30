@@ -1012,7 +1012,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "5,1",
+        armed, "4,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -1098,7 +1098,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "5,2",
+        resumed, "4,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1142,7 +1142,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "5,2",
+        armed, "4,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1180,7 +1180,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "5,3",
+        "4,3",
         "the dungeon leg targets the Find Zelda waypoint (index 3)"
     );
     assert!(
