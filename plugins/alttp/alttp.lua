@@ -984,7 +984,8 @@ local function pathfind_update(s)
   pathfind_replan_in = pathfind_replan_in - 1
   if pathfind_area ~= area_id(s) or pathfind_replan_in <= 0 then
     if not pathfind_replan(s) then
-      say("Lost the path.", { priority = "navigation", category = "on-demand" })
+      -- Can't re-plan (e.g. Link stepped into a new room the chain hands off): stop
+      -- quietly and let the guide re-aim next frame, rather than announcing a loss.
       pathfind_stop()
       return
     end
