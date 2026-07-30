@@ -1189,27 +1189,25 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         out.iter().map(|i| &i.text).collect::<Vec<_>>()
     );
 
-    // Reaching Find Zelda advances the chain to the next dungeon waypoint (the
-    // silent room-0x60 point, index 4) — the chain is not retired mid-approach.
-    plugin.on_frame(&frame(0x61, 72, 415), 3); // reach it -> recorded
-    plugin.on_frame(&frame(0x61, 72, 415), 4); // driver steps to the next
-    assert_eq!(
+    // Reaching Find Zelda records it and goes quiet — no room-graph hop. The chain
+    // stays armed; only when Link crosses into room 0x60 does its waypoint (index
+    // 4) take over and lead to the silent point there.
+    plugin.on_frame(&frame(0x61, 72, 415), 3); // on Find Zelda -> recorded
+    assert!(
         plugin
-            .eval(
-                "return tostring(nav_chain) .. ',' .. nav_chain_i",
-                &frame(0x61, 72, 415)
-            )
+            .eval("return tostring(nav_chain)", &frame(0x61, 72, 415))
             .unwrap()
             .contains("table"),
-        true,
         "the chain stays armed after Find Zelda"
     );
+    plugin.on_frame(&frame(0x60, 48, 415), 4); // enter room 0x60
+    plugin.on_frame(&frame(0x60, 48, 415), 5);
     assert_eq!(
         plugin
-            .eval("return tostring(nav_chain_i)", &frame(0x61, 72, 415))
+            .eval("return tostring(nav_chain_i)", &frame(0x60, 48, 415))
             .unwrap(),
         "4",
-        "reaching Find Zelda advances to the room-0x60 waypoint"
+        "in room 0x60 the chain leads to that room's waypoint (index 4)"
     );
 }
 

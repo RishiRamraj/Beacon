@@ -2664,26 +2664,13 @@ nav_update = function(s)
         ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
       end
     else
-      -- Dungeon leg: position-based, so it re-leads even after a backtrack. Whenever
-      -- Link is in a room that has a chain waypoint, guide to that waypoint; once he
-      -- is on it, head for the next waypoint's room on the room graph. In a room with
-      -- no waypoint, hop toward the next unreached waypoint's room. The chain stays
-      -- armed across the whole dungeon (room changes do not change the signature), so
-      -- the driver alone advances it, and it never retires while the goal is active.
+      -- Dungeon leg: purely the chained waypoints, no room-graph routing. If Link's
+      -- current room has a chain waypoint, lead to its tile (re-leading even after a
+      -- backtrack). Once he is on it, announce and go quiet — he walks through to the
+      -- next room himself, where that room's waypoint takes over. A room with no
+      -- waypoint gets no chain guidance. The chain stays armed across the dungeon
+      -- (room changes do not change the signature), so the driver alone drives it.
       local reaimed = chain_last_room ~= s.dungeon_room
-      local function hop_to(room)
-        if pathfind_goal == nil or reaimed then
-          local path = room_path(s.dungeon_room, room)
-          local hop = path and path[1]
-          local exit = hop and hop_goal(s, s.dungeon_room, hop)
-          if exit then route_set_goal(s, exit[1], exit[2]) end
-        end
-      end
-      local function next_dungeon_after(i)
-        local j = i + 1
-        while j <= #nav_chain and (nav_chain[j].cue or nav_chain[j].room == nil) do j = j + 1 end
-        if j <= #nav_chain then return j end
-      end
       local here_idx
       for i, wp in ipairs(nav_chain) do
         if wp.room == s.dungeon_room then here_idx = i; break end
@@ -2697,17 +2684,7 @@ nav_update = function(s)
         else
           if wp.arrival and not chain_cued[here_idx] then nav_say(wp.arrival); chain_cued[here_idx] = true end
           chain_reached[nav_chain] = math.max(chain_reached[nav_chain] or 0, here_idx)
-          local nxt = next_dungeon_after(here_idx)
-          if nxt then nav_chain_i = nxt; hop_to(nav_chain[nxt].room) end
-          -- else: on the final waypoint — its spot is the destination, nothing more.
         end
-      else
-        -- Between waypoints: aim for the next unreached dungeon waypoint's room.
-        local target = (chain_reached[nav_chain] or 0) + 1
-        while target <= #nav_chain and (nav_chain[target].cue or nav_chain[target].room == nil) do
-          target = target + 1
-        end
-        if target <= #nav_chain then nav_chain_i = target; hop_to(nav_chain[target].room) end
       end
       chain_last_room = s.dungeon_room
     end
