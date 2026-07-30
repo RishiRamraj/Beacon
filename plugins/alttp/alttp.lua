@@ -138,12 +138,6 @@ local LOW_HEALTH_FRACTION = 0.3
 local prev = nil
 -- Latched so the warning fires on crossing the threshold, not every frame below.
 local low_health_warned = false
--- Whether each sprite slot's enemy has already been announced since it entered
--- the visible screen, so each entrance speaks once. Reset only once it has left
--- the screen — not merely ducked out of line of sight, so a patrolling enemy
--- weaving behind cover is not re-announced as a fresh enemy each time it steps
--- back into view (which sounds like a whole sequence of enemies).
-local announced = {}
 
 -- Sprite table: 16 slots of active objects and enemies. Addresses from the
 -- well-documented ALttP RAM map, verified against the running game. Each slot's
@@ -265,9 +259,6 @@ local function overlords_pending()
   return false
 end
 
--- An enemy is called out once it comes within this Manhattan distance — wider than
--- the visible screen, so a threat is named early, while it is still approaching.
-local ENEMY_ANNOUNCE_RANGE = 240
 -- Link is "in combat" while an enemy is this close. Then the guide hushes and only
 -- the nearest enemy sounds, so a fight is not cluttered by navigation or pickups.
 local COMBAT_RANGE = 48
@@ -1538,32 +1529,10 @@ function on_frame(frame)
     end
   end
 
-  -- Enemies. Announce each threat once, by name and direction, when it first comes
-  -- within range and into the clear ("Green Soldier, north-east."); the spatial
-  -- beacon then tracks the nearest. The latch is per sprite slot and clears only
-  -- when the slot empties — the enemy dies or despawns — so a foe weaving on and
-  -- off screen, or behind cover, is never announced a second time.
+  -- Enemies are never announced by name — only the spatial-audio beacon tracks
+  -- them (the tone below), so a fight is signalled purely by sound and direction.
   if in_play(now) then
     local list = sprites()
-
-    local active = {}
-    for _, sp in ipairs(list) do
-      active[sp.slot] = sp
-    end
-    for i = 0, 15 do
-      local sp = active[i]
-      if sp == nil or not is_enemy(sp) then
-        announced[i] = false -- slot free: a new enemy spawning here may speak
-      elseif not announced[i]
-          and sp.dist < ENEMY_ANNOUNCE_RANGE
-          and not sight_blocked(now, now.x, now.y, sp.x, sp.y) then
-        say(
-          string.format("%s, %s.", enemy_name(sp), direction(sp.dx, sp.dy)),
-          { priority = "interaction", category = "enemy" }
-        )
-        announced[i] = true
-      end
-    end
 
     -- Spatial-audio beacons: one tone per class, on the nearest sprite of that
     -- class within its reach. `list` is sorted nearest-first, so the first sprite
@@ -1602,9 +1571,6 @@ function on_frame(frame)
     combat_engaged = false
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
       beacon.clear(name)
-    end
-    for i = 0, 15 do
-      announced[i] = false
     end
   end
 

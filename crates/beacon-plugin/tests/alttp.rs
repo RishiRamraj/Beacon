@@ -51,7 +51,7 @@ fn alttp_scan_describes_a_nearby_sprite() {
 }
 
 #[test]
-fn alttp_enemy_announced_once_as_it_enters_the_screen() {
+fn alttp_enemy_is_tracked_by_beacon_and_never_spoken() {
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -79,15 +79,16 @@ fn alttp_enemy_announced_once_as_it_enters_the_screen() {
     };
     let soldier = |out: &[Intent]| {
         out.iter()
-            .any(|i| i.text.contains("Green Soldier") && i.text.contains("east"))
+            .any(|i| i.text.contains("Green Soldier") || i.text.contains("enemy"))
     };
 
     plugin.on_frame(&frame(200), 0); // prime prev; enemy off screen
+                                     // Enemies are never announced by name — the spatial beacon alone tracks them.
     assert!(
-        soldier(&plugin.on_frame(&frame(60), 1)),
-        "names the enemy and direction as it enters the screen"
+        !soldier(&plugin.on_frame(&frame(60), 1)),
+        "the enemy is not spoken as it enters the screen"
     );
-    // The nearest enemy also gets a spatial-audio beacon, panned toward it,
+    // The nearest enemy still gets a spatial-audio beacon, panned toward it,
     // louder the nearer it is.
     let b = plugin.beacons();
     let enemy = b
@@ -100,32 +101,12 @@ fn alttp_enemy_announced_once_as_it_enters_the_screen() {
         "audible volume, got {}",
         enemy.volume
     );
-    assert!(
-        !soldier(&plugin.on_frame(&frame(60), 2)),
-        "stays quiet while it remains on screen"
-    );
-    // Weaving off screen and back does NOT re-announce: a threat is named once,
-    // ever, as long as it stays alive (its sprite slot stays occupied).
-    plugin.on_frame(&frame(200), 3);
-    assert!(
-        !soldier(&plugin.on_frame(&frame(60), 4)),
-        "does not re-announce the same enemy on re-entry"
-    );
-    // The latch clears only when the slot empties (the enemy dies or despawns); a
-    // fresh enemy spawning in that freed slot is then announced.
-    let mut empty = frame(60);
-    empty[wram_offset(0x7E0DD0).unwrap()] = 0; // slot 0 inactive
-    plugin.on_frame(&empty, 5);
-    assert!(
-        soldier(&plugin.on_frame(&frame(60), 6)),
-        "a new enemy in the freed slot is announced"
-    );
 }
 
 #[test]
 fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
     // A sprite whose type is not in ENEMY_TYPES (75) but which has health is
-    // still a threat: detected via health, called "enemy", and given a beacon.
+    // still a threat: detected via health and given an enemy beacon.
     // This is the case the type-only classification missed.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
@@ -151,13 +132,7 @@ fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
         set(0x7E0E50, 4); // has health -> a threat
     }
     plugin.on_frame(&ram, 0); // prime prev (enemy already present)
-    let out = plugin.on_frame(&ram, 1);
-    assert!(
-        out.iter()
-            .any(|i| i.text.starts_with("enemy") && i.text.contains("east")),
-        "damageable sprite announced as enemy: {:?}",
-        out.iter().map(|i| &i.text).collect::<Vec<_>>()
-    );
+    plugin.on_frame(&ram, 1);
     let b = plugin.beacons();
     assert!(
         b.iter().any(|b| b.id == "enemy"),
@@ -236,7 +211,7 @@ fn alttp_scenery_only_sounds_within_a_block() {
 }
 
 #[test]
-fn alttp_a_wall_hides_an_enemy_from_the_callout_and_muffles_its_beacon() {
+fn alttp_a_wall_muffles_an_enemys_beacon() {
     let r = Registry::builtin();
 
     // A dungeon frame: Green Soldier (type 65) 60 px east of Link on the same
@@ -266,15 +241,10 @@ fn alttp_a_wall_hides_an_enemy_from_the_callout_and_muffles_its_beacon() {
         }
         ram
     };
-    let named = |out: &[Intent]| out.iter().any(|i| i.text.contains("Green Soldier"));
-
-    // Clear line of sight: announced, and beaconed at full strength.
+    // Clear line of sight: beaconed at full strength.
     let mut open = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     open.on_frame(&frame(false), 0);
-    assert!(
-        named(&open.on_frame(&frame(false), 1)),
-        "seen enemy is announced"
-    );
+    open.on_frame(&frame(false), 1);
     let open_vol = open
         .beacons()
         .iter()
@@ -282,14 +252,11 @@ fn alttp_a_wall_hides_an_enemy_from_the_callout_and_muffles_its_beacon() {
         .expect("a beacon with a clear line")
         .volume;
 
-    // Wall between: not announced, and the beacon is muffled — present but
-    // much quieter — rather than silenced.
+    // Wall between: the beacon is muffled — present but much quieter — rather
+    // than silenced.
     let mut walled = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     walled.on_frame(&frame(true), 0);
-    assert!(
-        !named(&walled.on_frame(&frame(true), 1)),
-        "an enemy behind a wall is not announced"
-    );
+    walled.on_frame(&frame(true), 1);
     let hidden = walled
         .beacons()
         .into_iter()
@@ -375,7 +342,10 @@ fn alttp_in_combat_the_guide_hushes_and_only_the_enemy_sounds() {
     plugin.on_frame(&calm, 0);
     plugin.command("pathfind", &calm);
     plugin.on_frame(&calm, 1);
-    assert!(path_beacon(&plugin).is_some(), "the guide sounds when clear");
+    assert!(
+        path_beacon(&plugin).is_some(),
+        "the guide sounds when clear"
+    );
     assert!(
         plugin.beacons().iter().any(|b| b.id == "item"),
         "the item sounds when clear"
@@ -384,9 +354,18 @@ fn alttp_in_combat_the_guide_hushes_and_only_the_enemy_sounds() {
     // Enemy steps into striking range: guide and item go silent, enemy remains.
     plugin.on_frame(&with_enemy(true), 2);
     let ids: Vec<String> = plugin.beacons().iter().map(|b| b.id.clone()).collect();
-    assert!(!ids.contains(&"path".to_string()), "guide hushes in combat: {ids:?}");
-    assert!(!ids.contains(&"item".to_string()), "item hushes in combat: {ids:?}");
-    assert!(ids.contains(&"enemy".to_string()), "the enemy still sounds: {ids:?}");
+    assert!(
+        !ids.contains(&"path".to_string()),
+        "guide hushes in combat: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"item".to_string()),
+        "item hushes in combat: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"enemy".to_string()),
+        "the enemy still sounds: {ids:?}"
+    );
 }
 
 #[test]
@@ -774,88 +753,6 @@ fn alttp_advance_in_a_cleared_dungeon_heads_for_the_exit() {
 }
 
 #[test]
-fn alttp_a_patrolling_enemy_weaving_out_of_sight_is_not_re_announced() {
-    // The bug: a patrolling enemy that ducks behind cover and steps back into
-    // line of sight was announced afresh each time it reappeared, so one enemy
-    // sounded like a whole sequence of them. It should announce once and stay
-    // quiet while it remains on screen, occluded or not.
-    let r = Registry::builtin();
-
-    // Same setup as the occlusion test: Green Soldier 60 px east, on the same
-    // row. `wall` toggles a wall tile on the line between Link and the enemy.
-    let frame = |wall: bool| -> Vec<u8> {
-        let mut ram = vec![0u8; 128 * 1024];
-        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
-        set(0x7E0010, 0x07); // dungeon module
-        set(0x7E0011, 0x00);
-        set(0x7EF36C, 24);
-        set(0x7EF36D, 24);
-        set(0x7E0022, 0x00);
-        set(0x7E0023, 0x01); // Link X = 0x0100
-        set(0x7E0020, 0x00);
-        set(0x7E0021, 0x01); // Link Y = 0x0100
-        let ex = 0x0100u16 + 60;
-        set(0x7E0DD0, 0x09);
-        set(0x7E0E20, 65); // Green Soldier
-        set(0x7E0D10, (ex & 0xFF) as u8);
-        set(0x7E0D30, (ex >> 8) as u8);
-        set(0x7E0D00, 0x00);
-        set(0x7E0D20, 0x01);
-        if wall {
-            set(0x7F2000 + 32 * 64 + 35, 0x01); // wall between them
-        }
-        ram
-    };
-    let named = |out: &[Intent]| out.iter().any(|i| i.text.contains("Green Soldier"));
-
-    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    plugin.on_frame(&frame(false), 0); // prime
-    assert!(
-        named(&plugin.on_frame(&frame(false), 1)),
-        "announced on entry"
-    );
-
-    // It steps behind cover (still on screen) and back out several times. Each
-    // reappearance must stay silent — it never left the screen.
-    for f in 2..20 {
-        let occluded = f % 2 == 0;
-        let out = plugin.on_frame(&frame(occluded), f);
-        assert!(
-            !named(&out),
-            "no re-announce while it only weaves in and out of sight (frame {f})"
-        );
-    }
-
-    // Even leaving the screen entirely does not re-arm it while it stays alive:
-    // an enemy is named once, ever. Move it far off screen, then back.
-    let off = {
-        let mut ram = frame(false);
-        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
-        let ex = 0x0100u16 + 400; // well off screen (|dx| > 128)
-        set(0x7E0D10, (ex & 0xFF) as u8);
-        set(0x7E0D30, (ex >> 8) as u8);
-        ram
-    };
-    for f in 20..60 {
-        plugin.on_frame(&off, f);
-    }
-    assert!(
-        !named(&plugin.on_frame(&frame(false), 60)),
-        "still silent on re-entry — the same enemy is announced only once"
-    );
-
-    // Only when it despawns (its slot empties) is the latch cleared, so a fresh
-    // enemy appearing in that slot speaks again.
-    let mut empty = frame(false);
-    empty[wram_offset(0x7E0DD0).unwrap()] = 0; // slot 0 inactive
-    plugin.on_frame(&empty, 60);
-    assert!(
-        named(&plugin.on_frame(&frame(false), 61)),
-        "a new enemy in the freed slot is announced"
-    );
-}
-
-#[test]
 fn alttp_objective_tracks_the_quest_from_the_progress_bytes() {
     // The strategic "objective" command reads the quest-progress save bytes
     // (progress $7EF3C5, pendants $7EF374, crystals $7EF37A, sword $7EF359)
@@ -923,7 +820,10 @@ fn alttp_intro_chain_walks_the_opening_beat_by_beat() {
     let mut lamp = vec![0u8; 128 * 1024];
     lamp[wram_offset(0x7EF34A).unwrap()] = 1; // Lamp
     let t = objective(&mut plugin, &lamp);
-    assert!(t.contains("step 2 of") && t.to_lowercase().contains("uncle"), "{t}");
+    assert!(
+        t.contains("step 2 of") && t.to_lowercase().contains("uncle"),
+        "{t}"
+    );
 
     // Sword taken from Uncle -> beat 3, freeing Zelda.
     let mut sword = lamp.clone();
@@ -942,7 +842,10 @@ fn alttp_intro_chain_walks_the_opening_beat_by_beat() {
     let mut delivered = vec![0u8; 128 * 1024];
     delivered[wram_offset(0x7EF3C5).unwrap()] = 2;
     let t = objective(&mut plugin, &delivered);
-    assert!(t.contains("Objective") && t.contains("Eastern Palace"), "{t}");
+    assert!(
+        t.contains("Objective") && t.contains("Eastern Palace"),
+        "{t}"
+    );
 }
 
 #[test]
@@ -1055,14 +958,24 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
     plugin.on_frame(&away, 1);
     plugin.command("advance", &away); // engage the guide -> arms the chain
 
-    let armed = plugin.eval("return #nav_chain .. ',' .. nav_chain_i", &away).unwrap();
-    assert_eq!(armed, "2,1", "Zelda beat arms a 2-waypoint chain at index 1: {armed}");
+    let armed = plugin
+        .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
+        .unwrap();
+    assert_eq!(
+        armed, "2,1",
+        "Zelda beat arms a 2-waypoint chain at index 1: {armed}"
+    );
 
     // Drive Link onto the first waypoint (282,225); a frame there advances to 2.
     let at_wp1 = frame(282 * 8, 225 * 8);
     plugin.on_frame(&at_wp1, 2);
-    let advanced = plugin.eval("return tostring(nav_chain_i)", &at_wp1).unwrap();
-    assert_eq!(advanced, "2", "reaching waypoint 1 advances the chain to 2: {advanced}");
+    let advanced = plugin
+        .eval("return tostring(nav_chain_i)", &at_wp1)
+        .unwrap();
+    assert_eq!(
+        advanced, "2",
+        "reaching waypoint 1 advances the chain to 2: {advanced}"
+    );
 }
 
 #[test]
@@ -1110,7 +1023,10 @@ fn alttp_kill_room_states_the_requirement_and_leads_to_the_enemy() {
             &live,
         )
         .unwrap();
-    assert_eq!(goal, "30,20", "leads to the enemy, not the locked door: {goal}");
+    assert_eq!(
+        goal, "30,20",
+        "leads to the enemy, not the locked door: {goal}"
+    );
 
     // Enemy defeated (slot inactive): the requirement is not repeated.
     let cleared = frame(0x00);
@@ -1144,14 +1060,22 @@ fn alttp_nav_assist_toggles_on_and_off_with_advance() {
 
     // First press: on, and it speaks some guidance (here, with no Lamp, the intro
     // turns Link back for the lantern).
-    let on: Vec<String> = plugin.command("advance", &ram).iter().map(|i| i.text.clone()).collect();
+    let on: Vec<String> = plugin
+        .command("advance", &ram)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
     assert!(
         !on.is_empty(),
         "first L turns the assist on and guides: {on:?}"
     );
 
     // Second press: off.
-    let off: Vec<String> = plugin.command("advance", &ram).iter().map(|i| i.text.clone()).collect();
+    let off: Vec<String> = plugin
+        .command("advance", &ram)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
     assert!(
         off.iter().any(|t| t.contains("Navigation off")),
         "second L turns the assist off: {off:?}"
