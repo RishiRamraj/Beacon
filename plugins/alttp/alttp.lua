@@ -2965,10 +2965,19 @@ function on_draw(canvas)
       end
     end
 
-    -- A dungeon chain's waypoint in this room, drawn like the overworld chain:
-    -- the active one white, any others pink — so the "Find Zelda" point shows on
-    -- the map the same way the courtyard waypoints do.
+    -- A dungeon chain's waypoints in this room, drawn like the overworld chain:
+    -- pink segments linking consecutive same-room waypoints, then a marker on each
+    -- — the active one white, the rest pink — so a room with several points reads
+    -- as a path, not loose dots.
     if s.module == 0x07 and nav_chain then
+      local prev_pt
+      for i, wp in ipairs(nav_chain) do
+        if wp.room == s.dungeon_room then
+          local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
+          if prev_pt then canvas:line(prev_pt[1], prev_pt[2], px, py, 0xFF60D0) end
+          prev_pt = { px, py }
+        end
+      end
       for i, wp in ipairs(nav_chain) do
         if wp.room == s.dungeon_room then
           local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
