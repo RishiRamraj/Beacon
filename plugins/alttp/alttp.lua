@@ -2381,21 +2381,25 @@ end
 -- dungeon goal (the palaces): inside, run the dungeon's item→Big-Key→boss spine;
 -- outside, route to its overworld area. Any other goal is a plain overworld spot.
 local function route_to(s, g, v)
+  -- An authored waypoint chain leads the goal: its overworld waypoints outside,
+  -- its dungeon waypoints room by room once inside (the driver advances through
+  -- them). While the chain is still leading, nothing else routes — a chain-only
+  -- goal (Zelda) relies on it end to end, with no room-graph "waypoint to Zelda".
+  if g.chain
+     and (s.module == 0x09 or (s.module == 0x07 and chain_dungeon_pending(g.chain))) then
+    if nav_chain ~= g.chain then chain_start(s, g.chain) end
+    return
+  end
+  -- The chain is consumed (or Link is inside with it fully walked). A chain-only
+  -- goal with no room/area/dungeon of its own has nothing left to do — the final
+  -- waypoint was the destination.
+  if g.chain and not (g.room or g.area or g.dungeon) then return end
   if g.room then
     -- In the target room: home on the sprite/tile there.
     if s.module == 0x07 and s.dungeon_room == g.room then
       local p = goal_point(s, g)
       if p then pathfind_to(p[1], p[2], g.arrival) end
       if g.lead then nav_say(g.lead) end
-      return
-    end
-    -- An approach chain leads along it: on the overworld its overworld waypoints,
-    -- and once inside, its dungeon waypoints room by room (the driver advances
-    -- through them). Only armed in a dungeon while unreached dungeon waypoints
-    -- remain; once they are all done it falls through to the room-graph route.
-    if g.chain
-       and (s.module == 0x09 or (s.module == 0x07 and chain_dungeon_pending(g.chain))) then
-      if nav_chain ~= g.chain then chain_start(s, g.chain) end
       return
     end
     -- Inside a dungeon with a known path to the goal room: route room-to-room.
@@ -2437,8 +2441,9 @@ local GOALS = {
   { id = "zelda", goal = "Free Princess Zelda",
     hint = "Descend through the castle to the dungeon below and free Princess Zelda from her cell.",
     -- Her follower flag clears once she is delivered, so progress >= 2 also counts.
-    done = { { 0x7EF3CC, 1 }, { 0x7EF3C5, 2 } }, room = 0x80, find = "sprite", kind = 118,
-    chain = COURTYARD, leave = "Leave the room.", arrival = "Reach Zelda." },
+    -- Chain-only: the authored waypoints lead all the way to her cell, so there is
+    -- no room-graph fallback (which was misrouting). done stays a data predicate.
+    done = { { 0x7EF3CC, 1 }, { 0x7EF3C5, 2 } }, chain = COURTYARD },
   { id = "sanct", goal = "Escort Zelda to the Sanctuary",
     hint = "Lead Zelda back up through the castle and out the hidden north passage to the Sanctuary.",
     done = { 0x7EF3C5, 2 }, room = SANCTUARY_ROOM, entrance_area = SANCTUARY_AREA,
@@ -2660,17 +2665,16 @@ nav_update = function(s)
     else
       -- Dungeon leg: lead to the first dungeon waypoint Link has not reached. When
       -- he is in its room, guide to the tile; otherwise hop toward that room on the
-      -- room graph. Reaching it advances to the next; once all are done, hand back
-      -- to the room-graph route toward the goal room. The chain stays armed across
-      -- rooms (no signature change between rooms), so the driver alone advances it.
+      -- room graph. Reaching it advances to the next; once all are reached the chain
+      -- is simply retired — its final waypoint is the destination, so there is no
+      -- room-graph hand-off. The chain stays armed across rooms (no signature change
+      -- between rooms), so the driver alone advances it.
       local target = (chain_reached[nav_chain] or 0) + 1
       while target <= #nav_chain and (nav_chain[target].cue or nav_chain[target].room == nil) do
         target = target + 1
       end
       if target > #nav_chain then
         chain_stop()
-        local _, g = current_goal(v)
-        if g and g.room then route_to_room(s, g.room, g.arrival or g.lead or "Continue on.") end
         return
       end
       nav_chain_i = target -- for the map render
