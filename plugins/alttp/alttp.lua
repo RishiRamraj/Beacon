@@ -2971,15 +2971,21 @@ function on_draw(canvas)
         -- Past the active target, draw the rest of the chain: straight pink
         -- segments linking the remaining waypoints, then a marker on each — the
         -- next waypoint white, the rest pink — so the route reads ahead (bushes →
-        -- castle door) and the immediate goal stands out.
+        -- castle door) and the immediate goal stands out. Only the overworld
+        -- waypoints are drawn here; a dungeon point (one with a `room`) belongs to
+        -- the map inside, not out on this screen.
         for i = nav_chain_i, #nav_chain - 1 do
-          local ax, ay = oplot(nav_chain[i].tx, nav_chain[i].ty)
-          local cx2, cy2 = oplot(nav_chain[i + 1].tx, nav_chain[i + 1].ty)
-          canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+          if nav_chain[i].room == nil and nav_chain[i + 1].room == nil then
+            local ax, ay = oplot(nav_chain[i].tx, nav_chain[i].ty)
+            local cx2, cy2 = oplot(nav_chain[i + 1].tx, nav_chain[i + 1].ty)
+            canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+          end
         end
         for i = nav_chain_i, #nav_chain do
-          local px, py = oplot(nav_chain[i].tx, nav_chain[i].ty)
-          canvas:rect(px - 1, py - 1, 3, 3, (i == nav_chain_i) and 0xFFFFFF or 0xFF60D0)
+          if nav_chain[i].room == nil then
+            local px, py = oplot(nav_chain[i].tx, nav_chain[i].ty)
+            canvas:rect(px - 1, py - 1, 3, 3, (i == nav_chain_i) and 0xFFFFFF or 0xFF60D0)
+          end
         end
       else
         -- A plain single target: mark its destination white.
