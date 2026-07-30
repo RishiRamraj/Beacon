@@ -227,9 +227,16 @@ for _, t in ipairs({ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
   KILL_TAGS[t] = true
 end
 
+-- Rooms to treat as kill-rooms even though the game sets no clear-tag on them: a
+-- guard here drops a small key for the locked exit, so the guide should lead Link
+-- to defeat it first. Keyed by dungeon room id. (Only matters while enemies are
+-- live — the objective also requires a pending enemy.)
+local FORCE_KILL_ROOMS = { [0x72] = true }
+
 -- Is Link in a dungeon room gated on defeating enemies?
 local function kill_room(s)
   if s.module ~= 0x07 then return false end
+  if FORCE_KILL_ROOMS[s.dungeon_room] then return true end
   return KILL_TAGS[mem.u8(KILL_HDR_TAG)] == true or KILL_TAGS[mem.u8(KILL_HDR_TAG + 1)] == true
 end
 
@@ -2576,6 +2583,30 @@ local ROOM_OBJECTIVES = {
     target = function(s)
       local e = nearest_pending_enemy(s)
       if e then return walkable_near(s, e[1], e[2]) end
+    end },
+  -- A loose key or big key dropped in the room (e.g. by a slain guard): fetch it
+  -- before moving on. Listed above the chest so, once both are out, the key first.
+  { id = "key",
+    cue = "Grab the key.",
+    active = function(s)
+      return nearest_sprite_kind(s, 228) ~= nil or nearest_sprite_kind(s, 229) ~= nil
+    end,
+    target = function(s)
+      local k = nearest_sprite_kind(s, 228) or nearest_sprite_kind(s, 229)
+      if k then return walkable_near(s, k[1], k[2]) end
+    end },
+  -- An unopened chest in the room — but only once the room is quiet, so the guide
+  -- does not send Link to the chest with a guard still on him (clear enemies, then
+  -- the key drop, then the chest).
+  { id = "chest",
+    cue = "Open the chest.",
+    active = function(s)
+      return nearest_chest_tile(s) ~= nil and nearest_pending_enemy(s) == nil
+        and not overlords_pending()
+    end,
+    target = function(s)
+      local c = nearest_chest_tile(s)
+      if c then return walkable_near(s, c[1], c[2]) end
     end },
 }
 

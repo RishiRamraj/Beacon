@@ -1272,6 +1272,68 @@ fn alttp_kill_room_states_the_requirement_and_leads_to_the_enemy() {
 }
 
 #[test]
+fn alttp_forced_kill_room_leads_to_the_guard_then_the_chest() {
+    // Room 0x72 carries no clear-tag but is force-treated as a kill-room (a guard
+    // there drops the key for the locked exit). The guide states the kill
+    // requirement and leads to the guard; once the room is quiet, the chest
+    // sub-goal takes over and points at the unopened chest.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Dungeon room 0x72, Link at (20,20), an unopened chest tile at (34,20), no
+    // kill tag. `alive` toggles the guard (Green Soldier at (30,20)).
+    let frame = |alive: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7EF3C5, 2);
+        set(0x7E040C, 0x02);
+        set(0x7E00A0, 0x72); // room 0x72 -> force kill room
+        set(0x7F2000 + 20 * 64 + 34, 0x58); // an unopened chest tile at (34,20)
+        set(0x7E0DD0, if alive { 0x09 } else { 0x00 }); // slot 0 state
+        set(0x7E0E20, 65); // Green Soldier
+        set(0x7E0D10, 0xF4); // x -> 244 -> tile 30
+        set(0x7E0D30, 0x00);
+        set(0x7E0D00, 0xA4); // y -> 164 -> tile 20
+        set(0x7E0D20, 0x00);
+        set(0x7E0E50, 4); // health
+        ram
+    };
+
+    // Guard alive: states the kill requirement and leads to it (tile 30,20), even
+    // though the room has no clear-tag.
+    let live = frame(true);
+    plugin.on_frame(&live, 0);
+    plugin.on_frame(&live, 1);
+    plugin.command("advance", &live);
+    let out = plugin.on_frame(&live, 2);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Defeat all enemies")),
+        "force kill-room states the requirement: {texts:?}"
+    );
+    assert_eq!(
+        plugin
+            .eval(
+                "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+                &live
+            )
+            .unwrap(),
+        "30,20",
+        "leads to the guard"
+    );
+
+    // Guard gone, room quiet: the chest sub-goal announces (on the first such
+    // frame) and takes over.
+    let clear = frame(false);
+    let out2 = plugin.on_frame(&clear, 3);
+    let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts2.iter().any(|t| t.contains("Open the chest")),
+        "then the chest sub-goal takes over: {texts2:?}"
+    );
+}
+
+#[test]
 fn alttp_nav_assist_toggles_on_and_off_with_advance() {
     // The navigation assist (L / advance) is a global on/off toggle: the first
     // press turns it on and aims at the objective, the second turns it off. It is
