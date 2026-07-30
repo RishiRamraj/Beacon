@@ -1012,7 +1012,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "3,1",
+        armed, "4,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -1098,7 +1098,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "3,2",
+        resumed, "4,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1142,24 +1142,25 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "3,2",
+        armed, "4,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
 
 #[test]
-fn alttp_zelda_chain_leads_into_the_castle_and_hands_off_at_find_zelda() {
-    // The courtyard chain continues past the door into the castle: a dungeon
-    // waypoint in room 0x61 that says "Find Zelda". Reaching it retires the chain
-    // and hands back to the room-graph route on toward Zelda's cell.
+fn alttp_zelda_chain_leads_through_the_castle_rooms() {
+    // The courtyard chain continues past the door into the castle as dungeon
+    // waypoints, room by room: Find Zelda in room 0x61, then a silent point in
+    // room 0x60. The chain stays armed across rooms; reaching one advances to the
+    // next without a signature change.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
-    // Inside the castle, room 0x61, Zelda beat. `ltx,lty` are world tiles.
-    let frame = |ltx: u16, lty: u16| -> Vec<u8> {
+    // Inside the castle, Zelda beat. `room` and world-tile `ltx,lty` vary.
+    let frame = |room: u8, ltx: u16, lty: u16| -> Vec<u8> {
         let mut ram = dungeon_frame((ltx, lty), (0, 0), &[]);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
-        set(0x7E00A0, 0x61); // dungeon room 0x61
+        set(0x7E00A0, room); // dungeon room
         set(0x7EF34A, 1); // Lamp
         set(0x7EF359, 1); // sword
         set(0x7EF3CC, 0); // Zelda not following
@@ -1167,18 +1168,20 @@ fn alttp_zelda_chain_leads_into_the_castle_and_hands_off_at_find_zelda() {
         ram
     };
 
-    // Just west of the waypoint (world tile 72,415): arming aims at it (index 3)
-    // and announces "Find Zelda".
-    let approach = frame(71, 415);
+    // In room 0x61, a few tiles west of the Find Zelda waypoint (72,415): engaging
+    // arms the chain, and the driver leads to that waypoint, announcing "Find
+    // Zelda" as it sets off.
+    let approach = frame(0x61, 65, 415);
     plugin.on_frame(&approach, 0);
     plugin.on_frame(&approach, 1);
-    let out = plugin.command("advance", &approach);
+    plugin.command("advance", &approach); // engage -> chain armed
+    let out = plugin.on_frame(&approach, 2); // driver leads to the waypoint
     assert_eq!(
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "3,3",
-        "arms the dungeon waypoint (index 3) when Link is in room 0x61"
+        "4,3",
+        "the dungeon leg targets the Find Zelda waypoint (index 3)"
     );
     assert!(
         out.iter().any(|i| i.text.contains("Find Zelda")),
@@ -1186,13 +1189,27 @@ fn alttp_zelda_chain_leads_into_the_castle_and_hands_off_at_find_zelda() {
         out.iter().map(|i| &i.text).collect::<Vec<_>>()
     );
 
-    // Standing on the waypoint retires the chain (handed off to the room route).
-    let at = frame(72, 415);
-    plugin.on_frame(&at, 2);
+    // Reaching Find Zelda advances the chain to the next dungeon waypoint (the
+    // silent room-0x60 point, index 4) — the chain is not retired mid-approach.
+    plugin.on_frame(&frame(0x61, 72, 415), 3); // reach it -> recorded
+    plugin.on_frame(&frame(0x61, 72, 415), 4); // driver steps to the next
     assert_eq!(
-        plugin.eval("return tostring(nav_chain)", &at).unwrap(),
-        "nil",
-        "reaching Find Zelda retires the chain"
+        plugin
+            .eval(
+                "return tostring(nav_chain) .. ',' .. nav_chain_i",
+                &frame(0x61, 72, 415)
+            )
+            .unwrap()
+            .contains("table"),
+        true,
+        "the chain stays armed after Find Zelda"
+    );
+    assert_eq!(
+        plugin
+            .eval("return tostring(nav_chain_i)", &frame(0x61, 72, 415))
+            .unwrap(),
+        "4",
+        "reaching Find Zelda advances to the room-0x60 waypoint"
     );
 }
 

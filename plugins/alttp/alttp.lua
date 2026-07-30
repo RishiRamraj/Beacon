@@ -2151,6 +2151,7 @@ local COURTYARD = {
   { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
   { tx = 256, ty = 225, say = "Step north into the castle." },
   { tx = 72, ty = 415, room = 0x61, say = "Find Zelda." },
+  { tx = 52, ty = 415, room = 0x60 },
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
@@ -2178,10 +2179,11 @@ local chain_cued = {} -- cue index -> announced, so each cue speaks once per cha
 -- re-entering the map resumes at the waypoint Link had got to (the castle door he
 -- came back through), never restarting him at the first (the already-cut bushes).
 local chain_reached = {}
--- Chains that have run to their last waypoint and handed off (a dungeon approach
--- that reached its final point and gave way to the room-graph route). Keeps a
--- completed chain from re-arming when the goal re-evaluates in the same room.
-local chain_done = {}
+-- Per-index latch for a waypoint's `say` line (spoken once as the guide sets off
+-- toward it), and the dungeon room the chain last aimed from (so it re-plans the
+-- hop when Link crosses into the next room).
+local chain_said = {}
+local chain_last_room = nil
 local CHAIN_REACH = 2 -- tiles; within this of a hard target, count it reached
 local CUE_REACH = 10 -- tiles; within this of a cue, speak it
 -- On re-arm, a hard waypoint within this many tiles of Link counts as already
@@ -2207,10 +2209,11 @@ local function chain_here(wp, s)
   return s.module == 0x09
 end
 
--- Whether a chain has a waypoint tied to the given dungeon room.
-local function chain_has_room(chain, room)
-  for _, wp in ipairs(chain) do
-    if wp.room == room then return true end
+-- Whether the chain still has a dungeon waypoint Link has not reached, so the
+-- dungeon leg should be (kept) armed rather than handed to the room-graph route.
+local function chain_dungeon_pending(chain)
+  for i, wp in ipairs(chain) do
+    if wp.room ~= nil and (chain_reached[chain] or 0) < i then return true end
   end
   return false
 end
@@ -2258,22 +2261,21 @@ local function chain_route(s)
   if wp.say then nav_say(wp.say) end
 end
 
--- Begin a chain. With an explicit `i`, aim at the first hard target at or after
--- it; otherwise resume where Link left off (chain_resume_index) rather than at the
--- start — so re-entering the map after a dungeon trip picks up mid-approach.
+-- Begin a chain. On the overworld, aim at the first hard target at or after `i`,
+-- or resume where Link left off (chain_resume_index) so re-entering the map picks
+-- up mid-approach. In a dungeon the driver leads to the first unreached dungeon
+-- waypoint, room by room, re-aiming each frame — so there is nothing to aim here.
 local function chain_start(s, chain, i)
   nav_chain = chain
   chain_cued = {}
-  nav_chain_i = i and chain_next_hard(chain, i) or chain_resume_index(chain, s)
-  chain_route(s)
-end
-
--- Step to the next hard target and re-route; leaves nav_chain_i past the end when
--- none remain (the caller ends the chain).
-local function chain_advance(s)
-  if not nav_chain then return end
-  nav_chain_i = chain_next_hard(nav_chain, nav_chain_i + 1)
-  if nav_chain_i <= #nav_chain then chain_route(s) end
+  chain_said = {}
+  chain_last_room = nil
+  if s.module == 0x09 then
+    nav_chain_i = i and chain_next_hard(chain, i) or chain_resume_index(chain, s)
+    chain_route(s)
+  else
+    nav_chain_i = chain_next_hard(chain, 1)
+  end
 end
 
 -- Drop the chain (a plain single-target route replaces it).
@@ -2281,6 +2283,8 @@ local function chain_stop()
   nav_chain = nil
   nav_chain_i = 1
   chain_cued = {}
+  chain_said = {}
+  chain_last_room = nil
 end
 
 -- Route toward an intro beat from wherever Link is. In a dungeon room the graph
@@ -2385,13 +2389,12 @@ local function route_to(s, g, v)
       if g.lead then nav_say(g.lead) end
       return
     end
-    -- An approach chain covering where Link is now — the overworld waypoints, or a
-    -- dungeon waypoint for the current room — leads along it. A chain that has run
-    -- to its end in this room and handed off to the room route is not re-armed here
-    -- (but stays available again on the overworld or in another room).
-    local done_here = s.module == 0x07 and chain_done[g.chain] == s.dungeon_room
-    if g.chain and not done_here
-       and (s.module == 0x09 or (s.module == 0x07 and chain_has_room(g.chain, s.dungeon_room))) then
+    -- An approach chain leads along it: on the overworld its overworld waypoints,
+    -- and once inside, its dungeon waypoints room by room (the driver advances
+    -- through them). Only armed in a dungeon while unreached dungeon waypoints
+    -- remain; once they are all done it falls through to the room-graph route.
+    if g.chain
+       and (s.module == 0x09 or (s.module == 0x07 and chain_dungeon_pending(g.chain))) then
       if nav_chain ~= g.chain then chain_start(s, g.chain) end
       return
     end
@@ -2620,14 +2623,10 @@ nav_update = function(s)
     room_obj_announced = nil
     nav_reaim(s, v) -- objective cleared: resume the quest goal
   end
-  -- Drive the waypoint chain, on the overworld or inside a dungeon. An overworld
-  -- chain stays alive on its last waypoint, re-leading Link if he strays, until the
-  -- objective changes and nav_reaim/chain_stop drops it. A dungeon chain instead
-  -- ends when its final waypoint is reached and hands back to the room-graph route
-  -- (see below), so the guide is never left idle mid-approach.
+  -- Drive the waypoint chain. Two legs, by module:
   if nav_chain and in_play(s) then
     local ltx, lty = s.x >> 3, s.y >> 3
-    -- Soft cues: speak once as Link passes near, without ever routing to them.
+    -- Soft cues (overworld): speak once as Link passes near, never routed to.
     for c, wp in ipairs(nav_chain) do
       if wp.cue and chain_here(wp, s) and not chain_cued[c]
         and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CUE_REACH then
@@ -2635,46 +2634,70 @@ nav_update = function(s)
         chain_cued[c] = true
       end
     end
-    -- Active hard target: on arrival speak its cue once (latched in chain_cued) and
-    -- step to the next hard target routable from here (skipping any that belong to
-    -- the other side of a module boundary). A waypoint flagged `after_lift` holds
-    -- its cue until Link has actually lifted the object in front of him ($7E0309,
-    -- the lift/carry state) — so at the tunnel the "enter the tunnel" line lands
-    -- after the bush is up, not on top of "pick it up".
-    local wp = nav_chain[nav_chain_i]
-    if wp and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH
-      and (not wp.after_lift or mem.u8(0x7E0309) ~= 0) then
-      if not chain_cued[nav_chain_i] then
-        if wp.arrival then nav_say(wp.arrival) end
-        chain_cued[nav_chain_i] = true
+    if s.module == 0x09 then
+      -- Overworld leg: advance by proximity, staying alive on the last overworld
+      -- waypoint (re-leading if Link strays) so the guide is never idle. Dungeon
+      -- waypoints belong to the inside — they are not advanced to out here.
+      local wp = nav_chain[nav_chain_i]
+      if wp and not wp.room and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH
+        and (not wp.after_lift or mem.u8(0x7E0309) ~= 0) then
+        if not chain_cued[nav_chain_i] then
+          if wp.arrival then nav_say(wp.arrival) end
+          chain_cued[nav_chain_i] = true
+        end
+        chain_reached[nav_chain] = math.max(chain_reached[nav_chain] or 0, nav_chain_i)
+        local nxt = chain_next_hard(nav_chain, nav_chain_i + 1)
+        if nxt <= #nav_chain and not nav_chain[nxt].room then
+          nav_chain_i = nxt
+          chain_route(s)
+        end
       end
-      local nxt = nav_chain_i + 1
-      while nxt <= #nav_chain and (nav_chain[nxt].cue or not chain_here(nav_chain[nxt], s)) do
-        nxt = nxt + 1
+      wp = nav_chain[nav_chain_i]
+      if wp and not wp.room and ow_route_goal == nil
+        and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) > CHAIN_REACH then
+        ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
       end
-      if nxt <= #nav_chain then
-        nav_chain_i = nxt
-        chain_route(s)
-      elseif wp.room then
-        -- Last waypoint of a dungeon approach reached: retire the chain (marked done
-        -- for this room so it will not immediately re-arm here) and let the
-        -- room-graph route carry on to the goal room (e.g. on to Zelda's cell).
-        chain_done[nav_chain] = s.dungeon_room
+    else
+      -- Dungeon leg: lead to the first dungeon waypoint Link has not reached. When
+      -- he is in its room, guide to the tile; otherwise hop toward that room on the
+      -- room graph. Reaching it advances to the next; once all are done, hand back
+      -- to the room-graph route toward the goal room. The chain stays armed across
+      -- rooms (no signature change between rooms), so the driver alone advances it.
+      local target = (chain_reached[nav_chain] or 0) + 1
+      while target <= #nav_chain and (nav_chain[target].cue or nav_chain[target].room == nil) do
+        target = target + 1
+      end
+      if target > #nav_chain then
         chain_stop()
-        nav_reaim(s, v)
+        local _, g = current_goal(v)
+        if g and g.room then route_to_room(s, g.room, g.arrival or g.lead or "Continue on.") end
         return
       end
-    end
-    -- Keep the audio guide on the active waypoint even after the follower auto-stops
-    -- on reaching it, so backing off re-leads there (no re-announcement). The
-    -- follower is the pathfinder in a dungeon, the cross-screen router outside.
-    wp = nav_chain[nav_chain_i]
-    if wp then
-      local idle
-      if s.module == 0x07 then idle = pathfind_goal == nil else idle = ow_route_goal == nil end
-      if idle and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) > CHAIN_REACH then
-        chain_aim(s)
+      nav_chain_i = target -- for the map render
+      local wp = nav_chain[target]
+      local reaimed = chain_last_room ~= s.dungeon_room
+      if s.dungeon_room == wp.room then
+        if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH then
+          if wp.arrival and not chain_cued[target] then
+            nav_say(wp.arrival); chain_cued[target] = true
+          end
+          chain_reached[nav_chain] = target -- next frame steps to the following one
+        else
+          if wp.say and not chain_said[target] then nav_say(wp.say); chain_said[target] = true end
+          if pathfind_goal == nil or reaimed then
+            route_set_goal(s, wp.tx * 8 + 4, wp.ty * 8 + 4)
+          end
+        end
+      else
+        if wp.say and not chain_said[target] then nav_say(wp.say); chain_said[target] = true end
+        if pathfind_goal == nil or reaimed then
+          local path = room_path(s.dungeon_room, wp.room)
+          local hop = path and path[1]
+          local exit = hop and hop_goal(s, s.dungeon_room, hop)
+          if exit then route_set_goal(s, exit[1], exit[2]) end
+        end
       end
+      chain_last_room = s.dungeon_room
     end
   end
 end
