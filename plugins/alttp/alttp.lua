@@ -523,7 +523,7 @@ local function bush_cue(s)
   local ay = s.y + 12 + (dir == 0 and -12 or dir == 2 and 12 or 0)
   if tile_attr_at(s, ax, ay) == BUSH_TILE then
     if not bush_cued then
-      say("Slash the bush.", { priority = "navigation", category = "on-demand" })
+      say("Bush.", { priority = "navigation", category = "on-demand" })
       bush_cued = true
     end
   else
