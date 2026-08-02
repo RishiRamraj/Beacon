@@ -230,17 +230,32 @@ end
 -- Rooms to treat as kill-rooms even though the game sets no clear-tag on them: a
 -- guard there drops a small key for the locked exit, so the guide should lead Link
 -- to defeat it first. Keyed by dungeon room id; the value is `true` for the whole
--- room, or `{ ty_max = <tile> }` to scope it to the top of a room the game reuses
--- for two areas (0x72's upper guard/key/chest section is a kill-room, its lower
--- section is not). Only matters while enemies are live — the objective also
--- requires a pending enemy.
-local FORCE_KILL_ROOMS = { [0x72] = { ty_max = 480 } }
+-- room, or `{ until_chest = true }` for a room whose only reason to fight is to
+-- reach its chest — the forced kill status ends PERMANENTLY once that chest is
+-- opened, so backtracking (which respawns the guard, since the room has no
+-- clear-tag) never re-arms the sub-goal, and the room's later reuse for a second
+-- area past the locked door is never treated as a kill-room. Only matters while
+-- enemies are live — the objective also requires a pending enemy.
+local FORCE_KILL_ROOMS = { [0x72] = { until_chest = true } }
+
+-- Per-room permanent progress bits live at $7EF000 + room*2 (one u16 per dungeon
+-- room). Bit 0x8000 flips when the room's chest is opened and never clears.
+local function room_chest_opened(room)
+  return (mem.u16(0x7EF000 + room * 2) & 0x8000) ~= 0
+end
 
 -- Is Link in a dungeon room gated on defeating enemies?
 local function kill_room(s)
   if s.module ~= 0x07 then return false end
   local fk = FORCE_KILL_ROOMS[s.dungeon_room]
-  if fk == true or (type(fk) == "table" and (s.y >> 3) <= fk.ty_max) then return true end
+  if fk then
+    -- A chest-gated forced room is done for good once its chest is open.
+    if type(fk) == "table" and fk.until_chest and room_chest_opened(s.dungeon_room) then
+      return false
+    end
+    if fk == true or (type(fk) == "table" and fk.until_chest) then return true end
+    if type(fk) == "table" and fk.ty_max and (s.y >> 3) <= fk.ty_max then return true end
+  end
   return KILL_TAGS[mem.u8(KILL_HDR_TAG)] == true or KILL_TAGS[mem.u8(KILL_HDR_TAG + 1)] == true
 end
 
@@ -510,9 +525,12 @@ local BUSH_TILE = 0x1B0
 -- current area, or nil if it cannot be read. Dungeons index the WRAM grid
 -- directly; the overworld goes through the same scroll-offset + ROM decode the
 -- map render uses.
-local function tile_attr_at(s, px, py)
+local function tile_attr_at(s, px, py, level)
   if s.module == 0x07 then
-    local base = DUNGEON_TILE_TABLE + (mem.u8(LOWER_LEVEL) == 1 and 0x1000 or 0)
+    -- `level` overrides Link's current floor ($7E00EE) so a route can be planned on
+    -- the other floor of a two-level room (its grid lives 0x1000 further on).
+    local lvl = level ~= nil and level or mem.u8(LOWER_LEVEL)
+    local base = DUNGEON_TILE_TABLE + (lvl == 1 and 0x1000 or 0)
     return mem.u8(base + ((py >> 3) & 63) * 64 + ((px >> 3) & 63))
   elseif s.module == 0x09 and #OW_MAP16_TO_MAP8 > 0 then
     local mask_y, mask_x = mem.u16(0x7E070A), mem.u16(0x7E070E)
@@ -668,8 +686,8 @@ for _, a in ipairs({
   0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56,                   -- solid object
 }) do IMPASSABLE[a] = true end
 
-local function tile_passable(s, wtx, wty)
-  local attr = tile_attr_at(s, wtx * 8, wty * 8)
+local function tile_passable(s, wtx, wty, level)
+  local attr = tile_attr_at(s, wtx * 8, wty * 8, level)
   if attr == nil or IMPASSABLE[attr] then return false end
   if s.module == 0x07 and attr == 0x04 then return false end -- indoor wall
   return true
@@ -715,12 +733,12 @@ end
 -- tile) window. Returns a list of world tiles {tx, ty} from start to goal, or nil
 -- if unreachable / out of the window. 4-connected, Manhattan heuristic, binary
 -- heap — a few thousand nodes at most, run on demand, not per frame.
-local function plan_path(s, s_tx, s_ty, g_tx, g_ty)
+local function plan_path(s, s_tx, s_ty, g_tx, g_ty, level)
   local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3 -- window origin
   local slx, sly, glx, gly = s_tx - ox, s_ty - oy, g_tx - ox, g_ty - oy
   if slx < 0 or slx > 63 or sly < 0 or sly > 63 then return nil end
   if glx < 0 or glx > 63 or gly < 0 or gly > 63 then return nil end
-  if not tile_passable(s, g_tx, g_ty) then return nil end
+  if not tile_passable(s, g_tx, g_ty, level) then return nil end
 
   local function h(x, y) return math.abs(x - glx) + math.abs(y - gly) end
   local start, goal = sly * 64 + slx, gly * 64 + glx
@@ -764,7 +782,7 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty)
       for _, d in ipairs(dirs) do
         local cx, cy = nx + d[1], ny + d[2]
         if cx >= 0 and cx <= 63 and cy >= 0 and cy <= 63
-            and tile_passable(s, ox + cx, oy + cy) then
+            and tile_passable(s, ox + cx, oy + cy, level) then
           local c = cy * 64 + cx
           local t = g[n] + 1
           if not closed[c] and (g[c] == nil or t < g[c]) then
@@ -779,14 +797,14 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty)
 end
 
 -- Whether every tile on the straight line between two world tiles is passable.
-local function line_passable(s, ax, ay, bx, by)
+local function line_passable(s, ax, ay, bx, by, level)
   local dx, dy = math.abs(bx - ax), -math.abs(by - ay)
   local sx = ax < bx and 1 or -1
   local sy = ay < by and 1 or -1
   local err = dx + dy
   local cx, cy = ax, ay
   while true do
-    if not tile_passable(s, cx, cy) then return false end
+    if not tile_passable(s, cx, cy, level) then return false end
     if cx == bx and cy == by then return true end
     local e2 = 2 * err
     if e2 >= dy then err = err + dy; cx = cx + sx end
@@ -796,16 +814,25 @@ end
 
 -- String-pulling: drop interior waypoints Link can walk straight past, so the
 -- guide beacon points at real corners rather than every tile.
-local function simplify(s, tiles)
+local function simplify(s, tiles, level)
   if #tiles <= 2 then return tiles end
   local out, anchor = { tiles[1] }, 1
   for i = 2, #tiles - 1 do
-    if not line_passable(s, tiles[anchor][1], tiles[anchor][2], tiles[i + 1][1], tiles[i + 1][2]) then
+    if not line_passable(s, tiles[anchor][1], tiles[anchor][2], tiles[i + 1][1], tiles[i + 1][2], level) then
       out[#out + 1] = tiles[i]; anchor = i
     end
   end
   out[#out + 1] = tiles[#tiles]
   return out
+end
+
+-- A string-pulled A* route between two world tiles, on `level` (nil = Link's
+-- current floor of a two-level room), or nil if unreachable. The single routine
+-- both the live guide and the map renderer go through, so a drawn route is always
+-- exactly the one Link would walk.
+local function planned_route(s, s_tx, s_ty, g_tx, g_ty, level)
+  local tiles = plan_path(s, s_tx, s_ty, g_tx, g_ty, level)
+  return tiles and simplify(s, tiles, level)
 end
 
 -- ===========================================================================
@@ -957,9 +984,9 @@ end
 
 local function pathfind_replan(s)
   if pathfind_goal == nil then return false end
-  local tiles = plan_path(s, s.x >> 3, s.y >> 3, pathfind_goal[1], pathfind_goal[2])
+  local tiles = planned_route(s, s.x >> 3, s.y >> 3, pathfind_goal[1], pathfind_goal[2])
   if tiles == nil then return false end
-  pathfind_path = simplify(s, tiles)
+  pathfind_path = tiles
   pathfind_wp = math.min(2, #pathfind_path)
   pathfind_area = area_id(s)
   pathfind_replan_in = REPLAN_INTERVAL
@@ -2174,8 +2201,9 @@ local COURTYARD = {
   { tx = 47, ty = 391, room = 0x60 },
   { tx = 56, ty = 335, room = 0x50 },
   { tx = 95, ty = 11, room = 0x01 },
-  { tx = 159, ty = 472, room = 0x72 }, -- south-door exit (after the guard/key/chest)
-  { tx = 149, ty = 507, room = 0x72 }, -- lower section of the same room id
+  { tx = 159, ty = 472, room = 0x72, level = 0 }, -- south-door exit (upper floor, after the guard/key/chest)
+  { tx = 153, ty = 491, room = 0x72, level = 0, say = "Take the stairs down." }, -- mouth of the layer-swap stairs
+  { tx = 149, ty = 507, room = 0x72, level = 1 }, -- lower floor, reached down those stairs
   { tx = 129, ty = 560, room = 0x82 },
 }
 
@@ -2209,6 +2237,7 @@ local chain_reached = {}
 -- hop when Link crosses into the next room).
 local chain_said = {}
 local chain_last_room = nil
+local chain_last_level = nil -- Link's floor ($7E00EE) at the last dungeon re-aim
 -- Frames until the dungeon leg re-checks which of a room's waypoints Link can
 -- reach (a waypoint behind a locked door is unreachable until it opens). Throttled
 -- so the reachability probe — an A* per candidate — does not run every frame.
@@ -2723,18 +2752,26 @@ nav_update = function(s)
       -- (an earlier waypoint) until it is opened, then advances to the one beyond.
       -- No progress bookkeeping and backtrack-proof: any room re-aims at its last
       -- reachable waypoint. A room's sub-goal already took precedence above.
-      local reaimed = chain_last_room ~= s.dungeon_room
+      -- A two-level room (LOWER_LEVEL, $7E00EE) has separate collision grids for its
+      -- upper and lower floors, joined only by layer-swap stairs. A waypoint carries
+      -- the `level` it lives on; only same-level waypoints are candidates, so a
+      -- lower-floor point never pulls Link straight across the upper floor's overlay
+      -- — he is guided to the stairs (a same-level waypoint at their mouth) and the
+      -- lower point takes over once he has descended and his level flips.
+      local level = mem.u8(LOWER_LEVEL)
+      local reaimed = chain_last_room ~= s.dungeon_room or chain_last_level ~= level
       chain_probe_in = chain_probe_in - 1
       -- Keep following a still-valid route; re-pick the target only when not
-      -- following one, when Link changed rooms, or on the throttled re-probe (which
-      -- catches a door that just opened, making a further waypoint reachable).
+      -- following one, when Link changed rooms or floors, or on the throttled
+      -- re-probe (which catches a door that just opened, making a further waypoint
+      -- reachable).
       local cur = nav_chain[nav_chain_i]
       local following = pathfind_active and cur and cur.room == s.dungeon_room and not reaimed
       if not following or chain_probe_in <= 0 then
         chain_probe_in = 12
         local pick, pgx, pgy
         for i, wp in ipairs(nav_chain) do
-          if wp.room == s.dungeon_room then
+          if wp.room == s.dungeon_room and (wp.level or 0) == level then
             local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4)
             if plan_path(s, ltx, lty, gx >> 3, gy >> 3) then pick, pgx, pgy = i, gx, gy end
           end
@@ -2752,6 +2789,7 @@ nav_update = function(s)
         end
       end
       chain_last_room = s.dungeon_room
+      chain_last_level = level
     end
   end
 end
@@ -3019,25 +3057,34 @@ function on_draw(canvas)
       end
     end
 
-    -- A dungeon chain's waypoints in this room, drawn like the overworld chain:
-    -- pink segments linking consecutive same-room waypoints, then a marker on each
-    -- — the active one white, the rest pink — so a room with several points reads
-    -- as a path, not loose dots. Hidden while a room sub-goal is active (clear the
-    -- guard, grab the key, open the chest): the exit waypoint only shows once the
-    -- chain is actually the guidance, not the moment Link walks in.
+    -- A dungeon chain's waypoints in this room. The route Link follows on his
+    -- current floor is the A* pathfind_path drawn above. Beyond it, the chain often
+    -- continues to another waypoint in the SAME room but on the other floor, reached
+    -- down the stairs; draw that continuation too, as a real A* path planned on the
+    -- destination floor's grid (never a straight line — that would cut through
+    -- walls). So the whole in-room route reads through: to the stairs on this floor,
+    -- then down and across to the lower point. Only waypoints from the active target
+    -- (nav_chain_i) forward are shown; passed ones are dropped. Hidden while a room
+    -- sub-goal is active (clear the guard, grab the key, open the chest).
     if s.module == 0x07 and nav_chain and room_objective(s) == nil then
-      local prev_pt
+      local prev_wp
       for i, wp in ipairs(nav_chain) do
-        if wp.room == s.dungeon_room then
-          local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
-          if prev_pt then canvas:line(prev_pt[1], prev_pt[2], px, py, 0xFF60D0) end
-          prev_pt = { px, py }
-        end
-      end
-      for i, wp in ipairs(nav_chain) do
-        if wp.room == s.dungeon_room then
+        if wp.room == s.dungeon_room and i >= nav_chain_i then
+          -- Segment from the previous same-room waypoint: on a floor change (down
+          -- the stairs) route on the destination floor so it threads properly.
+          if prev_wp then
+            local path = planned_route(s, prev_wp.tx, prev_wp.ty, wp.tx, wp.ty, wp.level or 0)
+            if path then
+              for k = 1, #path - 1 do
+                local ax, ay = plot(path[k][1] * 8 + 4, path[k][2] * 8 + 4)
+                local bx, by = plot(path[k + 1][1] * 8 + 4, path[k + 1][2] * 8 + 4)
+                canvas:line(ax, ay, bx, by, 0xFF60D0)
+              end
+            end
+          end
           local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
           canvas:rect(px - 1, py - 1, 3, 3, (i == nav_chain_i) and 0xFFFFFF or 0xFF60D0)
+          prev_wp = wp
         end
       end
     end

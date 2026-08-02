@@ -1012,7 +1012,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "9,1",
+        armed, "10,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -1098,7 +1098,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "9,2",
+        resumed, "10,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1142,7 +1142,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "9,2",
+        armed, "10,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1180,7 +1180,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "9,3",
+        "10,3",
         "the dungeon leg targets the Find Zelda waypoint (index 3)"
     );
     assert!(
@@ -1208,6 +1208,58 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
             .unwrap(),
         "4",
         "in room 0x60 the chain leads to that room's waypoint (index 4)"
+    );
+}
+
+#[test]
+fn alttp_two_level_room_routes_to_the_stairs_before_the_lower_waypoint() {
+    // Room 0x72 is a two-level room: its door/staircase waypoints sit on the upper
+    // floor (level 0) and the point past the stairs on the lower floor (level 1),
+    // joined only by layer-swap stairs. The guide must target only waypoints on
+    // Link's CURRENT floor ($7E00EE) — so upstairs it leads to the stairs, not
+    // straight across the overlay to the lower-floor point, and once Link has
+    // descended the lower point takes over.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Zelda beat, in room 0x72 near its waypoints; `level` sets the floor byte.
+    let frame = |level: u8, ltx: u16, lty: u16| -> Vec<u8> {
+        let mut ram = dungeon_frame((ltx, lty), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x72);
+        set(0x7E00EE, level); // 0 = upper floor, 1 = lower floor
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // Zelda beat
+        set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
+        ram
+    };
+
+    // Upstairs (level 0), a few tiles from the room's waypoints: the guide targets
+    // the staircase waypoint (index 8, level 0), NOT the lower-floor point (index 9).
+    let upper = frame(0, 156, 485);
+    plugin.on_frame(&upper, 0);
+    plugin.on_frame(&upper, 1);
+    plugin.command("advance", &upper);
+    plugin.on_frame(&upper, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain_i)", &upper).unwrap(),
+        "8",
+        "upstairs, the guide leads to the staircase waypoint, not across the overlay"
+    );
+
+    // Downstairs (level 1): the lower-floor waypoint (index 9) takes over.
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let lower = frame(1, 150, 505);
+    plugin2.on_frame(&lower, 0);
+    plugin2.on_frame(&lower, 1);
+    plugin2.command("advance", &lower);
+    plugin2.on_frame(&lower, 2);
+    assert_eq!(
+        plugin2.eval("return tostring(nav_chain_i)", &lower).unwrap(),
+        "9",
+        "downstairs, the lower-floor waypoint takes over"
     );
 }
 
@@ -1330,6 +1382,62 @@ fn alttp_forced_kill_room_leads_to_the_guard_then_the_chest() {
     assert!(
         texts2.iter().any(|t| t.contains("Open the chest")),
         "then the chest sub-goal takes over: {texts2:?}"
+    );
+}
+
+#[test]
+fn alttp_forced_kill_room_stays_cleared_after_its_chest_is_opened() {
+    // The forced kill-room (0x72) exists only to fight the guard for the key and
+    // open the chest. Once that chest is opened the sub-goal is done for GOOD:
+    // backtracking respawns the guard (the room has no clear-tag), but the guide
+    // must not re-arm the kill objective — it stays on the linear route.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Room 0x72 with a live (respawned) guard. `chest_open` sets the room's
+    // permanent chest-opened bit ($7EF000 + 0x72*2 = $7EF0E4, bit 0x8000).
+    let frame = |chest_open: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7EF3C5, 2);
+        set(0x7E040C, 0x02);
+        set(0x7E00A0, 0x72);
+        if chest_open {
+            set(0x7EF0E5, 0x80); // high byte of $7EF0E4 -> bit 0x8000
+        }
+        set(0x7E0DD0, 0x09); // guard respawned, alive
+        set(0x7E0E20, 65); // Green Soldier
+        set(0x7E0D10, 0xF4); // x -> tile 30
+        set(0x7E0D00, 0xA4); // y -> tile 20
+        set(0x7E0E50, 4);
+        ram
+    };
+
+    // Chest already opened: the kill objective must NOT re-arm, even with the
+    // guard alive again after a backtrack.
+    let opened = frame(true);
+    plugin.on_frame(&opened, 0);
+    plugin.on_frame(&opened, 1);
+    plugin.command("advance", &opened);
+    let out = plugin.on_frame(&opened, 2);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        !texts.iter().any(|t| t.contains("Defeat all enemies")),
+        "chest open: kill objective must not re-arm on backtrack: {texts:?}"
+    );
+
+    // Contrast: with the chest bit cleared the same live guard DOES arm the kill
+    // objective — proving the chest bit is what gates it.
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let unopened = frame(false);
+    plugin2.on_frame(&unopened, 0);
+    plugin2.on_frame(&unopened, 1);
+    plugin2.command("advance", &unopened);
+    let out2 = plugin2.on_frame(&unopened, 2);
+    let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts2.iter().any(|t| t.contains("Defeat all enemies")),
+        "chest not yet open: the kill objective is armed: {texts2:?}"
     );
 }
 
