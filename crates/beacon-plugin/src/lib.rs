@@ -214,6 +214,14 @@ pub struct Manifest {
     pub game: Game,
     /// Lua script filename, relative to the manifest.
     pub script: String,
+    /// Extra Lua files loaded, in order, into the same Lua state *before* the main
+    /// `script`. Each is its own chunk with its own local-variable budget, so a
+    /// plugin can grow past one chunk's limit by splitting reference data and helper
+    /// code into modules. They share globals with the script, which is how a data
+    /// module hands its tables over (e.g. a `data.lua` that sets a namespace global
+    /// the script reads). Relative to the manifest.
+    #[serde(default)]
+    pub modules: Vec<String>,
     /// Named memory watches, exposed to the Lua as a `watch` table.
     #[serde(default)]
     pub watch: BTreeMap<String, Watch>,
@@ -301,6 +309,10 @@ pub fn rom_sha1(headerless_rom: &[u8]) -> String {
 #[derive(Debug, Clone)]
 pub struct PluginSpec {
     pub manifest: Manifest,
+    /// The manifest's `modules`, resolved to `(chunk_name, source)` in declared
+    /// order. The host loads each into the Lua state before `lua_source`, so a
+    /// data/helper module's globals are in place when the main script runs.
+    pub modules: Vec<(String, String)>,
     pub lua_source: String,
     /// A human-readable origin used in Lua error messages, e.g.
     /// `"alttp.lua (built-in)"`.
@@ -336,6 +348,17 @@ fn read_plugin_dir(dir: &Path) -> Result<PluginSpec, Error> {
     let text = std::fs::read_to_string(&manifest_path)?;
     let manifest = Manifest::parse(&text)?;
 
+    // Modules first, in declared order, so their globals are ready for the script.
+    let mut modules = Vec::with_capacity(manifest.modules.len());
+    for name in &manifest.modules {
+        let path = dir.join(name);
+        let source = std::fs::read_to_string(&path).map_err(|e| Error::ScriptRead {
+            path: path.clone(),
+            source: e,
+        })?;
+        modules.push((path.display().to_string(), source));
+    }
+
     let script_path = dir.join(&manifest.script);
     let lua_source = std::fs::read_to_string(&script_path).map_err(|e| Error::ScriptRead {
         path: script_path.clone(),
@@ -344,6 +367,7 @@ fn read_plugin_dir(dir: &Path) -> Result<PluginSpec, Error> {
 
     Ok(PluginSpec {
         manifest,
+        modules,
         lua_source,
         chunk_name: script_path.display().to_string(),
         dir: Some(dir.to_owned()),
@@ -355,6 +379,7 @@ fn read_plugin_dir(dir: &Path) -> Result<PluginSpec, Error> {
 /// override it by matching the same ROM.
 const ALTTP_MANIFEST: &str = include_str!("../../../plugins/alttp/alttp.toml");
 const ALTTP_LUA: &str = include_str!("../../../plugins/alttp/alttp.lua");
+const ALTTP_DATA: &str = include_str!("../../../plugins/alttp/data.lua");
 
 /// The set of known plugins and the ROM-hash lookup over them.
 #[derive(Debug, Default, Clone)]
@@ -369,8 +394,22 @@ impl Registry {
         // The built-in manifest is authored in-tree, so a parse failure is a
         // build-time mistake, not a user's problem: fail loudly.
         let manifest = Manifest::parse(ALTTP_MANIFEST).expect("built-in alttp manifest must parse");
+        // The built-in embeds each declared module by name, matching the manifest's
+        // `modules` list, so the compiled-in plugin loads exactly like a drop-in.
+        let modules = manifest
+            .modules
+            .iter()
+            .map(|name| {
+                let source = match name.as_str() {
+                    "data.lua" => ALTTP_DATA,
+                    other => panic!("built-in alttp declares module '{other}' with no embedded source"),
+                };
+                (format!("{name} (built-in)"), source.to_string())
+            })
+            .collect();
         r.specs.push(PluginSpec {
             manifest,
+            modules,
             lua_source: ALTTP_LUA.to_string(),
             chunk_name: "alttp.lua (built-in)".to_string(),
             dir: None,

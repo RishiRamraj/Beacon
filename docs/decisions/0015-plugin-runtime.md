@@ -89,3 +89,16 @@ broken.
   the one game Beacon ships knowing about, against the single-file promise.
 - **Building the declarative event tier now** — rejected; designing a DSL against a game that
   does not need it invites a bad DSL. See deferred, above.
+
+## Update (2026-08-02): multi-file plugins
+
+A plugin's Lua may now span several files. The manifest lists extra `modules`, and the
+host loads each as its own chunk into the same Lua state, in order, before the main
+`script` (`PluginSpec::modules`; built-ins embed them, drop-ins read them from the
+plugin directory). Two reasons: Lua caps locals at **200 per chunk**, so bulky
+reference data (sprite/tile tables, per-area data) has to live off the main chunk as
+the reference plugin grows; and separating data from logic is cleaner regardless.
+Modules share globals with the script — a data module assigns a namespace global
+(`REF`) the script reads. Deliberately **not** `require`/`io`: the host loads exactly
+the declared files, so the sandbox never gains arbitrary filesystem access to solve a
+chunk-size problem.

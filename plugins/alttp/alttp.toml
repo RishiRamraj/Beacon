@@ -7,6 +7,11 @@
 # Top-level keys must precede the first table header in TOML.
 script = "alttp.lua"
 
+# Extra Lua files loaded (in order) into the same state before the script. Each is
+# its own chunk with its own local budget, so bulky reference data lives apart from
+# the main logic; data.lua hands its tables over through the global `REF` namespace.
+modules = ["data.lua"]
+
 [game]
 name   = "The Legend of Zelda: A Link to the Past"
 region = "NTSC-U"

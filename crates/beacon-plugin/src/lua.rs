@@ -91,6 +91,13 @@ impl LuaPlugin {
         let beacons: Beacons = Rc::new(RefCell::new(BTreeMap::new()));
         install_beacon(&lua, &beacons)?;
 
+        // Modules first, in declared order, each its own chunk (its own local
+        // budget) sharing this Lua state's globals — so a data module's namespace is
+        // in place before the main script runs.
+        for (name, source) in &spec.modules {
+            lua.load(source.as_str()).set_name(name.as_str()).exec()?;
+        }
+
         // Running the chunk defines on_frame and registers commands. A syntax or
         // load-time error is a broken plugin; report it with the chunk name so
         // the author can find it.
@@ -600,11 +607,33 @@ mod tests {
         .unwrap();
         let spec = PluginSpec {
             manifest,
+            modules: Vec::new(),
             lua_source: lua.to_string(),
             chunk_name: "test.lua".to_string(),
             dir: None,
         };
         LuaPlugin::load(&spec, std::rc::Rc::new(rom)).unwrap()
+    }
+
+    #[test]
+    fn modules_load_before_the_script_and_share_globals() {
+        // A declared module runs as its own chunk, into the same Lua state, before
+        // the script — so a data module's globals are ready when the script reads
+        // them. This is what lets a plugin split reference data off the main chunk.
+        let manifest = Manifest::parse("script = \"t.lua\"\n[game]\nname = \"Test\"\n").unwrap();
+        let spec = PluginSpec {
+            manifest,
+            modules: vec![("data.lua".to_string(), "REF = { answer = 42 }".to_string())],
+            lua_source: "seen = REF.answer".to_string(),
+            chunk_name: "t.lua".to_string(),
+            dir: None,
+        };
+        let mut plugin = LuaPlugin::load(&spec, std::rc::Rc::new(Vec::new())).unwrap();
+        assert_eq!(
+            plugin.eval("return tostring(seen)", &vec![0u8; WRAM_LEN]).unwrap(),
+            "42",
+            "the script sees the module's REF namespace"
+        );
     }
 
     fn ram_with(pairs: &[(u32, u8)]) -> Vec<u8> {

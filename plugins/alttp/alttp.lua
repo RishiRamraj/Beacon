@@ -132,31 +132,28 @@ local SPRITE = {
   hp    = 0x7E0E50,
 }
 
--- Sprite type id -> name. Regenerated from the ALttP disassembly's sprite-prep
--- jump table (walkingeyerobot/alttp-disassembly, sprite_prep.asm), which is the
--- game's own per-type dispatch — the authoritative meaning of the $7E0E20 type
--- Beacon reads. (The earlier alttp-navi-derived table was wrong for most
--- non-enemy sprites.) ITEM_TYPES/NPC_TYPES follow those names; ENEMY_TYPES is the
--- prior set minus the ids the corrected names show to be NPCs or objects.
-local SPRITE_NAMES = { [0]="Raven", [1]="Vulture", [2]="Flying Stalfos Head", [4]="Good Switch", [5]="Switch", [6]="Bad Switch", [7]="Switch again, facing up", [8]="Octorock", [9]="Giant Moldorm", [10]="Four Shooter Octorock", [11]="Chicken", [12]="Octorock projectile", [13]="Buzzblob", [14]="Plants with big mouths", [15]="Octoballoon", [16]="Octospawn", [17]="Hinox", [18]="Moblin", [19]="Helmasaur", [20]="Gargoyle Grate", [21]="Bubble", [22]="Sahasrahla", [23]="Rupee Crab under bush", [24]="Moldorm", [25]="Poe", [26]="Dwarves and helper sprites", [27]="Arrow in Wall", [28]="Movable Statue", [29]="Weathervane", [30]="Crystal Switch", [31]="Bug Net Kid", [32]="Sluggula", [33]="Push Switch", [34]="Ropa", [35]="Bari (Blue)", [36]="Bari (Red)", [37]="Conversational Tree", [38]="Hardhat Beetle", [39]="Deadrock", [40]="Story Teller Set 1", [41]="Human NPC Set 1", [42]="Sweeping lady", [43]="Hobo under bridge", [44]="Lumberjack Bros", [45]="Telepathic Stones", [46]="Flute Boy's Notes", [47]="Race Game Couple", [48]="Person", [49]="Fortune Teller", [50]="Quarrel Bros", [51]="Pull For Rupees", [52]="Young Snitch Girl", [53]="Inn Keeper", [54]="Witch", [55]="Waterfall", [56]="Arrow Target", [57]="Middle-aged desert guy", [58]="Mad Batter", [59]="Dash item", [60]="Kid in village near trough", [61]="Old Snitch Lady", [62]="Rupee Crab under rock", [63]="Tutorial Soldier", [64]="Barrier", [65]="Green Soldier", [66]="Blue Soldier", [67]="Red Spear Soldier", [68]="Psycho Trooper", [69]="Psycho Spear Soldier", [70]="Blue Archer Soldier", [71]="Green Archer Bush Soldier", [72]="Red Javelin Trooper", [73]="Red Javelin Bush Soldier", [74]="Green Enemy Bombs", [75]="Green Soldier (weak version)", [76]="Gerudo Man", [77]="Toppo", [78]="Popo", [79]="Bot", [80]="Metal Ball", [81]="Armos", [82]="Zora King", [83]="Armos Knight", [84]="Lanmola", [85]="Zora and Fireball", [86]="Walking Zora", [87]="Desert Palace barriers", [88]="Crab", [89]="Lost Woods Bird", [90]="Lost Woods Squirrel", [91]="Spark (clockwise)", [92]="Spark (counter-clockwise)", [93]="Roller (down then up)", [94]="Roller (up then down)", [95]="Roller", [96]="Roller", [97]="Beamos", [98]="Master Sword", [99]="Debirando Pit", [100]="Debirando", [101]="Archery Game Guy", [102]="Wall Cannon", [103]="Wall Cannon", [104]="Wall Cannon", [105]="Wall Cannon", [106]="Ball And Chain Trooper", [107]="Cannon Trooper", [108]="Warp Vortex", [109]="Rat", [110]="Rope", [111]="Keese", [112]="Helmasaur King Fireball", [113]="Leever", [114]="Pond Activator", [115]="Link's Uncle", [116]="Red Hat Wussy", [117]="Bottle Vendor", [118]="Princess Zelda", [119]="Alternate Bubble", [120]="Elder's Wife", [121]="Good Bee stuck in Ice Cavern", [122]="Agahnim", [123]="Agahnim energy", [124]="Green Stalfos", [125]="Spike Trap", [126]="Guruguru Bar", [127]="Guruguru Bar", [128]="Wandering Fireball Chains", [129]="Hover", [130]="Bubble Group", [131]="Eyegore", [132]="Eyegore 2", [133]="Yellow Stalfos", [134]="Kodondo", [135]="Flames", [136]="Mothula", [137]="Mothula Beam", [138]="Spike Block", [139]="Gibdo", [140]="Arrghus", [141]="Arrgi", [142]="Chair Turtles (kill with hammer)", [143]="Terrorpin", [144]="Grabber Things", [145]="Stalfos Knight", [146]="Helmasaur King", [147]="Bumper", [148]="Pirogusu", [149]="Laser Eye (right)", [150]="Laser Eye (left)", [151]="Laser Eye (down)", [152]="Laser Eye (up)", [153]="Attack Penguin", [154]="Kyameron", [155]="Wizzrobe", [156]="Zoro", [157]="Babusu", [158]="Ostrich seen with Flute Boy", [159]="Rabbit seen with Flute Boy", [160]="Bird seen with Flute Boy", [161]="Freezor", [162]="Kholdstare", [163]="Kholdstare part 2", [164]="Kholdstare Ice balls", [165]="Blue Zazak", [166]="Red Zazak", [167]="Stalfos", [168]="Green Bomber", [169]="Blue Bomber", [170]="Pikit", [171]="Crystal Maiden", [172]="Apple(s) in tree", [173]="Old Mountain Man", [174]="Down Pipe", [175]="Up Pipe", [176]="Right Pipe", [177]="Left Pipe", [178]="Good Bee", [179]="Hylian Inscription", [180]="Thief Chest", [181]="Bomb Shop Guy and company", [183]="Blind disguised as a Maiden", [184]="Dialogue Testing Sprite", [185]="Bully and Ball Guy", [186]="Whirlpool", [187]="Shopkeeper", [188]="Drunk in the Inn", [189]="Vitreous", [190]="Smaller Vitreous Eyeballs", [191]="Vitreous Lightning Blast", [192]="Giant Cranky Catfish", [193]="Agahnim Teleporting Zelda", [194]="Boulder", [195]="Gibo", [196]="Thief", [197]="Evil Fireball Spitters", [198]="Fourway Fireball Spitters", [199]="Hokbok", [200]="Big Faerie", [201]="Ganon Helpers + Tektite", [202]="Chain Chomp", [203]="Agahnim", [204]="Trinexx Part 2", [205]="Trinexx Part 3", [206]="Blind", [207]="Swamola", [208]="Lynel", [209]="Yellow Transform", [210]="Flopping Fish", [211]="Stal", [212]="Landmine", [213]="Digging Game Guy", [214]="Ganon", [215]="InvinceoGanon", [216]="Heart Refill", [217]="Green Rupee", [218]="Blue Rupee", [219]="Red Rupee", [220]="1 Bomb Refill", [221]="4 Bomb Refill", [222]="8 Bomb Refill", [223]="Small Magic Refill", [224]="Full Magic Refill", [225]="5 Arrow Refill", [226]="10 Arrow Refill", [227]="Faerie", [228]="Key", [229]="Big Key", [230]="Shield Pickup", [231]="Mushroom", [232]="Fake Master Sword", [233]="Magic Shop Dude", [234]="Heart Container", [235]="Heart Piece", [236]="Bush", [237]="Cane of Somaria Platform", [238]="Movable Mantle", [239]="Cane of Somaria Platform", [240]="Cane of Somaria Platform", [241]="Cane of Somaria Platform", [242]="Medallion Tablet" }
-local ENEMY_TYPES = { [1]=true, [2]=true, [8]=true, [9]=true, [12]=true, [13]=true, [14]=true, [15]=true, [16]=true, [17]=true, [18]=true, [21]=true, [24]=true, [25]=true, [32]=true, [34]=true, [35]=true, [36]=true, [38]=true, [39]=true, [65]=true, [66]=true, [67]=true, [68]=true, [69]=true, [70]=true, [71]=true, [72]=true, [73]=true, [74]=true, [83]=true, [84]=true, [85]=true, [86]=true, [88]=true, [99]=true, [100]=true, [104]=true, [105]=true, [106]=true, [107]=true, [109]=true, [111]=true, [131]=true, [132]=true, [133]=true, [134]=true, [136]=true, [139]=true, [142]=true, [143]=true, [144]=true, [145]=true, [146]=true, [153]=true, [154]=true, [155]=true, [162]=true, [165]=true, [167]=true, [169]=true, [170]=true, [185]=true, [203]=true, [206]=true, [211]=true, [214]=true, [215]=true }
+-- Sprite classification tables (names, enemy/item/npc sets) live in data.lua under
+-- the shared REF namespace — bulky reference data kept out of this chunk's local
+-- budget. Read them as REF.sprite_names / REF.enemy_types / REF.item_types /
+-- REF.npc_types. Names are the ALttP disassembly's sprite-prep dispatch, the
+-- authoritative meaning of the $7E0E20 type.
 
 local function sprite_name(kind)
-  return SPRITE_NAMES[kind] or (ENEMY_TYPES[kind] and "enemy" or "object")
+  return REF.sprite_names[kind] or (REF.enemy_types[kind] and "enemy" or "object")
 end
 
 -- Whether a sprite is a threat. Damageable (has health) OR a known enemy type:
 -- the type table is not exhaustive, so health is what catches the rest.
 local function is_enemy(sp)
-  return (sp.hp ~= nil and sp.hp > 0) or ENEMY_TYPES[sp.kind] == true
+  return (sp.hp ~= nil and sp.hp > 0) or REF.enemy_types[sp.kind] == true
 end
 
 -- What to call an enemy: its type name only when the type is a classified enemy,
 -- otherwise just "enemy" — a damageable sprite the table does not name is still a
 -- threat, and a wrong name would be worse than none.
 local function enemy_name(sp)
-  if ENEMY_TYPES[sp.kind] then
-    return SPRITE_NAMES[sp.kind] or "enemy"
+  if REF.enemy_types[sp.kind] then
+    return REF.sprite_names[sp.kind] or "enemy"
   end
   return "enemy"
 end
@@ -301,10 +298,9 @@ end
 -- call from across the screen; incidental scenery only chirps when Link is right
 -- on top of it.
 --
--- Types you collect or open. A bright, high tone.
-local ITEM_TYPES = { [98]=true, [178]=true, [216]=true, [217]=true, [218]=true, [219]=true, [220]=true, [221]=true, [222]=true, [223]=true, [224]=true, [225]=true, [226]=true, [227]=true, [228]=true, [229]=true, [230]=true, [231]=true, [234]=true, [235]=true }
--- People to talk to and switches to act on — interactable, but not picked up.
-local NPC_TYPES = { [22]=true, [30]=true, [31]=true, [33]=true, [47]=true, [49]=true, [53]=true, [54]=true, [60]=true, [76]=true, [82]=true, [115]=true, [117]=true, [118]=true, [120]=true, [171]=true, [173]=true, [187]=true, [233]=true }
+-- Types you collect or open (REF.item_types, a bright high tone) and people to
+-- talk to or switches to act on (REF.npc_types, interactable but not picked up) —
+-- both in data.lua.
 
 -- Per-class tone, reach, and pulse. `pitch` scales the 330 Hz base tone (higher
 -- is brighter); enemies keep the original 1.0. `range` is Manhattan pixels —
@@ -334,8 +330,8 @@ local BEACON_OCCLUDED_SCALE = 0.35
 -- everything else is incidental scenery.
 local function category(sp)
   if is_enemy(sp) then return "enemy"
-  elseif ITEM_TYPES[sp.kind] then return "item"
-  elseif NPC_TYPES[sp.kind] then return "npc"
+  elseif REF.item_types[sp.kind] then return "item"
+  elseif REF.npc_types[sp.kind] then return "npc"
   else return "minor" end
 end
 
@@ -1114,12 +1110,12 @@ local function nearest_chest_tile(s)
   return best
 end
 
--- The nearest on-screen item pickup (a sprite in ITEM_TYPES), as world pixel
+-- The nearest on-screen item pickup (a sprite in REF.item_types), as world pixel
 -- coordinates, or nil. sprites() is sorted nearest-first, so the first match is
 -- the closest. Used by the dungeon guide to fetch a loose item in the room.
 local function nearest_item_sprite(s)
   for _, sp in ipairs(sprites()) do
-    if ITEM_TYPES[sp.kind] then return { sp.x, sp.y } end
+    if REF.item_types[sp.kind] then return { sp.x, sp.y } end
   end
   return nil
 end
@@ -1739,7 +1735,7 @@ on_command("scan", function()
   -- even if the type table would call it something else); the rest by object name.
   local groups, order = {}, {}
   for _, sp in ipairs(list) do
-    local nm = is_enemy(sp) and enemy_name(sp) or (SPRITE_NAMES[sp.kind] or "object")
+    local nm = is_enemy(sp) and enemy_name(sp) or (REF.sprite_names[sp.kind] or "object")
     local dir = direction(sp.dx, sp.dy)
     local key = nm .. "\0" .. dir
     local g = groups[key]

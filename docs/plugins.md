@@ -38,6 +38,8 @@ rebuilding Beacon.
 ```toml
 # Top-level keys must come before the first [table] header — a TOML rule.
 script = "mygame.lua"
+# Optional: extra Lua files loaded before the script (see "Splitting a plugin").
+modules = ["data.lua"]
 
 [game]
 name   = "My Game"
@@ -59,6 +61,7 @@ label = "Report exact coordinates"
 | Key | Required | Meaning |
 |---|---|---|
 | `script` | yes | Lua filename, relative to the manifest. |
+| `modules` | no | Extra Lua files loaded, in order, *before* `script`; see [Splitting a plugin](#splitting-a-plugin-across-files). |
 | `game.name` | yes | Shown when the plugin loads. |
 | `game.sha1` | to match a ROM | List of headerless ROM SHA-1s this plugin claims. |
 | `game.region` | no | Informational only, for now. |
@@ -118,6 +121,40 @@ end)
 `on_frame` is optional — a purely command-driven plugin is valid. If a call raises,
 Beacon logs it with the script name and the game keeps running; one bad frame never
 takes the emulator down.
+
+---
+
+## Splitting a plugin across files
+
+Lua caps a single chunk at **200 local variables**. A plugin that reaches that limit
+— usually from large reference tables (sprite names, tile classifications, per-area
+data) sitting alongside the logic — splits across files with the manifest's
+`modules`:
+
+```toml
+script  = "mygame.lua"
+modules = ["data.lua"]     # loaded, in order, before the script
+```
+
+Each listed file is loaded as **its own chunk** — its own 200-local budget — into
+the **same** Lua state, in order, *before* `script`. They share globals, which is how
+a module hands its tables to the script: the module assigns a namespace global, the
+script reads it. The reference plugin does exactly this — `data.lua` holds the bulky
+lookup tables under a `REF` table, keeping them off the main chunk's budget:
+
+```lua
+-- data.lua (a module: pure data, no host-API calls)
+REF = REF or {}
+REF.sprite_names = { [0] = "Raven", [8] = "Octorock", --[[ … ]] }
+
+-- mygame.lua (the script) reads them
+local function name_of(kind) return REF.sprite_names[kind] or "object" end
+```
+
+Modules are ordinary chunks in the plugin's own sandbox — they get `mem`, `rom`, and
+the rest, but a data module normally touches none of it. There is no `require` and no
+filesystem access; the host loads exactly the files the manifest names, from the
+plugin's directory (or, for a built-in, compiled in).
 
 ---
 
