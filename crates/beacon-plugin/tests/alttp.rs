@@ -105,7 +105,7 @@ fn alttp_enemy_is_tracked_by_beacon_and_never_spoken() {
 
 #[test]
 fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
-    // A sprite whose type is not in ENEMY_TYPES (75) but which has health is
+    // A sprite whose type is not in REF.enemy_types (75) but which has health is
     // still a threat: detected via health and given an enemy beacon.
     // This is the case the type-only classification missed.
     let r = Registry::builtin();
@@ -124,7 +124,7 @@ fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
         set(0x7E0021, 0x01); // Link Y = 0x0100
         let ex = 0x0100u16 + 60;
         set(0x7E0DD0, 0x09); // active
-        set(0x7E0E20, 75); // a type not in ENEMY_TYPES
+        set(0x7E0E20, 75); // a type not in REF.enemy_types
         set(0x7E0D10, (ex & 0xFF) as u8);
         set(0x7E0D30, (ex >> 8) as u8);
         set(0x7E0D00, 0x00);
@@ -353,10 +353,11 @@ fn path_beacon(plugin: &LuaPlugin) -> Option<BeaconState> {
 }
 
 #[test]
-fn alttp_in_combat_the_guide_hushes_and_only_the_enemy_sounds() {
-    // With an enemy within striking distance the navigation guide falls silent and
-    // the pickup/person tones drop out, leaving only the nearest enemy — so a fight
-    // is not cluttered by the route or a nearby item.
+fn alttp_in_combat_the_guide_ducks_and_only_the_enemy_sounds() {
+    // With an enemy within striking distance the navigation guide DUCKS (drops well
+    // under the enemy tone but keeps guiding) and the pickup/person tones drop out,
+    // so a fight is not cluttered by a nearby item and the threat reads clearly over
+    // the guide — without losing the route entirely.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -392,21 +393,21 @@ fn alttp_in_combat_the_guide_hushes_and_only_the_enemy_sounds() {
     plugin.on_frame(&calm, 0);
     plugin.command("pathfind", &calm);
     plugin.on_frame(&calm, 1);
-    assert!(
-        path_beacon(&plugin).is_some(),
-        "the guide sounds when clear"
-    );
+    let calm_vol = path_beacon(&plugin).expect("the guide sounds when clear").volume;
     assert!(
         plugin.beacons().iter().any(|b| b.id == "item"),
         "the item sounds when clear"
     );
 
-    // Enemy steps into striking range: guide and item go silent, enemy remains.
+    // Enemy steps into striking range: the guide ducks (still present, quieter), the
+    // item goes silent, and the enemy sounds.
     plugin.on_frame(&with_enemy(true), 2);
     let ids: Vec<String> = plugin.beacons().iter().map(|b| b.id.clone()).collect();
+    let ducked = path_beacon(&plugin).expect("the guide keeps guiding, ducked, in combat");
     assert!(
-        !ids.contains(&"path".to_string()),
-        "guide hushes in combat: {ids:?}"
+        ducked.volume < calm_vol,
+        "the guide ducks below its clear volume in combat: {} vs {calm_vol}",
+        ducked.volume
     );
     assert!(
         !ids.contains(&"item".to_string()),
@@ -561,10 +562,10 @@ fn alttp_explore_routes_toward_unwalked_ground() {
 
 #[test]
 fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
-    // On the overworld, "advance" starts a route toward the current milestone's
-    // area when it is in the same world, and flags the other world otherwise. Past
-    // the intro (progress 2, Zelda delivered), the milestone spine points at the
-    // first pendant dungeon in the same (Light) world, so it announces routing there.
+    // On the overworld, "advance" starts a route toward the current goal's area when
+    // it is in the same world, and flags the other world otherwise. Past the intro
+    // (progress 2, Zelda delivered), the current quest goal is the first pendant
+    // dungeon, in the same (Light) world, so it announces routing there.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -576,7 +577,7 @@ fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
         set(0x7EF36C, 24);
         set(0x7EF36D, 24);
         set(0x7E008A, 0x18); // current area: Kakariko (row 3, col 0)
-        set(0x7EF3C5, 2); // progress: intro over, the milestone spine is active
+        set(0x7EF3C5, 2); // progress: intro over, so a dungeon goal is current
     }
     plugin.on_frame(&ram, 0);
     plugin.on_frame(&ram, 1);
@@ -588,7 +589,7 @@ fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
     );
 
     // Post-Agahnim: all three pendants, the Master Sword, Agahnim beaten, no
-    // crystals yet. The next milestone is Palace of Darkness (area 0x5E, Dark
+    // crystals yet. The next goal is Palace of Darkness (area 0x5E, Dark
     // World). The assist is already on, so as the objective changes the next frame
     // re-aims on its own and flags the other world — no second key press.
     {
@@ -687,7 +688,7 @@ fn alttp_advance_inside_an_unchained_dungeon_stays_quiet() {
 fn alttp_objective_tracks_the_quest_from_the_progress_bytes() {
     // The strategic "objective" command reads the quest-progress save bytes
     // (progress $7EF3C5, pendants $7EF374, crystals $7EF37A, sword $7EF359)
-    // and reports the current critical-path milestone. A fresh save points at
+    // and reports the current critical-path goal. A fresh save points at
     // the very first step; partway through the pendant hunt it advances to the
     // next unfinished dungeon.
     let r = Registry::builtin();
@@ -695,7 +696,7 @@ fn alttp_objective_tracks_the_quest_from_the_progress_bytes() {
 
     // Fresh save: every progress byte zero -> the scripted intro's first beat,
     // grabbing the Lamp, spoken as a "Getting started" step rather than a
-    // milestone (the intro chain refines milestones 1-2 into fine steps).
+    // bare goal (the intro chain refines the first two goals into fine steps).
     let fresh = vec![0u8; 128 * 1024];
     let out = plugin.command("objective", &fresh);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
@@ -726,10 +727,10 @@ fn alttp_objective_tracks_the_quest_from_the_progress_bytes() {
 #[test]
 fn alttp_intro_chain_walks_the_opening_beat_by_beat() {
     // The scripted intro refines the coarse "reach uncle" / "escort Zelda"
-    // milestones into fine beats, each unlocked by a save byte: the Lamp
+    // goals into fine beats, each unlocked by a save byte: the Lamp
     // ($7EF34A), the sword from Uncle ($7EF359), Zelda following ($7EF3CC == 1),
     // and Zelda delivered (progress $7EF3C5 >= 2). The "objective" readout should
-    // advance through them in order, then hand off to the milestone spine.
+    // advance through them in order, then hand off to the post-intro dungeon goals.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -768,8 +769,8 @@ fn alttp_intro_chain_walks_the_opening_beat_by_beat() {
     let t = objective(&mut plugin, &following);
     assert!(t.contains("step 4 of") && t.contains("Sanctuary"), "{t}");
 
-    // Zelda delivered (progress 2): the intro is over, the milestone spine takes
-    // over and points at the first pendant dungeon.
+    // Zelda delivered (progress 2): the intro is over, so the current goal is the
+    // first pendant dungeon.
     let mut delivered = vec![0u8; 128 * 1024];
     delivered[wram_offset(0x7EF3C5).unwrap()] = 2;
     let t = objective(&mut plugin, &delivered);
@@ -1253,7 +1254,7 @@ fn alttp_kill_room_states_the_requirement_and_leads_to_the_enemy() {
     let frame = |enemy_state: u8| -> Vec<u8> {
         let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
-        set(0x7EF3C5, 2); // progress past the intro, so the dungeon spine is active
+        set(0x7EF3C5, 2); // progress past the intro, so a post-intro goal is current
         set(0x7E040C, 0x02); // a dungeon id
         set(0x7E00AE, 0x0A); // room-clear kill tag
         set(0x7E0DD0, enemy_state); // slot 0 state

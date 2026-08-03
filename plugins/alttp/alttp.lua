@@ -946,6 +946,7 @@ local pathfind_arrival = nil -- what to say on reaching the goal, else a generic
 local PATH_PITCH = 3.0         -- a high, distinct navigation tone
 local PATH_ALIGNED_PITCH = 3.4 -- brighter when Link faces the way to go
 local PATH_VOLUME = 0.30        -- kept well under the object beacons so threats read over the guide
+local PATH_DUCK = 0.35          -- nav volume scale while an enemy is engaged: ducked, not silenced
 local PATH_PING_HZ = 0.5        -- sonar: a ping every 2 seconds over a soft steady tone
 local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
 local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
@@ -954,8 +955,9 @@ local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 -- Shared by both route followers (local pathfinder and cross-screen overworld), so
 -- the heading maths and tone live in one place. The pitch brightens when Link is
 -- already facing along the dominant axis toward the corner, so walking toward the
--- sound is walking the route.
-local function aim_path_beacon(s, w)
+-- sound is walking the route. `duck` drops the volume while an enemy is engaged, so
+-- the threat tone reads over the guide without the guide dropping out entirely.
+local function aim_path_beacon(s, w, duck)
   local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
   local d = DIRS[s.direction]
   local on_course = d ~= nil and (
@@ -964,7 +966,7 @@ local function aim_path_beacon(s, w)
   beacon.set("path", {
     x = dx, y = dy,
     pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
-    volume = PATH_VOLUME,
+    volume = duck and PATH_VOLUME * PATH_DUCK or PATH_VOLUME,
     tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
   })
 end
@@ -1045,11 +1047,9 @@ local function pathfind_update(s)
     return
   end
 
-  -- Hush the guide while an enemy is engaged, so the fight's audio is unobstructed;
-  -- the follower keeps tracking, and the tone returns once the enemy backs off.
-  if combat_engaged then beacon.clear("path"); return end
-
-  aim_path_beacon(s, path[pathfind_wp])
+  -- Duck the guide while an enemy is engaged, so the threat tone reads clearly over
+  -- it, but keep guiding — full volume returns once the enemy backs off.
+  aim_path_beacon(s, path[pathfind_wp], combat_engaged)
 end
 
 -- Tile-attribute classes, named like the collision sets (IMPASSABLE, COLLIDE_*),
@@ -1465,8 +1465,7 @@ local function ow_route_update(s)
   if ow_route_wp > #path then
     ow_route_stop(); beacon.clear("path"); return
   end
-  if combat_engaged then beacon.clear("path"); return end -- hush the guide in a fight
-  aim_path_beacon(s, path[ow_route_wp])
+  aim_path_beacon(s, path[ow_route_wp], combat_engaged) -- duck the guide in a fight
 end
 
 -- The opening context navigation auto-starts in: Link up and controllable in his
