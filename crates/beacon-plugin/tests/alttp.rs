@@ -918,14 +918,14 @@ fn alttp_intro_guide_auto_advances_when_a_beat_completes() {
         ram
     };
 
-    // Prime, then engage the guide on the Lamp beat.
+    // Prime; nav auto-starts in the house on the next frame and cues the Lamp beat —
+    // no key press (the player is up out of bed).
     plugin.on_frame(&house(0), 0);
-    plugin.on_frame(&house(0), 1);
-    let out = plugin.command("advance", &house(0));
-    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    let out = plugin.on_frame(&house(0), 1);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
     assert!(
         texts.iter().any(|t| t.to_lowercase().contains("lantern")),
-        "engages on the Lamp beat, cueing the lantern: {texts:?}"
+        "auto-starts on the Lamp beat, cueing the lantern: {texts:?}"
     );
 
     // Lamp now in hand: the next frame auto-advances to the leave-the-house beat,
@@ -956,8 +956,7 @@ fn alttp_intro_chest_speaks_a_custom_arrival_cue() {
     };
 
     plugin.on_frame(&house((32, 40)), 0);
-    plugin.on_frame(&house((32, 40)), 1);
-    plugin.command("advance", &house((32, 40))); // engage -> routes to the chest
+    plugin.on_frame(&house((32, 40)), 1); // nav auto-starts in the house -> routes to the chest
 
     // Reach the chest: the custom arrival cue replaces the generic line.
     let out = plugin.on_frame(&house((20, 20)), 2);
@@ -1012,7 +1011,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "10,1",
+        armed, "11,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -1098,7 +1097,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "10,2",
+        resumed, "11,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1142,7 +1141,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "10,2",
+        armed, "11,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1180,8 +1179,8 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "10,3",
-        "the dungeon leg targets the Find Zelda waypoint (index 3)"
+        "11,4",
+        "the dungeon leg targets the Find Zelda waypoint (index 4)"
     );
     assert!(
         out.iter().any(|i| i.text.contains("Find Zelda")),
@@ -1206,8 +1205,8 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return tostring(nav_chain_i)", &frame(0x60, 48, 415))
             .unwrap(),
-        "4",
-        "in room 0x60 the chain leads to that room's waypoint (index 4)"
+        "5",
+        "in room 0x60 the chain leads to that room's waypoint (index 5)"
     );
 }
 
@@ -1237,7 +1236,7 @@ fn alttp_two_level_room_routes_to_the_stairs_before_the_lower_waypoint() {
     };
 
     // Upstairs (level 0), a few tiles from the room's waypoints: the guide targets
-    // the staircase waypoint (index 8, level 0), NOT the lower-floor point (index 9).
+    // the staircase waypoint (index 9, level 0), NOT the lower-floor point (index 10).
     let upper = frame(0, 156, 485);
     plugin.on_frame(&upper, 0);
     plugin.on_frame(&upper, 1);
@@ -1245,7 +1244,7 @@ fn alttp_two_level_room_routes_to_the_stairs_before_the_lower_waypoint() {
     plugin.on_frame(&upper, 2);
     assert_eq!(
         plugin.eval("return tostring(nav_chain_i)", &upper).unwrap(),
-        "8",
+        "9",
         "upstairs, the guide leads to the staircase waypoint, not across the overlay"
     );
 
@@ -1258,8 +1257,95 @@ fn alttp_two_level_room_routes_to_the_stairs_before_the_lower_waypoint() {
     plugin2.on_frame(&lower, 2);
     assert_eq!(
         plugin2.eval("return tostring(nav_chain_i)", &lower).unwrap(),
-        "9",
+        "10",
         "downstairs, the lower-floor waypoint takes over"
+    );
+}
+
+#[test]
+fn alttp_nav_left_on_but_idle_re_arms_itself() {
+    // A savestate load can leave nav on while its followers have been cleared, at an
+    // unchanged navigation signature. Without a self-heal the guide stays silently
+    // idle — no chain, no route, nothing drawn on the map — until toggled off and on.
+    // nav_update must notice "on but idle" and re-aim on its own.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Zelda beat, in room 0x61 by the Find-Zelda waypoint: engaging arms the chain.
+    let mut ram = dungeon_frame((65, 415), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x61);
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // Zelda beat
+    }
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+    plugin.command("advance", &ram); // engage -> chain armed
+    plugin.on_frame(&ram, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain ~= nil)", &ram).unwrap(),
+        "true",
+        "engaging arms the chain"
+    );
+
+    // Simulate a savestate load: followers cleared, but nav still on and the
+    // signature unchanged (same room/goal). The old signature-only gate would leave
+    // this idle forever.
+    plugin
+        .eval(
+            "nav_chain = nil; pathfind_active = false; ow_route_goal = nil; route_room = nil; return 1",
+            &ram,
+        )
+        .unwrap();
+
+    // One more frame at the same position: the self-heal must re-arm the chain.
+    plugin.on_frame(&ram, 3);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain ~= nil)", &ram).unwrap(),
+        "true",
+        "nav left on but idle re-aims itself without a toggle"
+    );
+}
+
+#[test]
+fn alttp_navigation_starts_itself_when_link_gets_up_in_his_house() {
+    // At the very start of the quest, once Link is up out of bed and controllable in
+    // his house (in play, room 0x104, no Lamp yet), navigation turns itself on so the
+    // opening guidance leads without the player first pressing the key.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let mut ram = dungeon_frame((296, 1066), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x04);
+        set(0x7E00A1, 0x01); // dungeon_room 0x0104 = Link's house
+        // Lamp ($7EF34A) and progress ($7EF3C5) left at 0.
+    }
+
+    assert_eq!(
+        plugin.eval("return tostring(nav_active)", &ram).unwrap(),
+        "false",
+        "nav starts off"
+    );
+    plugin.on_frame(&ram, 0); // caches state
+    plugin.on_frame(&ram, 1); // auto-start fires
+    assert_eq!(
+        plugin.eval("return tostring(nav_active)", &ram).unwrap(),
+        "true",
+        "nav turns itself on when Link is up in his house at the start"
+    );
+
+    // It does not fight a manual toggle-off: turned off in the house, it stays off.
+    plugin.command("advance", &ram); // toggle off
+    plugin.on_frame(&ram, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_active)", &ram).unwrap(),
+        "false",
+        "a deliberate toggle-off in the house is respected"
     );
 }
 

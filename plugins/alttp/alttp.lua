@@ -138,6 +138,10 @@ local LOW_HEALTH_FRACTION = 0.3
 local prev = nil
 -- Latched so the warning fires on crossing the threshold, not every frame below.
 local low_health_warned = false
+-- Latched so navigation auto-starts once when Link gains control at the very start
+-- of the quest, not every frame he is in his house. Cleared when he leaves that
+-- opening context, so it re-arms on a fresh start and a manual toggle-off stays off.
+local intro_nav_armed = false
 
 -- Sprite table: 16 slots of active objects and enemies. Addresses from the
 -- well-documented ALttP RAM map, verified against the running game. Each slot's
@@ -1499,6 +1503,21 @@ function on_frame(frame)
   local was = prev
   prev = now
 
+  -- Turn navigation on by itself at the very start of the quest — once Link is up
+  -- out of bed and controllable in his house (in play, room 0x104, no Lamp yet), so
+  -- the opening guidance leads without the player first pressing the key. Setting
+  -- nav_active is enough: nav_update, later this frame, does the re-aim. Edge-
+  -- triggered, and cleared once he leaves the opening, so it re-arms on a fresh
+  -- start but a deliberate toggle-off in the house stays off.
+  if in_play(now) and now.dungeon_room == 0x104 and mem.u8(0x7EF34A) == 0 then
+    if not intro_nav_armed then
+      intro_nav_armed = true
+      nav_active = true
+    end
+  else
+    intro_nav_armed = false
+  end
+
   -- Death outranks everything else that could be happening.
   if now.module == 0x12 and was.module ~= 0x12 then
     say("You died.", { priority = "critical", category = "combat" })
@@ -2197,6 +2216,7 @@ local UNCLE_APPROACH = {
 local COURTYARD = {
   { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
   { tx = 256, ty = 225, say = "Step north into the castle." },
+  { tx = 335, ty = 377, room = 0x55, level = 0 }, -- sewer room where the uncle is met
   { tx = 72, ty = 415, room = 0x61, say = "Find Zelda." },
   { tx = 47, ty = 391, room = 0x60 },
   { tx = 56, ty = 335, room = 0x50 },
@@ -2582,6 +2602,7 @@ end
 -- movement within a module quietly. Global for MCP inspection.
 nav_active = false
 local nav_sig = nil
+local nav_idle_sig = nil -- signature at which an "on but idle" re-aim was last forced
 -- The "<room>:<objective>" we last announced, so a short-term room objective is
 -- stated once on entry rather than every frame while it is unmet.
 local room_obj_announced = nil
@@ -2622,6 +2643,13 @@ end
 -- and where to lead (a world pixel, or nothing). While one is active it overrides
 -- the quest goal; when it clears, the goal resumes. Kill-rooms are the first,
 -- built on the room-tag and live-enemy checks defined earlier.
+
+-- Rooms whose chest is worth a detour — its contents matter to the route (e.g. the
+-- room-0x72 map). Most chests are optional and only get the item beacon, not a
+-- routing objective, so the guide does not drag Link off the linear route to every
+-- chest it passes. Keyed by dungeon room id.
+local CHEST_ROOMS = { [0x72] = true }
+
 local ROOM_OBJECTIVES = {
   { id = "kill",
     cue = "Defeat all enemies to open the doors.",
@@ -2649,8 +2677,8 @@ local ROOM_OBJECTIVES = {
   { id = "chest",
     cue = "Open the chest.",
     active = function(s)
-      return nearest_chest_tile(s) ~= nil and nearest_pending_enemy(s) == nil
-        and not overlords_pending()
+      return CHEST_ROOMS[s.dungeon_room] and nearest_chest_tile(s) ~= nil
+        and nearest_pending_enemy(s) == nil and not overlords_pending()
     end,
     target = function(s)
       local c = nearest_chest_tile(s)
@@ -2684,8 +2712,20 @@ nav_update = function(s)
   if not nav_active or not in_play(s) then return end
   local v = read_progress()
   local sig = nav_signature(s, v)
+  -- Re-aim on a context change. Also re-aim when nav is on but nothing is armed at
+  -- an unchanged signature: loading a savestate (or re-entering play) can leave nav
+  -- on with its followers cleared, and the signature-only gate would then keep it
+  -- silently idle — drawing no route and giving no guidance — until it was toggled
+  -- off and on. The nav_idle_sig latch limits this to a single re-aim per signature,
+  -- so a genuinely unrouteable spot does not re-aim every frame.
+  local idle = nav_chain == nil and not pathfind_active
+    and ow_route_goal == nil and route_room == nil
   if sig ~= nav_sig then
     nav_sig = sig
+    nav_idle_sig = nil
+    nav_reaim(s, v)
+  elseif idle and nav_idle_sig ~= sig then
+    nav_idle_sig = sig
     nav_reaim(s, v)
   end
   -- Short-term room objective: while this room gates progress on a task done in
