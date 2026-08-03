@@ -2080,15 +2080,16 @@ local UNCLE_APPROACH = {
 local COURTYARD = {
   { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
   { tx = 256, ty = 225, say = "Step north into the castle." },
-  { tx = 335, ty = 377, room = 0x55, level = 0 }, -- sewer room where the uncle is met
+  { tx = 335, ty = 379, room = 0x55, level = 0 }, -- sewer room where the uncle is met
   { tx = 72, ty = 415, room = 0x61, say = "Find Zelda." },
-  { tx = 47, ty = 391, room = 0x60 },
-  { tx = 56, ty = 335, room = 0x50 },
-  { tx = 95, ty = 11, room = 0x01 },
+  { tx = 47, ty = 392, room = 0x60, level = 1 },
+  { tx = 57, ty = 335, room = 0x50, level = 1 },
+  { tx = 95, ty = 11, room = 0x01, level = 1 },
   { tx = 159, ty = 472, room = 0x72, level = 0 }, -- south-door exit (upper floor, after the guard/key/chest)
-  { tx = 153, ty = 491, room = 0x72, level = 0, say = "Take the stairs down." }, -- mouth of the layer-swap stairs
+  { tx = 153, ty = 491, room = 0x72, level = 0 }, -- mouth of the layer-swap stairs
   { tx = 149, ty = 507, room = 0x72, level = 1 }, -- lower floor, reached down those stairs
-  { tx = 129, ty = 560, room = 0x82 },
+  { tx = 129, ty = 560, room = 0x82, level = 1 },
+  { tx = 79, ty = 518, room = 0x81, level = 1 },
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}

@@ -893,7 +893,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "11,1",
+        armed, "12,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -979,7 +979,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "11,2",
+        resumed, "12,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1023,7 +1023,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "11,2",
+        armed, "12,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1042,6 +1042,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         let mut ram = dungeon_frame((ltx, lty), (0, 0), &[]);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E00A0, room); // dungeon room
+        set(0x7E00EE, if room == 0x60 { 1 } else { 0 }); // room 0x60 is on the lower floor
         set(0x7EF34A, 1); // Lamp
         set(0x7EF359, 1); // sword
         set(0x7EF3CC, 0); // Zelda not following
@@ -1061,7 +1062,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "11,4",
+        "12,4",
         "the dungeon leg targets the Find Zelda waypoint (index 4)"
     );
     assert!(
@@ -1071,8 +1072,8 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
     );
 
     // Reaching Find Zelda records it and goes quiet — no room-graph hop. The chain
-    // stays armed; only when Link crosses into room 0x60 does its waypoint (index
-    // 4) take over and lead to the silent point there.
+    // stays armed; only when Link crosses into room 0x60 (its lower floor) does its
+    // waypoint (index 5) take over and lead to the silent point there.
     plugin.on_frame(&frame(0x61, 72, 415), 3); // on Find Zelda -> recorded
     assert!(
         plugin
