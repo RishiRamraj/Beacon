@@ -124,9 +124,10 @@ takes the emulator down.
 ## Host API reference
 
 These globals are installed before your script runs. This is the **entire** API
-available today. (The design anticipates more — spatial-audio beacons, rumble,
-menus, savestate hooks — but those are not yet implemented; see
-[ADR 0015](decisions/0015-plugin-runtime.md).)
+available today. (The design anticipates more — rumble, menus, savestate hooks —
+but those are not yet implemented; see
+[ADR 0015](decisions/0015-plugin-runtime.md). Spatial-audio beacons, once on that
+list, now ship — see [`beacon`](#beacon--spatial-audio-cues-optional) below.)
 
 ### `mem` — reading the current frame
 
@@ -189,6 +190,7 @@ Being generous with `say` is therefore safe.
 | `collapse_key` | string | — | Intents sharing a key in one frame collapse to the single nearest. |
 | `distance` | number | +∞ | Picks the winner when collapsing; smaller wins. |
 | `rate_limit` | string | — | Suppress identical text for this long: `"400ms"`, `"1s"`, `"2.5s"`, or a bare number of milliseconds. |
+| `always` | bool | `false` | Bypass the verbosity gate — spoken at any verbosity, not only when the priority clears the current level. For content the player must not lose to a low chatter setting, like a game's own story or menu text. It does not raise urgency: a higher-priority intent still wins ordering and can still barge over it. |
 
 The **priority classes**, highest first:
 
@@ -267,8 +269,11 @@ something is — an enemy, a destination — continuously, without words.
 
 - `beacon.set(id, opts)` — add or update a beacon. `opts`: `x`/`y` (rightward and
   forward offset; only their ratio matters, for left/right pan), `volume` (0-1,
-  which **you** set from distance), `pitch` (default 1). Re-set each frame with
-  fresh offsets as things move.
+  which **you** set from distance), `pitch` (default 1), `tremolo` (amplitude-pulse
+  rate in Hz; 0, the default, is a steady tone — pulse faster for more urgent
+  things), and `ping` (boolean: when true each tremolo cycle is a sharp sonar-like
+  attack over a soft floor instead of a smooth swell). Re-set each frame with fresh
+  offsets as things move.
 - `beacon.clear(id)` — remove a beacon (e.g. when nothing is in range).
 
 ```lua
@@ -281,8 +286,9 @@ end
 
 The rendering is stereo panning for now (front and back sound alike — pair it with
 a spoken cue for that axis); an HRTF renderer can replace it behind the same API.
-Players control it with `beacons.enabled` and `beacons.volume`. See
-[ADR 0021](decisions/0021-spatial-audio-beacons.md).
+Players control it with `beacons.enabled`, the `beacons.volume_max` /
+`beacons.volume_min` loudness range, and `beacons.music_duck` (how far the game
+audio ducks under a beacon). See [ADR 0021](decisions/0021-spatial-audio-beacons.md).
 
 ### `on_draw(canvas)` — map mode (optional)
 
@@ -308,6 +314,14 @@ The font currently covers digits, uppercase letters, space, and basic punctuatio
 enough for coordinates and room numbers. `on_draw` runs only while the map is shown,
 so it costs nothing when hidden. See [`plugins/alttp/alttp.lua`](../plugins/alttp/alttp.lua)
 for a worked example, and [ADR 0017](decisions/0017-plugin-debug-drawing.md).
+
+**Auto-showing the map with navigation.** The player toggles the map with its key
+(default `m`), but the host also brings it up on its own the moment a plugin's
+navigation guidance starts — so a route is visible without a second key press. This
+keys off a global boolean named `nav_active`: set it `true` while your plugin is
+guiding (and `false` otherwise), and the host shows the map on the `false`→`true`
+edge. The edge trigger means hiding the map by hand while still navigating is
+respected. A plugin that never sets `nav_active` never triggers it.
 
 The alttp plugin's `on_draw` produces this — the room, Link's position and facing,
 and his health, drawn from memory:

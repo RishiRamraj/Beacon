@@ -68,6 +68,15 @@ pub trait Plugin {
         false
     }
 
+    /// Whether the plugin's navigation guidance is currently active. The host uses
+    /// this to bring the map up on its own the moment guidance starts — so a player
+    /// who turns navigation on, or has it auto-start at the opening, sees the route
+    /// without also reaching for the map key. `false` by default (a plugin with no
+    /// navigation never triggers it).
+    fn navigation_active(&self) -> bool {
+        false
+    }
+
     /// Renders the plugin's map for the current frame into `out`, returning its
     /// dimensions, or `None` if the plugin draws nothing.
     ///

@@ -67,3 +67,18 @@ closest enemy and grows louder as it closes, complementing the spoken proximity 
   real-time thread. Frame-path synthesis with a continuous phase is simpler and click-free.
 - **Off by default** — rejected; it is the flagship of this phase and should be heard, but modest
   in volume and trivial to silence.
+
+## Update (2026-08-02): as shipped
+
+The decision held; a few specifics evolved with live tuning, so the record above no longer matches
+the code exactly:
+
+- **Pulsing shipped.** The "open question" of a pulsed tone is answered: `BeaconState` gained
+  `tremolo` (amplitude-pulse rate in Hz) and `ping` (a sharp sonar-attack envelope over a soft
+  floor, versus a smooth swell). `beacon.set` accepts both. Faster pulsing marks more urgent things.
+- **Settings.** `beacons.volume` was replaced by a loudness *range* — `beacons.volume_max` and
+  `beacons.volume_min` — plus `beacons.music_duck` (how far game audio ducks under a beacon).
+  `beacons.enabled` is unchanged.
+- **More than one beacon.** The alttp plugin now drives per-class beacons (enemy / item / person,
+  each with its own gain and tremolo signature) and a **sonar path beacon** that leads along the
+  navigation route, in addition to the original nearest-enemy tone.

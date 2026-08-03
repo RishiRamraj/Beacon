@@ -607,46 +607,6 @@ fn alttp_advance_on_the_overworld_heads_toward_the_story_objective() {
 }
 
 #[test]
-fn alttp_advance_names_the_next_canonical_dungeon_item() {
-    // In Eastern Palace without the Bow yet, "advance" names the Bow as the
-    // next thing to fetch. Once the Bow is held but the Big Key is not, it
-    // moves the goal on to the Big Key — the canonical dungeon spine.
-    let r = Registry::builtin();
-    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-
-    let base = |bow: u8, room: u8| -> Vec<u8> {
-        let mut ram = dungeon_frame((10, 10), (20, 10), &[]);
-        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
-        set(0x7E040C, 0x04); // Eastern Palace
-        set(0x7E00A0, room); // current room
-        set(0x7EF340, bow); // Bow (0 = not yet, 1 = have)
-        set(0x7EF3C5, 2); // intro done (in a dungeon => past the opening)
-        ram
-    };
-
-    // No Bow, standing in some other room: names the Bow, not yet held.
-    let no_bow = base(0, 0x00);
-    plugin.on_frame(&no_bow, 0);
-    plugin.on_frame(&no_bow, 1);
-    let out = plugin.command("advance", &no_bow);
-    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
-    assert!(
-        texts.iter().any(|t| t.contains("Bow")),
-        "points at the Bow first: {texts:?}"
-    );
-
-    // Bow in hand, Big Key not: the assist is already on, so the next frame
-    // re-aims the goal at the Big Key on its own.
-    let have_bow = base(1, 0x00);
-    let out = plugin.on_frame(&have_bow, 2);
-    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
-    assert!(
-        texts.iter().any(|t| t.contains("Big Key")),
-        "advances to the Big Key once the Bow is held: {texts:?}"
-    );
-}
-
-#[test]
 fn alttp_entering_the_dungeon_or_overworld_is_not_narrated() {
     // Crossing into the dungeon or overworld module should not speak
     // "dungeon" / "overworld" — the room/area callout already says where.
@@ -690,116 +650,37 @@ fn alttp_entering_the_dungeon_or_overworld_is_not_narrated() {
 }
 
 #[test]
-fn alttp_advance_follows_a_learned_cross_room_route() {
-    // Cross-room routing learns a dungeon's connectivity as Link walks it.
-    // After observing a walk from one room into the Bow's room, "advance" from
-    // the first room follows that learned edge ("Following the route") instead
-    // of falling back to a rough compass heading.
-    let r = Registry::builtin();
-    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-
-    // Eastern Palace (Bow in room 0xA9, still un-held). An open room, so the
-    // local planner can always reach a learned exit spot.
-    let frame = |room: u8, tx: u16, ty: u16| -> Vec<u8> {
-        let mut ram = dungeon_frame((tx, ty), (5, 5), &[]);
-        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
-        set(0x7E040C, 0x04); // Eastern Palace
-        set(0x7E00A0, room); // current room id
-        set(0x7EF3C5, 2); // intro done (in a dungeon => past the opening)
-        ram
-    };
-
-    // Walk from room 0x00 into the Bow room 0xA9 (records edge 0x00 -> 0xA9),
-    // then step back into 0x00. The first on_frame only primes `prev`, so the
-    // transition-recording walk starts on the second frame.
-    plugin.on_frame(&frame(0x00, 40, 40), 0); // prime
-    plugin.on_frame(&frame(0x00, 40, 40), 1); // last spot in room 0x00
-    plugin.on_frame(&frame(0xA9, 10, 10), 2); // -> records 0x00 -> 0xA9
-    plugin.on_frame(&frame(0x00, 32, 32), 3); // back in 0x00
-
-    let out = plugin.command("advance", &frame(0x00, 32, 32));
-    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
-    assert!(
-        texts.iter().any(|t| t.contains("Following the route")),
-        "uses the learned graph to route across rooms: {texts:?}"
-    );
-
-    // Without any learned edge, a fresh plugin can only give a rough heading.
-    let mut naive = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    naive.on_frame(&frame(0x00, 32, 32), 0);
-    naive.on_frame(&frame(0x00, 32, 32), 1);
-    let out = naive.command("advance", &frame(0x00, 32, 32));
-    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
-    assert!(
-        texts.iter().any(|t| t.contains("roughly")),
-        "falls back to a heading with no learned route: {texts:?}"
-    );
-}
-
-#[test]
-fn alttp_advance_routes_through_unwalked_rooms_via_the_static_graph() {
-    // The whole point of the static graph: route through rooms Link has never
-    // walked. Standing at the Eastern Palace entrance (room 0xC9) with nothing
-    // learned, "advance" toward the Bow (room 0xA9) still finds the way — the
-    // baked graph knows 0xC9 -> 0xB9 -> 0xA9 leaves to the north — and names the
-    // direction ("Head north") rather than the un-connected "roughly" fallback.
-    let r = Registry::builtin();
-    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-
-    // Link low in the room, a door tile to the north to leave by.
-    let mut room = dungeon_frame((32, 40), (32, 10), &[]);
-    {
-        let mut set = |addr: u32, v: u8| room[wram_offset(addr).unwrap()] = v;
-        set(0x7E040C, 0x04); // Eastern Palace
-        set(0x7E00A0, 0xC9); // at the entrance room
-        set(0x7EF340, 0x00); // Bow not yet held
-        set(0x7EF3C5, 2); // intro done (in a dungeon => past the opening)
-    }
-    plugin.on_frame(&room, 0); // prime
-    plugin.on_frame(&room, 1);
-    let out = plugin.command("advance", &room);
-    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
-    assert!(
-        texts.iter().any(|t| t.contains("Head north")),
-        "static graph routes north through unwalked rooms: {texts:?}"
-    );
-    assert!(
-        !texts.iter().any(|t| t.contains("roughly")),
-        "and does not fall back to the un-connected heading: {texts:?}"
-    );
-    plugin.on_frame(&room, 2); // pathfind_update emits the guide beacon
-    assert!(path_beacon(&plugin).is_some(), "and starts guiding there");
-}
-
-#[test]
-fn alttp_advance_in_a_cleared_dungeon_heads_for_the_exit() {
-    // The L-key "advance" guide, in a dungeon whose prize is already in hand,
-    // routes to the exit rather than hunting for more items. Eastern Palace
-    // (dungeon id 0x04) is cleared once the Pendant of Courage (pendants bit 0)
-    // is held. There is a door tile in the room to route toward.
+fn alttp_advance_inside_an_unchained_dungeon_stays_quiet() {
+    // The old item -> Big Key -> boss room-graph spine is retired; a dungeon is
+    // guided by an authored waypoint chain instead. Until a given dungeon has one,
+    // the guide must NOT fall back to naming canonical items or routing a spine
+    // (which fought the chain navigator) — inside the dungeon it stays quiet rather
+    // than mis-route.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
     let mut room = dungeon_frame((10, 10), (20, 10), &[]);
     {
         let mut set = |addr: u32, v: u8| room[wram_offset(addr).unwrap()] = v;
-        set(0x7E040C, 0x04); // in Eastern Palace
-        set(0x7EF374, 0x01); // Pendant of Courage -> Eastern cleared
-        set(0x7EF3C5, 2); // intro done (in a dungeon => past the opening)
+        set(0x7E040C, 0x04); // Eastern Palace (no chain authored yet)
+        set(0x7E00A0, 0x00);
+        set(0x7EF340, 0x00); // Bow not held
+        set(0x7EF3C5, 2); // intro done -> a post-intro dungeon goal is current
     }
     plugin.on_frame(&room, 0);
     plugin.on_frame(&room, 1);
     let out = plugin.command("advance", &room);
-    plugin.on_frame(&room, 2); // pathfind_update emits the guide beacon
-
-    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
     assert!(
-        texts
-            .iter()
-            .any(|t| t.to_lowercase().contains("exit") || t.to_lowercase().contains("cleared")),
-        "a cleared dungeon sends you to the exit: {texts:?}"
+        !texts.iter().any(|t| t.contains("Bow") || t.contains("Big Key")
+            || t.to_lowercase().contains("boss") || t.to_lowercase().contains("exit")),
+        "no retired spine chatter inside an un-chained dungeon: {texts:?}"
     );
-    assert!(path_beacon(&plugin).is_some(), "and starts guiding there");
+    plugin.on_frame(&room, 2);
+    assert!(
+        path_beacon(&plugin).is_none(),
+        "and it does not drive a route there"
+    );
 }
 
 #[test]
@@ -1338,6 +1219,11 @@ fn alttp_navigation_starts_itself_when_link_gets_up_in_his_house() {
         "true",
         "nav turns itself on when Link is up in his house at the start"
     );
+    // The host reads this to bring the map up on its own when guidance starts.
+    assert!(
+        plugin.navigation_active(),
+        "navigation_active() reports the guidance is on, so the host shows the map"
+    );
 
     // It does not fight a manual toggle-off: turned off in the house, it stays off.
     plugin.command("advance", &ram); // toggle off
@@ -1346,6 +1232,10 @@ fn alttp_navigation_starts_itself_when_link_gets_up_in_his_house() {
         plugin.eval("return tostring(nav_active)", &ram).unwrap(),
         "false",
         "a deliberate toggle-off in the house is respected"
+    );
+    assert!(
+        !plugin.navigation_active(),
+        "navigation_active() reflects the toggle-off"
     );
 }
 

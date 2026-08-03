@@ -58,6 +58,9 @@ pub struct Session {
     config: Option<ConfigModal>,
     /// Whether the plugin's map view is showing.
     show_map: bool,
+    /// The plugin's navigation state last frame, so the map can be brought up on
+    /// the off->on edge (guidance starting) without fighting a manual hide.
+    nav_was_active: bool,
     /// The plugin's last rendered map, and its dimensions.
     map_buffer: Vec<u32>,
     map_dims: (u32, u32),
@@ -112,6 +115,7 @@ impl Session {
             timing_disturbed: false,
             config: None,
             show_map: false,
+            nav_was_active: false,
             map_buffer: Vec::new(),
             map_dims: (0, 0),
             held_buttons: 0,
@@ -179,6 +183,15 @@ impl Session {
             Err(_) => Vec::new(),
         };
         self.dispatch(intents);
+
+        // Bring the map up on its own the moment the plugin's navigation starts, so
+        // the route shows without also pressing the map key. Edge-triggered on the
+        // off->on transition, so hiding the map by hand while navigating stays hidden.
+        let nav = self.plugin.navigation_active();
+        if nav && !self.nav_was_active && self.plugin.has_map() {
+            self.show_map = true;
+        }
+        self.nav_was_active = nav;
 
         // Keep the map live while it is on screen; it costs nothing when hidden.
         if self.show_map {

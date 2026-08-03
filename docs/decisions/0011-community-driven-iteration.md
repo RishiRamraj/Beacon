@@ -80,3 +80,11 @@ Concretely:
   real users on real configurations beat a CI runner.
 - **Copy the Toby mod's full feature set up front** — not rejected as a target, but rejected as
   a plan; it is a study reference, and feature order should follow reported need.
+
+## Update (2026-08-02): the deferred pathfinding shipped
+
+The "live risk" above is resolved, and the way it resolved is the point of this ADR. The spatial
+model shipped first; community feedback then described the *specific* navigation problems, and a
+full pathfinding and goal engine was built on those — not on speculation
+([ADR 0022](0022-navigation-and-goal-engine.md)). Deferring pathfinding off the critical path, then
+building it after feedback, worked as intended.

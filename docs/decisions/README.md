@@ -26,3 +26,4 @@ narrative source; these records are the per-decision index.
 | [0019](0019-scan-nearest-first.md) | Scan describes the nearest objects on demand, before any spatial audio | Accepted |
 | [0020](0020-rom-access-and-game-text.md) | ROM access for plugins, and reading the game's own text | Accepted |
 | [0021](0021-spatial-audio-beacons.md) | Spatial-audio beacons by stereo panning, HRTF deferred | Accepted |
+| [0022](0022-navigation-and-goal-engine.md) | A data-driven navigation and goal engine in the plugin | Accepted (implemented) |

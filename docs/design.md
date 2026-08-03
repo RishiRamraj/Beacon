@@ -702,13 +702,14 @@ unchanged.
   and **automatic enemy proximity** — the plugin speaks when the nearest enemy crosses into a
   closer ring ("Enemy north, close"), hysteresis-gated so it announces on approach, not every
   frame, and rate-limited by the arbiter. The sprite addresses were verified against the running
-  game through the MCP tools before being built on. Still ahead, on top of that same reading:
-  spatial-audio beacons and arrival tones, a destination menu, soft targeting, a sprite-type
-  naming table, and pathfinding. **Start from
+  game through the MCP tools before being built on. The plan was to **start from
   navi's existing spatial model** — the two-ring proximity zones and forward cone scan — and
-  get it into community hands before building anything more ambitious. Pathfinding comes
-  *after* real players report what the existing model actually fails at (§10.3). This is the
-  Toby-DOOM-parity milestone and the point at which the tool becomes genuinely playable.
+  get it into community hands before building anything more ambitious, with pathfinding coming
+  *after* real players reported what the existing model failed at (§10.3). That feedback arrived,
+  and pathfinding, arrival tones, and a full navigation/goal engine have since landed in the
+  reference plugin ([ADR 0022](decisions/0022-navigation-and-goal-engine.md)) — see the "landed"
+  note below. This is the Toby-DOOM-parity milestone and the point at which the tool becomes
+  genuinely playable.
   **Reading the game's own text** has also landed
   ([ADR 0020](decisions/0020-rom-access-and-game-text.md)): plugins gained read-only `rom`
   access, and the alttp plugin decodes ALttP's dialogue table from the ROM at load, speaking a
@@ -719,6 +720,11 @@ unchanged.
   the game audio. The alttp plugin puts a tone on the nearest enemy that pans toward it and grows
   louder as it closes. This is the simple first step — HRTF (Steam Audio) is a later upgrade
   behind the same interface, per the start-simple-and-iterate approach.
+  **Navigation has landed** ([ADR 0022](decisions/0022-navigation-and-goal-engine.md)): the alttp
+  plugin now carries a data-driven goal engine, A* pathfinding over the live collision grid (one
+  `planned_route` routine shared by the audio guide and the map), waypoint chains, room objectives,
+  and two-level-room routing — turn-by-turn guidance toward the current quest objective. It was
+  built *after* real feedback, exactly as this section intended, not on speculation.
 - **Phase 4 — proof of generality.** A second SNES game plugin, chosen specifically to
   stress the plugin API against something structurally different from ALttP. Packaging,
   documentation, ROM hash database.
@@ -768,10 +774,11 @@ Reviewed and closed. The bar for reopening any of these is new evidence, not new
 
 ### 10.2 Live
 
-- **Pathfinding.** Still the highest-uncertainty item, but it is no longer a blocker on the
-  critical path — see §10.3. It needs a walkability map derived from tile attribute data the
-  PoC already reads; deriving that reliably across overworld and dungeon tilesets is real
-  work.
+- **Pathfinding.** *Resolved.* Once the highest-uncertainty item, it has since been built —
+  a walkability map is derived from the tile-attribute data across both the overworld and dungeon
+  tilesets, and A* routes over it ([ADR 0022](decisions/0022-navigation-and-goal-engine.md)). It
+  was never a blocker on the critical path (§10.3), and the community feedback described exactly
+  the navigation problems to solve.
 - **Whether the hook patch is ever needed at all.** Genuinely open, and deliberately so.
   Phases 0–2 answer it empirically.
 
@@ -787,6 +794,10 @@ tell us what is actually missing. The PoC's spatial awareness may prove sufficie
 parts of the game, and where it isn't, the failure reports will describe the *specific*
 navigation problem to solve rather than the general one. Building a full pathfinder on
 speculation is how this stalls.
+
+*This played out as planned.* The spatial model shipped first; feedback then drove a full
+navigation and goal engine, built on the specific problems players hit, not on speculation
+([ADR 0022](decisions/0022-navigation-and-goal-engine.md)).
 
 **It also closes two test gaps that money otherwise would have to:**
 

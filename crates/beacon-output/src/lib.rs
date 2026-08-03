@@ -65,6 +65,12 @@ pub struct Intent {
     pub distance: Option<f32>,
     /// Suppress identical text for this long. Absent means no suppression.
     pub dedup_for: Option<Duration>,
+    /// Bypass the verbosity gate — spoken at any verbosity, not just when the
+    /// priority clears the current level. For content the player must not lose to a
+    /// low chatter setting, such as a game's own story/menu text. It does not change
+    /// urgency: a higher-priority intent (a critical warning) still wins ordering
+    /// and can still barge over it.
+    pub always: bool,
 }
 
 impl Intent {
@@ -76,7 +82,14 @@ impl Intent {
             collapse_key: None,
             distance: None,
             dedup_for: None,
+            always: false,
         }
+    }
+
+    /// Marks the intent to bypass the verbosity gate (see [`Intent::always`]).
+    pub fn always(mut self) -> Self {
+        self.always = true;
+        self
     }
 
     pub fn collapse(mut self, key: impl Into<String>, distance: f32) -> Self {
@@ -232,7 +245,7 @@ impl Arbiter {
         // 1. Verbosity gate. Cheapest filter, so it runs first.
         let mut surviving: Vec<Intent> = Vec::with_capacity(intents.len());
         for intent in intents {
-            if self.config.verbosity < intent.priority.min_verbosity() {
+            if !intent.always && self.config.verbosity < intent.priority.min_verbosity() {
                 self.last_drops.push((intent.text, Dropped::Verbosity));
             } else {
                 surviving.push(intent);
@@ -379,6 +392,30 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "incoming attack");
+        assert_eq!(
+            a.last_drops(),
+            [("bush to the north".into(), Dropped::Verbosity)]
+        );
+    }
+
+    #[test]
+    fn always_intents_bypass_the_verbosity_gate() {
+        // At the quietest setting only critical normally survives, but an `always`
+        // intent (a game's own story text) is spoken regardless of its priority,
+        // while ordinary navigation chatter at the same priority is still gated out.
+        let mut a = Arbiter::new(Config {
+            verbosity: 0,
+            ..Config::default()
+        });
+        let out = a.resolve(
+            vec![
+                Intent::new("bush to the north", Priority::Navigation, "cone"),
+                Intent::new("Take my sword and shield.", Priority::Navigation, "dialog").always(),
+            ],
+            secs(0.0),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "Take my sword and shield.");
         assert_eq!(
             a.last_drops(),
             [("bush to the north".into(), Dropped::Verbosity)]

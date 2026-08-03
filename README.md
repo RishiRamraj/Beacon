@@ -167,8 +167,9 @@ max_per_frame = 2
 
 [beacons]
 enabled = true     # spatial-audio tones for where things are
-volume_max = 0.15  # 0 to 1, loudness when a source is closest
-volume_min = 0.0   # 0 to 1, loudness at the far edge of range
+volume_max = 0.5   # 0 to 1, loudness when a source is closest
+volume_min = 0.05  # 0 to 1, loudness at the far edge of range
+music_duck = 0.5   # 0 to 1, how far game audio ducks under a beacon
 ```
 
 ## Plugins
@@ -197,8 +198,9 @@ A drop-in that matches the same ROM as a built-in overrides it, so you can
 iterate without rebuilding.
 
 **[docs/plugins.md](docs/plugins.md) is the plugin authoring guide** — the full
-manifest format and the complete Lua host API (`mem.u8/u16/u24/slice`, `say`,
-`on_command`, `log`, `watch`), with semantics and defaults. The reference plugin,
+manifest format and the complete Lua host API (`mem`, `rom`, `watch`, `say`,
+`on_command`, `log`, `beacon` for spatial-audio cues, and `on_draw` for the map),
+with semantics and defaults. The reference plugin,
 [`plugins/alttp/`](plugins/alttp/), is the worked example to read alongside it.
 
 ## Layout

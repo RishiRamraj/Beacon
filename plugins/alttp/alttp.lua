@@ -50,11 +50,19 @@ local MODULE_SILENT = {
   [0x14] = true, -- attract mode
 }
 
+-- The four facings (Link's $7E002F direction byte): compass word and unit vector,
+-- in one table so direction->word and direction->vector are not re-encoded as inline
+-- ladders (used by facing(), the map arrow, and the route follower's alignment).
+local DIRS = {
+  [0] = { word = "north", dx = 0, dy = -1 },
+  [2] = { word = "south", dx = 0, dy = 1 },
+  [4] = { word = "west", dx = -1, dy = 0 },
+  [6] = { word = "east", dx = 1, dy = 0 },
+}
+
 local function facing(direction)
-  if direction == 0 then return "north"
-  elseif direction == 2 then return "south"
-  elseif direction == 4 then return "west"
-  else return "east" end
+  local d = DIRS[direction]
+  return d and d.word or "east"
 end
 
 -- One frame's reading of the game.
@@ -91,38 +99,6 @@ local function read_progress()
     sword = mem.u8(A.sword.addr),
   }
 end
-
--- Whether the dungeon Link is standing in has already been cleared, keyed by the
--- $040C dungeon id. "Cleared" means its prize is in hand: the pendant for a Light
--- World dungeon, the crystal for a Dark World one (same bitfields the milestone
--- logic reads). Dungeons without a collectible prize (the castle, the sewer, the
--- towers) are never "done" here — the milestone spine covers those. If the guide
--- finds the current dungeon cleared, there is nothing left to fetch and it heads
--- for the exit.
-local DUNGEON_DONE = {
-  [0x04] = function(v) return v.pendants & 0x01 ~= 0 end, -- Eastern  -> Courage
-  [0x06] = function(v) return v.pendants & 0x04 ~= 0 end, -- Desert   -> Power
-  [0x14] = function(v) return v.pendants & 0x02 ~= 0 end, -- Hera     -> Wisdom
-  [0x0C] = function(v) return v.crystals & 0x02 ~= 0 end, -- Dark Palace
-  [0x0A] = function(v) return v.crystals & 0x10 ~= 0 end, -- Swamp
-  [0x10] = function(v) return v.crystals & 0x40 ~= 0 end, -- Skull Woods
-  [0x16] = function(v) return v.crystals & 0x20 ~= 0 end, -- Thieves' (Gargoyle)
-  [0x12] = function(v) return v.crystals & 0x04 ~= 0 end, -- Ice
-  [0x0E] = function(v) return v.crystals & 0x01 ~= 0 end, -- Misery Mire
-  [0x18] = function(v) return v.crystals & 0x08 ~= 0 end, -- Turtle Rock
-}
-
--- The SRAM room-data table: one 16-bit word per dungeon room at $7EF000 + room*2
--- (room is the $00A0 value). Bit layout, high byte `dddd b k ck cr`, low byte
--- `cccc qqqq`: bits 4-7 chests opened, bit 10 key/item taken, bit 11 boss beaten.
--- Lets the guide tell which of a dungeon's chests and its boss are already done.
-local ROOM_DATA = 0x7EF000
-local function room_word(room)
-  return mem.u8(ROOM_DATA + room * 2) + mem.u8(ROOM_DATA + room * 2 + 1) * 256
-end
-local function room_chests_opened(room) return (room_word(room) >> 4) & 0x0F end
-local function room_item_taken(room) return room_word(room) & 0x0400 ~= 0 end
-local function room_boss_beaten(room) return room_word(room) & 0x0800 ~= 0 end
 
 -- Whether the player is actually controlling Link, as opposed to sitting in a
 -- menu, a transition, or the intro.
@@ -231,35 +207,31 @@ for _, t in ipairs({ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
   KILL_TAGS[t] = true
 end
 
--- Rooms to treat as kill-rooms even though the game sets no clear-tag on them: a
--- guard there drops a small key for the locked exit, so the guide should lead Link
--- to defeat it first. Keyed by dungeon room id; the value is `true` for the whole
--- room, or `{ until_chest = true }` for a room whose only reason to fight is to
--- reach its chest — the forced kill status ends PERMANENTLY once that chest is
--- opened, so backtracking (which respawns the guard, since the room has no
--- clear-tag) never re-arms the sub-goal, and the room's later reuse for a second
--- area past the locked door is never treated as a kill-room. Only matters while
--- enemies are live — the objective also requires a pending enemy.
-local FORCE_KILL_ROOMS = { [0x72] = { until_chest = true } }
-
 -- Per-room permanent progress bits live at $7EF000 + room*2 (one u16 per dungeon
 -- room). Bit 0x8000 flips when the room's chest is opened and never clears.
 local function room_chest_opened(room)
   return (mem.u16(0x7EF000 + room * 2) & 0x8000) ~= 0
 end
 
+-- Rooms to treat as kill-rooms even though the game sets no clear-tag on them: a
+-- guard there drops a small key for the locked exit, so the guide should lead Link
+-- to defeat it first. Keyed by dungeon room id; the value is a predicate `(s) ->
+-- bool` for whether the room is a kill-room right now, so each room states its own
+-- rule as data rather than a shared type/field ladder. Only matters while enemies
+-- are live — the objective also requires a pending enemy.
+local FORCE_KILL_ROOMS = {
+  -- 0x72: forced-kill only until its chest is opened. That bit is permanent, so a
+  -- backtrack (which respawns the guard, since the room has no clear-tag) never
+  -- re-arms the sub-goal, and the room's reuse for the lower area is never a
+  -- kill-room.
+  [0x72] = function(s) return not room_chest_opened(s.dungeon_room) end,
+}
+
 -- Is Link in a dungeon room gated on defeating enemies?
 local function kill_room(s)
   if s.module ~= 0x07 then return false end
   local fk = FORCE_KILL_ROOMS[s.dungeon_room]
-  if fk then
-    -- A chest-gated forced room is done for good once its chest is open.
-    if type(fk) == "table" and fk.until_chest and room_chest_opened(s.dungeon_room) then
-      return false
-    end
-    if fk == true or (type(fk) == "table" and fk.until_chest) then return true end
-    if type(fk) == "table" and fk.ty_max and (s.y >> 3) <= fk.ty_max then return true end
-  end
+  if fk and fk(s) then return true end
   return KILL_TAGS[mem.u8(KILL_HDR_TAG)] == true or KILL_TAGS[mem.u8(KILL_HDR_TAG + 1)] == true
 end
 
@@ -982,6 +954,25 @@ local PATH_PING_HZ = 0.5        -- sonar: a ping every 2 seconds over a soft ste
 local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
 local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 
+-- Aim the sonar path beacon from Link toward waypoint `w` (a {tile_x, tile_y}).
+-- Shared by both route followers (local pathfinder and cross-screen overworld), so
+-- the heading maths and tone live in one place. The pitch brightens when Link is
+-- already facing along the dominant axis toward the corner, so walking toward the
+-- sound is walking the route.
+local function aim_path_beacon(s, w)
+  local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
+  local d = DIRS[s.direction]
+  local on_course = d ~= nil and (
+    (math.abs(dx) > math.abs(dy)) and (d.dx ~= 0 and (dx > 0) == (d.dx > 0))
+    or (math.abs(dx) <= math.abs(dy)) and (d.dy ~= 0 and (dy > 0) == (d.dy > 0)))
+  beacon.set("path", {
+    x = dx, y = dy,
+    pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
+    volume = PATH_VOLUME,
+    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
+  })
+end
+
 local function area_id(s)
   return (s.indoors == 1) and ("d" .. s.dungeon_room) or ("o" .. s.ow_screen)
 end
@@ -1062,20 +1053,23 @@ local function pathfind_update(s)
   -- the follower keeps tracking, and the tone returns once the enemy backs off.
   if combat_engaged then beacon.clear("path"); return end
 
-  local w = path[pathfind_wp]
-  local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
-  local on_course
-  if math.abs(dx) > math.abs(dy) then
-    on_course = (dx > 0 and s.direction == 6) or (dx < 0 and s.direction == 4)
-  else
-    on_course = (dy > 0 and s.direction == 2) or (dy < 0 and s.direction == 0)
-  end
-  beacon.set("path", {
-    x = dx, y = dy,
-    pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
-    volume = PATH_VOLUME,
-    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
-  })
+  aim_path_beacon(s, path[pathfind_wp])
+end
+
+-- Tile-attribute classes, named like the collision sets (IMPASSABLE, COLLIDE_*),
+-- so the same magic range is not re-tested inline at each call site. STAIR_UP/DOWN
+-- also feed the stair finder; ENTRANCE_TILES is the set of non-door tiles a route
+-- may leave a room through (walk-through entrances and the layer-swap stairs).
+local DOOR_TILES, CHEST_TILES = {}, {}
+local STAIR_UP   = { [0x1D] = true, [0x1E] = true, [0x1F] = true }
+local STAIR_DOWN = { [0x3D] = true, [0x3E] = true, [0x3F] = true }
+local ENTRANCE_TILES = { [0x8E] = true, [0x8F] = true }
+do
+  for a = 0x30, 0x37 do DOOR_TILES[a] = true end         -- door / passage tiles
+  for a = 0x58, 0x5D do CHEST_TILES[a] = true end
+  CHEST_TILES[0x63] = true                                -- minigame chest
+  for a in pairs(STAIR_UP) do ENTRANCE_TILES[a] = true end
+  for a in pairs(STAIR_DOWN) do ENTRANCE_TILES[a] = true end
 end
 
 -- The nearest door / passage tile in the current 64x64 window, as world pixel
@@ -1088,7 +1082,7 @@ local function nearest_door_tile(s)
   for y = 0, 63 do
     for x = 0, 63 do
       local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
-      if attr and attr >= 0x30 and attr <= 0x37 then -- a door / passage tile
+      if attr and DOOR_TILES[attr] then
         local d = math.abs(x - ltx) + math.abs(y - lty)
         if best_d == nil or d < best_d then
           best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
@@ -1109,7 +1103,7 @@ local function nearest_chest_tile(s)
   for y = 0, 63 do
     for x = 0, 63 do
       local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
-      if attr and ((attr >= 0x58 and attr <= 0x5D) or attr == 0x63) then
+      if attr and CHEST_TILES[attr] then
         local d = math.abs(x - ltx) + math.abs(y - lty)
         if best_d == nil or d < best_d then
           best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
@@ -1476,20 +1470,28 @@ local function ow_route_update(s)
     ow_route_stop(); beacon.clear("path"); return
   end
   if combat_engaged then beacon.clear("path"); return end -- hush the guide in a fight
-  local w = path[ow_route_wp]
-  local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
-  local on_course
-  if math.abs(dx) > math.abs(dy) then
-    on_course = (dx > 0 and s.direction == 6) or (dx < 0 and s.direction == 4)
-  else
-    on_course = (dy > 0 and s.direction == 2) or (dy < 0 and s.direction == 0)
+  aim_path_beacon(s, path[ow_route_wp])
+end
+
+-- The opening context navigation auto-starts in: Link up and controllable in his
+-- house (room 0x104) with the Lamp ($7EF34A) not yet taken — just out of bed, before
+-- the first errand. Named so the frame loop reads intent, not bare constants.
+local function at_quest_opening(s)
+  return in_play(s) and s.dungeon_room == 0x104 and mem.u8(0x7EF34A) == 0
+end
+
+-- Place one beacon `id` at offset (dx, dy), `dist` away, using class `kind`'s reach,
+-- gain, pitch and tremolo: quadratic falloff, muffled behind a wall, cleared when
+-- out of reach or `hushed`. One body for every beacon source — the per-class sprite
+-- tones and the tile-sourced chest tone alike, so they cannot drift apart.
+local function sound_beacon(now, id, dx, dy, dist, kind, hushed)
+  if hushed or dist >= kind.range then beacon.clear(id); return end
+  local t = 1 - dist / kind.range
+  local vol = math.min(1, t * t * (kind.gain or 1))
+  if sight_blocked(now, now.x, now.y, now.x + dx, now.y + dy) then
+    vol = vol * BEACON_OCCLUDED_SCALE
   end
-  beacon.set("path", {
-    x = dx, y = dy,
-    pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
-    volume = PATH_VOLUME,
-    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
-  })
+  beacon.set(id, { x = dx, y = dy, pitch = kind.pitch, volume = vol, tremolo = kind.tremolo })
 end
 
 function on_frame(frame)
@@ -1504,12 +1506,11 @@ function on_frame(frame)
   prev = now
 
   -- Turn navigation on by itself at the very start of the quest — once Link is up
-  -- out of bed and controllable in his house (in play, room 0x104, no Lamp yet), so
-  -- the opening guidance leads without the player first pressing the key. Setting
-  -- nav_active is enough: nav_update, later this frame, does the re-aim. Edge-
-  -- triggered, and cleared once he leaves the opening, so it re-arms on a fresh
-  -- start but a deliberate toggle-off in the house stays off.
-  if in_play(now) and now.dungeon_room == 0x104 and mem.u8(0x7EF34A) == 0 then
+  -- out of bed and controllable in his house — so the opening guidance leads without
+  -- the player first pressing the key. Setting nav_active is enough: nav_update,
+  -- later this frame, does the re-aim. Edge-triggered, and cleared once he leaves the
+  -- opening, so it re-arms on a fresh start but a deliberate toggle-off stays off.
+  if at_quest_opening(now) then
     if not intro_nav_armed then
       intro_nav_armed = true
       nav_active = true
@@ -1549,11 +1550,13 @@ function on_frame(frame)
     )
   end
 
-  -- Game text: when a text or menu box opens (module 0x0E), read it aloud.
+  -- Game text: when a text or menu box opens (module 0x0E), read it aloud. Marked
+  -- `always` so the game's own story and menu text is spoken at any verbosity — a
+  -- low chatter setting trims the guide's routine callouts, never the plot.
   if now.module == 0x0E and was.module ~= 0x0E then
     local text = current_dialog_text()
     if text then
-      say(text, { priority = "navigation", category = "dialog" })
+      say(text, { priority = "navigation", category = "dialog", always = true })
     end
   end
 
@@ -1614,46 +1617,25 @@ function on_frame(frame)
     local ne = nearest.enemy
     combat_engaged = ne ~= nil and ne.dist < COMBAT_RANGE
 
+    -- One tone per class, on its nearest sprite within reach; in combat only the
+    -- enemy sounds (the rest hushed). Each class swells at its own rate and gain.
     for name, kind in pairs(BEACON_KINDS) do
       local sp = nearest[name]
-      if sp and sp.dist < kind.range and not (combat_engaged and name ~= "enemy") then
-        -- Quadratic falloff: quieter at a distance, ramping up steeply as the
-        -- source closes, rather than a flat linear fade. The class gain scales it
-        -- (enemies boosted so they carry over the guide), clamped to full volume.
-        local t = 1 - sp.dist / kind.range
-        local vol = math.min(1, t * t * (kind.gain or 1))
-        -- Behind a wall: muffled rather than silent, so a close but occluded
-        -- source still registers without sounding like it is out in the open.
-        if sight_blocked(now, now.x, now.y, sp.x, sp.y) then
-          vol = vol * BEACON_OCCLUDED_SCALE
-        end
-        -- Each class swells at its own fixed rate (enemies 120 BPM, pickups 60).
-        beacon.set(name, { x = sp.dx, y = sp.dy, pitch = kind.pitch, volume = vol, tremolo = kind.tremolo })
+      if sp then
+        sound_beacon(now, name, sp.dx, sp.dy, sp.dist, kind, combat_engaged and name ~= "enemy")
       else
         beacon.clear(name)
       end
     end
 
-    -- Treasure chests are tiles, not sprites, so they sit outside the class loop
-    -- above. Sound the nearest unopened chest with the item tone — a chest is a
-    -- pickup you walk to. An opened chest changes tile-type and no longer matches,
-    -- so the tone drops on its own the moment it is looted. Hushed in combat and
-    -- muffled behind a wall, exactly like the other pickup beacons.
+    -- Treasure chests are tiles, not sprites, but they are just another beacon
+    -- source: sound the nearest unopened chest with the item tone through the same
+    -- body. An opened chest changes tile-type and no longer matches, so the tone
+    -- drops on its own the moment it is looted; hushed in combat like the pickups.
     local chest = nearest_chest_tile(now)
-    local ck = BEACON_KINDS.item
-    if chest and not combat_engaged then
+    if chest then
       local dx, dy = chest[1] - now.x, chest[2] - now.y
-      local dist = math.abs(dx) + math.abs(dy)
-      if dist < ck.range then
-        local t = 1 - dist / ck.range
-        local vol = math.min(1, t * t * (ck.gain or 1))
-        if sight_blocked(now, now.x, now.y, chest[1], chest[2]) then
-          vol = vol * BEACON_OCCLUDED_SCALE
-        end
-        beacon.set("chest", { x = dx, y = dy, pitch = ck.pitch, volume = vol, tremolo = ck.tremolo })
-      else
-        beacon.clear("chest")
-      end
+      sound_beacon(now, "chest", dx, dy, math.abs(dx) + math.abs(dy), BEACON_KINDS.item, combat_engaged)
     else
       beacon.clear("chest")
     end
@@ -1846,20 +1828,13 @@ end)
 
 -- ===========================================================================
 -- "Advance the quest" — the context-aware guide bound to the L key. It knows the
--- game, not just the room: in a dungeon it heads for the next thing worth taking
--- (or the exit, once the dungeon is cleared or you lack what it takes to finish);
--- on the overworld it heads for the next place the main story wants you.
---
--- The destinations come from researched data, not guesses:
---   * DUNGEON_NAV[dungeon_id] — each dungeon's signature item, Big Key and boss
---     rooms, from a thorough walkthrough cross-checked against the randomizer's
---     room table and the disassembly's underworld-room list.
---   * each GOAL's `area` — the overworld area that story step sends you to, from
---     the researched entrance table.
--- The pathfinder only navigates within the current room, and dungeon room ids
--- stack floors in one grid, so a cross-room heading is a rough hint, not a path:
--- the guide names the goal and points you the right way, guiding precisely only
--- once you are in the room the target sits in.
+-- game, not just the room: on the overworld it heads for the next place the main
+-- story wants you (each GOAL's researched `area`); inside a dungeon it follows that
+-- goal's authored waypoint chain, or stays quiet where no chain exists yet (the old
+-- item -> Big Key -> boss room-graph spine has been retired — see
+-- plugins/alttp/dungeon-rooms.md for the room data to build each chain against).
+-- The pathfinder navigates precisely within the current room; a chain threads it
+-- room to room.
 -- ===========================================================================
 local nav_say = function(text)
   say(text, { priority = "navigation", category = "on-demand" })
@@ -1877,58 +1852,6 @@ local function area_heading(from_area, to_area)
   return direction(tc - fc, tr - fr), other_world
 end
 
--- Per-dungeon navigation data, keyed by $040C dungeon id. The canonical spine of
--- a dungeon is: fetch its signature item, then the Big Key, then beat the boss.
--- Each entry gives how to tell the signature item is in hand (an inventory read),
--- the Big Key bit for this dungeon (in the $366/$367 big-key bitfields), and the
--- room ids of the item, the Big Key, the boss, and the entrance. Room ids are the
--- $00A0 value; all boss/entrance/chest room ids are confirmed against the
--- randomizer chest table and the disassembly's underworld-room list. Small keys,
--- map and compass are deliberately not tracked — they are not what a player is
--- steered toward, and pot/enemy-drop keys have no stable room id.
-local DUNGEON_NAV = {
-  [0x04] = { name = "Eastern Palace",     item = "the Bow",
-             have = function() return mem.u8(0x7EF340) >= 1 end,
-             item_room = 0xA9, bk_byte = 0x7EF367, bk_bit = 0x20, bk_room = 0xB8,
-             boss_room = 0xC8, entrance_room = 0xC9 },
-  [0x06] = { name = "Desert Palace",      item = "the Power Glove",
-             have = function() return mem.u8(0x7EF354) >= 1 end,
-             item_room = 0x73, bk_byte = 0x7EF367, bk_bit = 0x10, bk_room = 0x75,
-             boss_room = 0x33, entrance_room = 0x84 },
-  [0x14] = { name = "Tower of Hera",      item = "the Moon Pearl",
-             have = function() return mem.u8(0x7EF357) >= 1 end,
-             item_room = 0x27, bk_byte = 0x7EF366, bk_bit = 0x20, bk_room = 0x87,
-             boss_room = 0x07, entrance_room = 0x77 },
-  [0x0C] = { name = "Palace of Darkness", item = "the Magic Hammer",
-             have = function() return mem.u8(0x7EF34B) >= 1 end,
-             item_room = 0x1A, bk_byte = 0x7EF367, bk_bit = 0x02, bk_room = 0x3A,
-             boss_room = 0x5A, entrance_room = 0x4A },
-  [0x0A] = { name = "Swamp Palace",       item = "the Hookshot",
-             have = function() return mem.u8(0x7EF342) >= 1 end,
-             item_room = 0x36, bk_byte = 0x7EF367, bk_bit = 0x04, bk_room = 0x35,
-             boss_room = 0x06, entrance_room = 0x28 },
-  [0x10] = { name = "Skull Woods",        item = "the Fire Rod",
-             have = function() return mem.u8(0x7EF345) >= 1 end,
-             item_room = 0x58, bk_byte = 0x7EF366, bk_bit = 0x80, bk_room = 0x57,
-             boss_room = 0x29, entrance_room = nil }, -- three overworld entrances
-  [0x16] = { name = "Thieves' Town",      item = "the Titan's Mitt",
-             have = function() return mem.u8(0x7EF354) >= 2 end,
-             item_room = 0x44, bk_byte = 0x7EF366, bk_bit = 0x10, bk_room = 0xDB,
-             boss_room = 0xAC, entrance_room = 0xDB },
-  [0x12] = { name = "Ice Palace",         item = "the Blue Mail",
-             have = function() return mem.u8(0x7EF35B) >= 1 end,
-             item_room = 0x9E, bk_byte = 0x7EF366, bk_bit = 0x40, bk_room = 0x1F,
-             boss_room = 0xDE, entrance_room = 0x0E },
-  [0x0E] = { name = "Misery Mire",        item = "the Cane of Somaria",
-             have = function() return mem.u8(0x7EF350) >= 1 end,
-             item_room = 0xC3, bk_byte = 0x7EF367, bk_bit = 0x01, bk_room = 0xD1,
-             boss_room = 0x90, entrance_room = 0x98 },
-  [0x18] = { name = "Turtle Rock",        item = "the Mirror Shield",
-             have = function() return mem.u8(0x7EF35A) >= 3 end,
-             item_room = 0x24, bk_byte = 0x7EF366, bk_bit = 0x08, bk_room = 0x14,
-             boss_room = 0xA4, entrance_room = 0xD6 },
-}
-
 -- The door/passage tile in the current window best aligned with a room-grid
 -- heading (ddx east, ddy south), tie-broken toward the nearer one. With no
 -- heading it is just the nearest door. Used to leave a room in roughly the right
@@ -1940,7 +1863,7 @@ local function door_toward(s, ddx, ddy)
   for y = 0, 63 do
     for x = 0, 63 do
       local attr = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8)
-      if attr and attr >= 0x30 and attr <= 0x37 then
+      if attr and DOOR_TILES[attr] then
         local rx, ry = x - ltx, y - lty
         local dist = math.abs(rx) + math.abs(ry)
         local score = (ddx == 0 and ddy == 0) and -dist or (rx * ddx + ry * ddy - dist * 0.01)
@@ -1960,8 +1883,7 @@ end
 -- both a down stair and a south entrance passage), so the heading toward the
 -- target room picks the right one rather than the nearest.
 local function is_exit_attr(a)
-  return a ~= nil and ((a >= 0x30 and a <= 0x37) or a == 0x8E or a == 0x8F
-    or (a >= 0x1D and a <= 0x1F) or (a >= 0x3D and a <= 0x3F))
+  return a ~= nil and (DOOR_TILES[a] or ENTRANCE_TILES[a])
 end
 local function exit_toward(s, ddx, ddy)
   local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
@@ -1982,13 +1904,11 @@ local function exit_toward(s, ddx, ddy)
   return best
 end
 
--- The tile-types of a floor-changing spiral staircase, from the game's own tile
--- detection (zelda3 tile_detect.c, TileDetect_ExecuteInner): north/up stairs read
+-- STAIR_UP / STAIR_DOWN are defined with the other tile-attribute classes above.
+-- Provenance (zelda3 tile_detect.c, TileDetect_ExecuteInner): north/up stairs read
 -- as 0x1D-0x1F, down stairs as 0x3D-0x3F. (The 0x30-0x37 the door finder keys on
 -- also count as stair tiles there, but they are the in-plane doorways; 0x38-0x3C
 -- are ordinary floor.) An Up hop wants the up set, a Down hop the down set.
-local STAIR_UP   = { [0x1D] = true, [0x1E] = true, [0x1F] = true }
-local STAIR_DOWN = { [0x3D] = true, [0x3E] = true, [0x3F] = true }
 
 -- The nearest staircase tile in the current window matching the wanted direction,
 -- as a world-pixel spot, or nil. Falls back to the other direction's set so a hop
@@ -2084,45 +2004,6 @@ local function route_to_room(s, target_room, label)
   return true
 end
 
--- In a dungeon: cleared -> the exit; otherwise the next canonical target — the
--- signature item, then the Big Key, then the boss.
-local function advance_dungeon(s, v)
-  ow_route_stop() -- drop any overworld route once inside a dungeon
-  local nav = DUNGEON_NAV[s.dungeon_id]
-  local done = DUNGEON_DONE[s.dungeon_id]
-  local cleared = (done and v and done(v)) or (nav and room_boss_beaten(nav.boss_room))
-  if cleared then
-    if not route_to_room(s, nav and nav.entrance_room, "Dungeon cleared. Heading for the exit.") then
-      local d = nearest_door_tile(s)
-      if d then pathfind_to(d[1], d[2]) end
-      nav_say("Dungeon cleared. Find the stairs out.")
-    end
-    return
-  end
-  if nav == nil then
-    -- No canonical spine for this place (sewer, castle, the towers): keep the
-    -- player moving — a loose item in the room, else into unexplored ground.
-    local it = nearest_item_sprite(s)
-    if it then pathfind_to(it[1], it[2]); nav_say("Guiding to an item in this room."); return end
-    local tx, ty = nearest_unexplored(s)
-    if tx then pathfind_to(tx * 8 + 4, ty * 8 + 4); nav_say("Guiding you deeper into the dungeon.")
-    else
-      local d = nearest_door_tile(s)
-      if d then pathfind_to(d[1], d[2]) end
-      nav_say("Heading for the next door.")
-    end
-    return
-  end
-  -- The canonical spine: signature item, then Big Key, then boss.
-  if not nav.have() then
-    route_to_room(s, nav.item_room, "Next: " .. nav.item .. ".")
-  elseif (mem.u8(nav.bk_byte) & nav.bk_bit) == 0 then
-    route_to_room(s, nav.bk_room, "Next: the Big Key.")
-  else
-    route_to_room(s, nav.boss_room, "Head for the boss.")
-  end
-end
-
 -- Guide toward an overworld goal by its area (a field on the goal record): a
 -- compass heading and a note when it lies in the other world, a cross-screen route
 -- when it is elsewhere in this one, or "look for the entrance" once Link stands in
@@ -2175,20 +2056,8 @@ end
 -- Rooms are the verified intro path: secret entrance / uncle 0x55, Zelda's cell
 -- 0x80, Sanctuary 0x12 (overworld area 0x13); Hyrule Castle is area 0x1B.
 -- ===========================================================================
-local CASTLE_AREA = 0x1B
 local HOUSE_AREA = 0x2C -- Link's house sits on this overworld area (its interior is room 0x104)
 local SANCTUARY_AREA, SANCTUARY_ROOM = 0x13, 0x12
-
--- The castle entrance the intro drops into to reach Uncle — a hole (tile type
--- 0x20) you fall into, so no sword or bush-cutting is needed here (the bush-hidden
--- entrance is a later, sword-gated route). The hole itself reads as impassable, so
--- the pathfinder cannot route onto it; aim instead at the walkable tile just south
--- (world tile 304, 214 — read live from the game) and tell the player to step
--- north in. The overworld area is Hyrule Castle 0x1B.
-local CASTLE_ENTRANCE = {
-  tx = 304, ty = 214,
-  say = "Step north into the castle entrance.",
-}
 
 -- The overworld approach from Link's house to the castle entrance, as the player's
 -- own authored cues (mapped live by playing). The uncle beat drives this chain once
@@ -2366,51 +2235,6 @@ local function chain_stop()
   chain_last_room = nil
 end
 
--- Route toward an intro beat from wherever Link is. In a dungeon room the graph
--- connects to the target, door-to-door route there (stage 2). In an indoor room
--- the graph does not reach yet — Link's house at the very start — head for the
--- door out. On the overworld, take the stage-1 cross-screen path to the area;
--- once standing in it, aim at a known entrance waypoint if the beat gives one,
--- else hand off to look for the way in.
-local function head_for(s, area, room, label, entrance)
-  if s.module == 0x07 then
-    if room and (room == s.dungeon_room or room_path(s.dungeon_room, room)) then
-      route_to_room(s, room, label)
-      return
-    end
-    -- An interior the graph does not reach (Link's house at the start, or the
-    -- castle secret-entrance room whose onward passage the rando omits). Head for
-    -- the exit — door, entrance passage or staircase — that points toward the
-    -- target room on the dungeon-room grid (low nibble = column, high = row), so a
-    -- room with several exits picks the right one. Fall back to that heading's
-    -- edge. The local A* gets Link there; the auto-follow re-aims once he crosses.
-    local ddx, ddy = 0, 1 -- default heading: south (a house exits at its bottom)
-    if room and s.dungeon_room <= 0xFF then
-      -- Both are standard dungeon rooms on the 16-wide grid; head toward the target.
-      ddx = (room & 0x0F) - (s.dungeon_room & 0x0F)
-      ddy = (room >> 4) - (s.dungeon_room >> 4)
-    end
-    local d = exit_toward(s, ddx, ddy)
-      or room_edge_goal(s, ddx > 0 and 1 or ddx < 0 and -1 or 0, ddy >= 0 and 1 or -1)
-    if d then pathfind_to(d[1], d[2]) end
-    nav_say(label .. " Head for the way out.")
-  elseif ow_parent(s.ow_screen & 0x3F) == ow_parent(area & 0x3F) then
-    if entrance then
-      -- Cross-screen router, not the local pathfinder: the entrance can sit a tile
-      -- into the next 512px block (the large castle area splits into several), and
-      -- the ROM decode routes through the bushes on the way (BUSH_TILE is passable).
-      ow_route_to(entrance.tx * 8 + 4, entrance.ty * 8 + 4)
-      nav_say(label .. " " .. entrance.say)
-    else
-      ow_route_stop()
-      nav_say(label .. " Look for the entrance.")
-    end
-  else
-    ow_route_to_area(area)
-    nav_say(label .. " Routing there.")
-  end
-end
-
 -- ── The main-quest goal engine ──────────────────────────────────────────────
 -- Guidance is data, not per-goal code. GOALS lists the quest's checkpoints in
 -- order; each is a plain record — where it lives, what it says, and the save byte
@@ -2498,7 +2322,12 @@ local function route_to(s, g, v)
     return
   end
   if g.dungeon and s.module == 0x07 then
-    advance_dungeon(s, v) -- inside the target dungeon: item -> Big Key -> boss -> exit
+    -- Inside the target dungeon. The old item -> Big Key -> boss room-graph spine is
+    -- retired in favour of authored waypoint chains (see plugins/alttp/dungeon-rooms.md
+    -- for the room data to build each chain against). Until this dungeon has a chain,
+    -- stay quiet rather than mis-route — no spine to fight the chain navigator.
+    room_route_stop()
+    pathfind_stop()
     return
   end
   route_to_area(s, g) -- head toward the goal's overworld area (or pedestal)
@@ -2528,9 +2357,10 @@ local GOALS = {
     done = { 0x7EF3C5, 2 }, room = SANCTUARY_ROOM, entrance_area = SANCTUARY_AREA,
     leave = "Head for the Sanctuary." },
   -- Post-intro: the pendant hunt, the Master Sword, Agahnim, the seven crystals,
-  -- then Ganon. Each `dungeon` goal routes to its overworld area, then runs the
-  -- item -> Big Key -> boss spine once Link is inside (route_to -> advance_dungeon);
-  -- the Master Sword is a plain overworld spot. Areas from the researched entrance
+  -- then Ganon. Each `dungeon` goal routes to its overworld area; inside the dungeon
+  -- it follows that dungeon's authored waypoint chain (none yet — the guide stays
+  -- quiet there for now), the retired spine's room data kept in dungeon-rooms.md.
+  -- The Master Sword is a plain overworld spot. Areas from the researched entrance
   -- table (the old MILESTONE_AREA); done bits are the pendant/crystal bitfields.
   { id = "eastern", goal = "Eastern Palace, the first pendant",
     hint = "The big green palace at the far east edge of the Light World. Clear it for the Bow and the Pendant of Courage; Sahasrahla then gives you the Pegasus Boots.",
@@ -2617,23 +2447,12 @@ local function nav_reaim(s, v)
 end
 
 -- What the guide should be heading toward, plus which module Link is in — so it
--- re-aims exactly when either changes and stays put otherwise. The objective is the
--- current goal's id; inside a dungeon it also carries the spine phase (whether the
--- signature item, Big Key and boss are done), so grabbing the item re-aims at the
--- Big Key without waiting for the goal itself to complete.
+-- re-aims exactly when either changes and stays put otherwise. The objective is just
+-- the current goal's id; a chain, once armed, drives its own per-room advance inside
+-- a dungeon without a signature change.
 local function nav_signature(s, v)
   local _, g = current_goal(v)
-  local obj = g and g.id or "done"
-  if s.module == 0x07 then
-    local nav = DUNGEON_NAV[s.dungeon_id]
-    if nav then
-      local a = nav.have() and 1 or 0
-      local b = (mem.u8(nav.bk_byte) & nav.bk_bit) ~= 0 and 1 or 0
-      local c = room_boss_beaten(nav.boss_room) and 1 or 0
-      obj = string.format("%s.dg%d.%d%d%d", obj, s.dungeon_id, a, b, c)
-    end
-  end
-  return s.module .. ":" .. obj
+  return s.module .. ":" .. (g and g.id or "done")
 end
 
 -- ── Short-term room objectives ──────────────────────────────────────────────
@@ -3186,12 +3005,8 @@ function on_draw(canvas)
     canvas:rect(lx - 2, ly - 2, 5, 5, 0x40FF60) -- Link
 
     -- A short line in the direction he faces.
-    local dx, dy = 0, 0
-    if s.direction == 0 then dy = -12
-    elseif s.direction == 2 then dy = 12
-    elseif s.direction == 4 then dx = -12
-    else dx = 12 end
-    canvas:line(lx, ly, lx + dx, ly + dy, 0xFFF060)
+    local d = DIRS[s.direction] or DIRS[6]
+    canvas:line(lx, ly, lx + d.dx * 12, ly + d.dy * 12, 0xFFF060)
 
     canvas:text(8, h - 14, string.format("X %d Y %d", s.x, s.y), 0x9098A0)
   else

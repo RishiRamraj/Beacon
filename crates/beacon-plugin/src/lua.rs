@@ -181,6 +181,15 @@ impl Plugin for LuaPlugin {
         self.has_draw
     }
 
+    fn navigation_active(&self) -> bool {
+        // The alttp plugin exposes its guidance toggle as a global; a plugin
+        // without one simply reads as `false` (the default behaviour).
+        self.lua
+            .globals()
+            .get::<bool>("nav_active")
+            .unwrap_or(false)
+    }
+
     fn draw(&mut self, ram: &[u8], frame: u64, out: &mut Vec<u32>) -> Option<(u32, u32)> {
         if !self.has_draw {
             return None;
@@ -342,6 +351,12 @@ fn build_intent(text: String, opts: Option<Table>) -> mlua::Result<Intent> {
         if let Some(window) = parse_duration(&spec) {
             intent = intent.dedup_for(window);
         }
+    }
+
+    // `always = true` bypasses the verbosity gate, for content that must be heard
+    // even at a low chatter setting (a game's own story/menu text).
+    if opts.get::<Option<bool>>("always")?.unwrap_or(false) {
+        intent = intent.always();
     }
 
     Ok(intent)
