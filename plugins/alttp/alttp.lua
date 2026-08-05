@@ -2079,7 +2079,7 @@ local UNCLE_APPROACH = {
 -- which carries on through the castle to Zelda's cell.
 local COURTYARD = {
   { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
-  { tx = 256, ty = 225, say = "Step north into the castle." },
+  { tx = 256, ty = 225, say = "Go to the castle." },
   { tx = 335, ty = 379, room = 0x55, level = 0 }, -- sewer room where the uncle is met
   { tx = 72, ty = 415, room = 0x61, say = "Find Zelda." },
   { tx = 47, ty = 392, room = 0x60, level = 1 },
@@ -2090,6 +2090,9 @@ local COURTYARD = {
   { tx = 149, ty = 507, room = 0x72, level = 1 }, -- lower floor, reached down those stairs
   { tx = 129, ty = 560, room = 0x82, level = 1 },
   { tx = 79, ty = 518, room = 0x81, level = 1 },
+  { tx = 79, ty = 493, room = 0x71, level = 1 }, -- floor-1 layer-swap stairs (0x1E), climbed after the chest
+  { tx = 79, ty = 487, room = 0x71, level = 0, say = "Go to locked door." }, -- in front of the locked door on floor 0 (the door tile 0xF0 is impassable to A*); up those stairs
+  { tx = 84, ty = 455, room = 0x71, level = 1 }, -- far side of the locked door (a fresh A* segment; A* cannot cross the door itself)
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
@@ -2460,14 +2463,14 @@ end
 -- built on the room-tag and live-enemy checks defined earlier.
 
 -- Rooms whose chest is worth a detour — its contents matter to the route (e.g. the
--- room-0x72 map). Most chests are optional and only get the item beacon, not a
--- routing objective, so the guide does not drag Link off the linear route to every
--- chest it passes. Keyed by dungeon room id.
-local CHEST_ROOMS = { [0x72] = true }
+-- room-0x72 map, the room-0x71 chest on the escape route). Most chests are optional
+-- and only get the item beacon, not a routing objective, so the guide does not drag
+-- Link off the linear route to every chest it passes. Keyed by dungeon room id.
+local CHEST_ROOMS = { [0x72] = true, [0x71] = true }
 
 local ROOM_OBJECTIVES = {
   { id = "kill",
-    cue = "Defeat all enemies to open the doors.",
+    cue = "Defeat all enemies.",
     active = function(s)
       return kill_room(s) and (nearest_pending_enemy(s) ~= nil or overlords_pending())
     end,
@@ -2488,11 +2491,15 @@ local ROOM_OBJECTIVES = {
     end },
   -- An unopened chest in the room — but only once the room is quiet, so the guide
   -- does not send Link to the chest with a guard still on him (clear enemies, then
-  -- the key drop, then the chest).
+  -- the key drop, then the chest). Gated on the chest being on-screen: a big dungeon
+  -- room can hold several chambers behind doors within one room id, and a chest in a
+  -- far chamber must not pull the guide across the room ahead of the door and the
+  -- fight between here and there — it takes over only once Link reaches it.
   { id = "chest",
     cue = "Open the chest.",
     active = function(s)
-      return CHEST_ROOMS[s.dungeon_room] and nearest_chest_tile(s) ~= nil
+      local c = nearest_chest_tile(s)
+      return CHEST_ROOMS[s.dungeon_room] and c ~= nil and on_screen(c[1] - s.x, c[2] - s.y)
         and nearest_pending_enemy(s) == nil and not overlords_pending()
     end,
     target = function(s)
@@ -2914,17 +2921,21 @@ function on_draw(canvas)
 
     -- A dungeon chain's waypoints in this room. The route Link follows on his
     -- current floor is the A* pathfind_path drawn above. Beyond it, the chain often
-    -- continues to another waypoint in the SAME room but on the other floor, reached
+    -- continues to another waypoint in the SAME room but on a LOWER floor, reached
     -- down the stairs; draw that continuation too, as a real A* path planned on the
     -- destination floor's grid (never a straight line — that would cut through
     -- walls). So the whole in-room route reads through: to the stairs on this floor,
     -- then down and across to the lower point. Only waypoints from the active target
-    -- (nav_chain_i) forward are shown; passed ones are dropped. Hidden while a room
-    -- sub-goal is active (clear the guard, grab the key, open the chest).
+    -- (nav_chain_i) forward, and on the current floor or below it, are shown: a point
+    -- on an UPPER floor belongs to that floor's overlay, not this one — drawing it
+    -- here just paints a phantom second marker over the wrong geometry. Passed points
+    -- are dropped, and the whole thing is hidden while a room sub-goal is active
+    -- (clear the guard, grab the key, open the chest).
+    local cur_level = mem.u8(LOWER_LEVEL)
     if s.module == 0x07 and nav_chain and room_objective(s) == nil then
       local prev_wp
       for i, wp in ipairs(nav_chain) do
-        if wp.room == s.dungeon_room and i >= nav_chain_i then
+        if wp.room == s.dungeon_room and i >= nav_chain_i and (wp.level or 0) >= cur_level then
           -- Segment from the previous same-room waypoint: on a floor change (down
           -- the stairs) route on the destination floor so it threads properly.
           if prev_wp then

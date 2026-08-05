@@ -893,7 +893,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "12,1",
+        armed, "15,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -979,7 +979,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "12,2",
+        resumed, "15,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1023,7 +1023,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "12,2",
+        armed, "15,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1062,7 +1062,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "12,4",
+        "15,4",
         "the dungeon leg targets the Find Zelda waypoint (index 4)"
     );
     assert!(
@@ -1416,6 +1416,66 @@ fn alttp_forced_kill_room_stays_cleared_after_its_chest_is_opened() {
     assert!(
         texts2.iter().any(|t| t.contains("Defeat all enemies")),
         "chest not yet open: the kill objective is armed: {texts2:?}"
+    );
+}
+
+#[test]
+fn alttp_escape_room_0x71_chest_is_a_routing_objective() {
+    // Room 0x71 on the castle escape is a genuine kill-room (header tag 0x08) that
+    // also holds a chest worth the detour, so it is listed in CHEST_ROOMS. Once its
+    // enemies are down and the key grabbed, the chest sub-goal takes over and points
+    // Link at the chest — the same machinery as the 0x72 map chest. But the chest is
+    // in a far chamber of the room (past a door and a second fight), so it only takes
+    // over once it is on-screen; a distant chest must not pull the guide across early.
+    let r = Registry::builtin();
+
+    // `chest_tile` places the (unopened) chest; Link is always at tile (20,20).
+    let frame = |chest_x: u32, chest_y: u32| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7EF3C5, 2);
+        set(0x7E040C, 0x02);
+        set(0x7E00A0, 0x71); // room 0x71
+        set(0x7E00AE, 0x08); // header kill tag (a real kill-room)
+        set(0x7F2000 + chest_y * 64 + chest_x, 0x58); // an unopened chest tile
+        ram
+    };
+
+    // Chest on-screen (14 tiles east): the sub-goal takes over and leads to it.
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let near = frame(34, 20);
+    plugin.on_frame(&near, 0);
+    plugin.on_frame(&near, 1);
+    plugin.command("advance", &near);
+    let out = plugin.on_frame(&near, 2);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Open the chest")),
+        "the room-0x71 chest is a routing objective when reached: {texts:?}"
+    );
+    assert_eq!(
+        plugin
+            .eval(
+                "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+                &near
+            )
+            .unwrap(),
+        "34,20",
+        "leads to the chest"
+    );
+
+    // Chest in a far chamber (off-screen, 40 tiles east): stays quiet, so the guide
+    // is free to route through the door and the second fight first.
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let far = frame(60, 20);
+    plugin2.on_frame(&far, 0);
+    plugin2.on_frame(&far, 1);
+    plugin2.command("advance", &far);
+    let out2 = plugin2.on_frame(&far, 2);
+    let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        !texts2.iter().any(|t| t.contains("Open the chest")),
+        "a far, off-screen chest does not take over early: {texts2:?}"
     );
 }
 
