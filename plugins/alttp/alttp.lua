@@ -2136,10 +2136,8 @@ local COURTYARD = {
   { tx = 149, ty = 507, room = 0x72, level = 1 }, -- lower floor, reached down those stairs
   { tx = 129, ty = 560, room = 0x82, level = 1 },
   { tx = 79, ty = 518, room = 0x81, level = 1 },
-  { tx = 79, ty = 493, room = 0x71, level = 1 }, -- floor-1 layer-swap stairs (0x1E), climbed after the chest
-  { tx = 79, ty = 487, room = 0x71, level = 0, say = "Go to locked door." }, -- in front of the locked door on floor 0 (the door tile 0xF0 is impassable to A*); up those stairs
-  { tx = 79, ty = 469, room = 0x71, level = 0 }, -- past the door, floor-0 pocket: the layer-swap stairs (0x3E) back up to floor 1
-  { tx = 84, ty = 455, room = 0x71, level = 1 }, -- floor-1 door out of 0x71, up those stairs
+  { tx = 79, ty = 487, room = 0x71, level = 0, say = "Go to locked door." }, -- in front of the locked door on floor 0 (the door tile 0xF0 is impassable to A*); the pathfinder climbs the layer-swap stairs up from the chest on its own
+  { tx = 84, ty = 455, room = 0x71, level = 1 }, -- floor-1 door out of 0x71, across the floor-0 pocket and back down the stairs once the door is keyed
   { tx = 10, ty = 452, room = 0x70, level = 0 }, -- into room 0x70
 }
 
