@@ -893,7 +893,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "15,1",
+        armed, "17,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -979,7 +979,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "15,2",
+        resumed, "17,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1023,7 +1023,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "15,2",
+        armed, "17,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1062,7 +1062,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "15,4",
+        "17,4",
         "the dungeon leg targets the Find Zelda waypoint (index 4)"
     );
     assert!(
@@ -1094,54 +1094,59 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
 }
 
 #[test]
-fn alttp_two_level_room_routes_to_the_stairs_before_the_lower_waypoint() {
-    // Room 0x72 is a two-level room: its door/staircase waypoints sit on the upper
-    // floor (level 0) and the point past the stairs on the lower floor (level 1),
-    // joined only by layer-swap stairs. The guide must target only waypoints on
-    // Link's CURRENT floor ($7E00EE) — so upstairs it leads to the stairs, not
-    // straight across the overlay to the lower-floor point, and once Link has
-    // descended the lower point takes over.
+fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
+    // A two-level room is ONE contiguous space to the pathfinder: it crosses the
+    // layer-swap stairs on its own, so from the upper floor the guide routes straight
+    // to a LOWER-floor waypoint — no hand-placed stair waypoint needed. Room 0x72's
+    // chain ends at a lower-floor point (149,507, level 1). And the crossing is
+    // DIRECTIONAL: a down-stair (0x3E) lets Link descend to it, but an up-stair (0x1E)
+    // at the same spot does not — descending it would be climbing a one-way drop
+    // backwards — so the lower point stays unreachable and the guide holds upstairs.
     let r = Registry::builtin();
-    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
-    // Zelda beat, in room 0x72 near its waypoints; `level` sets the floor byte.
-    let frame = |level: u8, ltx: u16, lty: u16| -> Vec<u8> {
-        let mut ram = dungeon_frame((ltx, lty), (0, 0), &[]);
+    // Link upstairs (level 0) at (156,485). `stair` is the tile attribute placed at
+    // (151,499) on the upper floor, with a passable landing beneath it on the lower.
+    let frame = |stair: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((156, 485), (0, 0), &[]);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E00A0, 0x72);
-        set(0x7E00EE, level); // 0 = upper floor, 1 = lower floor
+        set(0x7E00EE, 0); // upper floor
         set(0x7EF34A, 1); // Lamp
         set(0x7EF359, 1); // sword
         set(0x7EF3CC, 0); // Zelda not following
-        set(0x7EF3C5, 0); // Zelda beat
+        set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
         set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
+        // (151,499): (499 & 63) = 51, (151 & 63) = 23.
+        set(0x7F2000 + 51 * 64 + 23, stair); // upper floor: the stair
+        set(0x7F3000 + 51 * 64 + 23, 0x00); // lower floor: passable landing
         ram
     };
 
-    // Upstairs (level 0), a few tiles from the room's waypoints: the guide targets
-    // the staircase waypoint (index 9, level 0), NOT the lower-floor point (index 10).
-    let upper = frame(0, 156, 485);
-    plugin.on_frame(&upper, 0);
-    plugin.on_frame(&upper, 1);
-    plugin.command("advance", &upper);
-    plugin.on_frame(&upper, 2);
+    // Down-stair (0x3E): the guide crosses down and targets the lower-floor waypoint.
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let down = frame(0x3E);
+    plugin.on_frame(&down, 0);
+    plugin.on_frame(&down, 1);
+    plugin.command("advance", &down);
+    plugin.on_frame(&down, 2);
     assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &upper).unwrap(),
-        "9",
-        "upstairs, the guide leads to the staircase waypoint, not across the overlay"
+        plugin.eval("return tostring(nav_chain_i)", &down).unwrap(),
+        "10",
+        "a down-stair lets the guide cross to the lower-floor waypoint (index 10)"
     );
 
-    // Downstairs (level 1): the lower-floor waypoint (index 9) takes over.
+    // Up-stair (0x1E) at the same spot: not a downward path, so the lower point is
+    // unreachable and the guide holds at the last reachable upper waypoint (index 9).
     let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    let lower = frame(1, 150, 505);
-    plugin2.on_frame(&lower, 0);
-    plugin2.on_frame(&lower, 1);
-    plugin2.command("advance", &lower);
-    plugin2.on_frame(&lower, 2);
+    let up = frame(0x1E);
+    plugin2.on_frame(&up, 0);
+    plugin2.on_frame(&up, 1);
+    plugin2.command("advance", &up);
+    plugin2.on_frame(&up, 2);
     assert_eq!(
-        plugin2.eval("return tostring(nav_chain_i)", &lower).unwrap(),
-        "10",
-        "downstairs, the lower-floor waypoint takes over"
+        plugin2.eval("return tostring(nav_chain_i)", &up).unwrap(),
+        "9",
+        "an up-stair is not a down path: the one-way drop is not routed through backwards"
     );
 }
 
