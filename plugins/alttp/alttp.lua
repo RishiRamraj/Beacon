@@ -658,6 +658,16 @@ for _, a in ipairs({
   0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56,                   -- solid object
 }) do IMPASSABLE[a] = true end
 
+-- In-room layer-swap staircases (BG1<->BG2): a tile Link steps onto to change floor
+-- within one room, split by direction. Up-stairs (lower floor -> upper) read
+-- 0x1D-0x1F, down-stairs (upper -> lower) 0x3D-0x3F (zelda3 tile_detect.c). The
+-- cross-floor pathfinder treats each as a ONE-WAY portal in its own direction: some
+-- drops let Link fall to the floor below with no way back up the same tile, so up
+-- and down are not interchangeable. (The same two sets also feed the cross-ROOM
+-- stair finder further down, which is why they are split up/down rather than pooled.)
+local STAIR_UP   = { [0x1D] = true, [0x1E] = true, [0x1F] = true }
+local STAIR_DOWN = { [0x3D] = true, [0x3E] = true, [0x3F] = true }
+
 local function tile_passable(s, wtx, wty, level)
   local attr = tile_attr_at(s, wtx * 8, wty * 8, level)
   if attr == nil or IMPASSABLE[attr] then return false end
@@ -702,18 +712,31 @@ local function is_collidable(attr, indoors)
 end
 
 -- A* from one world tile to another, both inside Link's current 512-pixel (64
--- tile) window. Returns a list of world tiles {tx, ty} from start to goal, or nil
--- if unreachable / out of the window. 4-connected, Manhattan heuristic, binary
+-- tile) window. Returns a list of world tiles {tx, ty, level} from start to goal, or
+-- nil if unreachable / out of the window. 4-connected, Manhattan heuristic, binary
 -- heap — a few thousand nodes at most, run on demand, not per frame.
-local function plan_path(s, s_tx, s_ty, g_tx, g_ty, level)
+--
+-- A two-level dungeon room is ONE contiguous space: the two floors are searched
+-- together, joined at the layer-swap staircases, so a route flows up and down floors
+-- wherever the stairs allow and stops only at real blockers (walls, a locked door).
+-- The search starts on Link's live floor ($7E00EE) and ends on `goal_level` (nil =
+-- Link's floor). A node is level*4096 + ty*64 + tx; besides the four in-plane
+-- neighbours on its own floor, a stair tile offers a ONE-WAY hop to the same tile on
+-- the other floor — up-stairs only from the lower floor, down-stairs only from the
+-- upper — so a drop Link cannot climb back up is never routed through backwards.
+local function plan_path(s, s_tx, s_ty, g_tx, g_ty, goal_level)
   local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3 -- window origin
   local slx, sly, glx, gly = s_tx - ox, s_ty - oy, g_tx - ox, g_ty - oy
   if slx < 0 or slx > 63 or sly < 0 or sly > 63 then return nil end
   if glx < 0 or glx > 63 or gly < 0 or gly > 63 then return nil end
-  if not tile_passable(s, g_tx, g_ty, level) then return nil end
+  local two_floor = s.module == 0x07
+  local slv = two_floor and mem.u8(LOWER_LEVEL) or 0
+  local glv = (two_floor and goal_level ~= nil) and goal_level or slv
+  if not tile_passable(s, g_tx, g_ty, glv) then return nil end
 
+  local FLOOR = 4096 -- 64*64 nodes per floor; the level is the high part of the key
   local function h(x, y) return math.abs(x - glx) + math.abs(y - gly) end
-  local start, goal = sly * 64 + slx, gly * 64 + glx
+  local start, goal = slv * FLOOR + sly * 64 + slx, glv * FLOOR + gly * 64 + glx
   local g, came, closed, heap = {}, {}, {}, {}
   local function push(n, f)
     heap[#heap + 1] = { n = n, f = f }
@@ -743,24 +766,41 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty, level)
     local n = pop()
     if n == goal then
       local rev, cur = {}, n
-      while cur do rev[#rev + 1] = { ox + cur % 64, oy + cur // 64 }; cur = came[cur] end
+      while cur do
+        local lv, rem = cur // FLOOR, cur % FLOOR
+        rev[#rev + 1] = { ox + rem % 64, oy + rem // 64, lv }; cur = came[cur]
+      end
       local path = {}
       for i = #rev, 1, -1 do path[#path + 1] = rev[i] end
       return path
     end
     if not closed[n] then
       closed[n] = true
-      local nx, ny = n % 64, n // 64
+      local lv, rem = n // FLOOR, n % FLOOR
+      local nx, ny = rem % 64, rem // 64
+      local function relax(c)
+        local t = g[n] + 1
+        if not closed[c] and (g[c] == nil or t < g[c]) then
+          g[c] = t; came[c] = n; push(c, t + h(c % FLOOR % 64, c % FLOOR // 64))
+        end
+      end
       for _, d in ipairs(dirs) do
         local cx, cy = nx + d[1], ny + d[2]
         if cx >= 0 and cx <= 63 and cy >= 0 and cy <= 63
-            and tile_passable(s, ox + cx, oy + cy, level) then
-          local c = cy * 64 + cx
-          local t = g[n] + 1
-          if not closed[c] and (g[c] == nil or t < g[c]) then
-            g[c] = t; came[c] = n
-            push(c, t + h(cx, cy))
-          end
+            and tile_passable(s, ox + cx, oy + cy, lv) then
+          relax(lv * FLOOR + cy * 64 + cx)
+        end
+      end
+      -- One-way layer-swap hop to the same tile on the other floor.
+      if two_floor then
+        local attr = tile_attr_at(s, (ox + nx) * 8, (oy + ny) * 8, lv)
+        local to
+        if attr then
+          if lv == 1 and STAIR_UP[attr] then to = 0        -- up-stairs: lower -> upper
+          elseif lv == 0 and STAIR_DOWN[attr] then to = 1 end -- down-stairs: upper -> lower
+        end
+        if to ~= nil and tile_passable(s, ox + nx, oy + ny, to) then
+          relax(to * FLOOR + ny * 64 + nx)
         end
       end
     end
@@ -785,12 +825,17 @@ local function line_passable(s, ax, ay, bx, by, level)
 end
 
 -- String-pulling: drop interior waypoints Link can walk straight past, so the
--- guide beacon points at real corners rather than every tile.
-local function simplify(s, tiles, level)
+-- guide beacon points at real corners rather than every tile. Each path tile carries
+-- its floor; a run is pulled only within one floor (on that floor's grid), and the
+-- pull always breaks at a layer-swap — the floor change is a genuine corner, and a
+-- straight line across floors would read the wrong grid.
+local function simplify(s, tiles)
   if #tiles <= 2 then return tiles end
   local out, anchor = { tiles[1] }, 1
   for i = 2, #tiles - 1 do
-    if not line_passable(s, tiles[anchor][1], tiles[anchor][2], tiles[i + 1][1], tiles[i + 1][2], level) then
+    local alv = tiles[anchor][3]
+    if tiles[i + 1][3] ~= alv
+        or not line_passable(s, tiles[anchor][1], tiles[anchor][2], tiles[i + 1][1], tiles[i + 1][2], alv) then
       out[#out + 1] = tiles[i]; anchor = i
     end
   end
@@ -798,13 +843,13 @@ local function simplify(s, tiles, level)
   return out
 end
 
--- A string-pulled A* route between two world tiles, on `level` (nil = Link's
--- current floor of a two-level room), or nil if unreachable. The single routine
--- both the live guide and the map renderer go through, so a drawn route is always
--- exactly the one Link would walk.
-local function planned_route(s, s_tx, s_ty, g_tx, g_ty, level)
-  local tiles = plan_path(s, s_tx, s_ty, g_tx, g_ty, level)
-  return tiles and simplify(s, tiles, level)
+-- A string-pulled A* route between two world tiles, ending on `goal_level` (nil =
+-- Link's current floor), or nil if unreachable. The single routine both the live
+-- guide and the map renderer go through, so a drawn route is always exactly the one
+-- Link would walk — across floors and all.
+local function planned_route(s, s_tx, s_ty, g_tx, g_ty, goal_level)
+  local tiles = plan_path(s, s_tx, s_ty, g_tx, g_ty, goal_level)
+  return tiles and simplify(s, tiles)
 end
 
 -- ===========================================================================
@@ -977,7 +1022,7 @@ end
 
 local function pathfind_replan(s)
   if pathfind_goal == nil then return false end
-  local tiles = planned_route(s, s.x >> 3, s.y >> 3, pathfind_goal[1], pathfind_goal[2])
+  local tiles = planned_route(s, s.x >> 3, s.y >> 3, pathfind_goal[1], pathfind_goal[2], pathfind_goal[3])
   if tiles == nil then return false end
   pathfind_path = tiles
   pathfind_wp = math.min(2, #pathfind_path)
@@ -987,15 +1032,17 @@ local function pathfind_replan(s)
 end
 
 -- Begin guiding Link to a world-pixel destination. `arrival`, if given, is spoken
--- on reaching it in place of the generic line. Global for MCP / other cues.
-function pathfind_to(wx, wy, arrival)
+-- on reaching it in place of the generic line. `level` is the destination's floor in
+-- a two-level room (nil = Link's current floor); the route crosses floors to reach
+-- it. Global for MCP / other cues.
+function pathfind_to(wx, wy, arrival, level)
   local s = prev
   if s == nil or not in_play(s) then
     say("Cannot navigate now.", { priority = "navigation", category = "on-demand" })
     return false
   end
   pathfind_arrival = arrival
-  pathfind_goal = { wx >> 3, wy >> 3 }
+  pathfind_goal = { wx >> 3, wy >> 3, level }
   if pathfind_replan(s) then
     pathfind_active = true
     return true
@@ -1054,11 +1101,10 @@ end
 
 -- Tile-attribute classes, named like the collision sets (IMPASSABLE, COLLIDE_*),
 -- so the same magic range is not re-tested inline at each call site. STAIR_UP/DOWN
--- also feed the stair finder; ENTRANCE_TILES is the set of non-door tiles a route
--- may leave a room through (walk-through entrances and the layer-swap stairs).
+-- (defined up with the pathfinder, which needs them for cross-floor portals) also
+-- feed the stair finder; ENTRANCE_TILES is the set of non-door tiles a route may
+-- leave a room through (walk-through entrances and the layer-swap stairs).
 local DOOR_TILES, CHEST_TILES = {}, {}
-local STAIR_UP   = { [0x1D] = true, [0x1E] = true, [0x1F] = true }
-local STAIR_DOWN = { [0x3D] = true, [0x3E] = true, [0x3F] = true }
 local ENTRANCE_TILES = { [0x8E] = true, [0x8F] = true }
 do
   for a = 0x30, 0x37 do DOOR_TILES[a] = true end         -- door / passage tiles
@@ -1134,12 +1180,12 @@ end
 -- world-pixel spot. A sprite to guide to — a dying uncle slumped against a wall,
 -- a caged Zelda — often sits on an impassable tile, so aiming the pathfinder at
 -- the sprite itself yields "no path"; snap to a tile beside it instead.
-local function walkable_near(s, wx, wy)
+local function walkable_near(s, wx, wy, level)
   local tx, ty = wx >> 3, wy >> 3
   for r = 0, 8 do
     for dy = -r, r do
       for dx = -r, r do
-        if math.max(math.abs(dx), math.abs(dy)) == r and tile_passable(s, tx + dx, ty + dy) then
+        if math.max(math.abs(dx), math.abs(dy)) == r and tile_passable(s, tx + dx, ty + dy, level) then
           return (tx + dx) * 8 + 4, (ty + dy) * 8 + 4
         end
       end
@@ -1290,8 +1336,8 @@ local function room_path(from, to)
 end
 
 -- Aim the local pathfinder at a world-pixel spot, quietly (no per-room chatter).
-local function route_set_goal(s, wx, wy)
-  pathfind_goal = { wx >> 3, wy >> 3 }
+local function route_set_goal(s, wx, wy, level)
+  pathfind_goal = { wx >> 3, wy >> 3, level }
   if pathfind_replan(s) then pathfind_active = true; return true end
   return false
 end
@@ -2092,7 +2138,9 @@ local COURTYARD = {
   { tx = 79, ty = 518, room = 0x81, level = 1 },
   { tx = 79, ty = 493, room = 0x71, level = 1 }, -- floor-1 layer-swap stairs (0x1E), climbed after the chest
   { tx = 79, ty = 487, room = 0x71, level = 0, say = "Go to locked door." }, -- in front of the locked door on floor 0 (the door tile 0xF0 is impassable to A*); up those stairs
-  { tx = 84, ty = 455, room = 0x71, level = 1 }, -- far side of the locked door (a fresh A* segment; A* cannot cross the door itself)
+  { tx = 79, ty = 469, room = 0x71, level = 0 }, -- past the door, floor-0 pocket: the layer-swap stairs (0x3E) back up to floor 1
+  { tx = 84, ty = 455, room = 0x71, level = 1 }, -- floor-1 door out of 0x71, up those stairs
+  { tx = 10, ty = 452, room = 0x70, level = 0 }, -- into room 0x70
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
@@ -2614,12 +2662,12 @@ nav_update = function(s)
       -- (an earlier waypoint) until it is opened, then advances to the one beyond.
       -- No progress bookkeeping and backtrack-proof: any room re-aims at its last
       -- reachable waypoint. A room's sub-goal already took precedence above.
-      -- A two-level room (LOWER_LEVEL, $7E00EE) has separate collision grids for its
-      -- upper and lower floors, joined only by layer-swap stairs. A waypoint carries
-      -- the `level` it lives on; only same-level waypoints are candidates, so a
-      -- lower-floor point never pulls Link straight across the upper floor's overlay
-      -- — he is guided to the stairs (a same-level waypoint at their mouth) and the
-      -- lower point takes over once he has descended and his level flips.
+      -- A two-level room is ONE contiguous space to the pathfinder: it crosses the
+      -- layer-swap stairs on its own, so a waypoint is a candidate whatever floor it
+      -- is on — reachability (plan_path across floors, one-way drops respected) is the
+      -- only test. Each candidate is snapped and planned on its own floor (wp.level).
+      -- Re-aim on a floor change too, since the flip opens or closes cross-floor
+      -- routes (a one-way drop is gone once taken).
       local level = mem.u8(LOWER_LEVEL)
       local reaimed = chain_last_room ~= s.dungeon_room or chain_last_level ~= level
       chain_probe_in = chain_probe_in - 1
@@ -2631,22 +2679,22 @@ nav_update = function(s)
       local following = pathfind_active and cur and cur.room == s.dungeon_room and not reaimed
       if not following or chain_probe_in <= 0 then
         chain_probe_in = 12
-        local pick, pgx, pgy
+        local pick, pgx, pgy, plevel
         for i, wp in ipairs(nav_chain) do
-          if wp.room == s.dungeon_room and (wp.level or 0) == level then
-            local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4)
-            if plan_path(s, ltx, lty, gx >> 3, gy >> 3) then pick, pgx, pgy = i, gx, gy end
+          if wp.room == s.dungeon_room then
+            local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level)
+            if plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then pick, pgx, pgy, plevel = i, gx, gy, wp.level end
           end
         end
         if pick then
           nav_chain_i = pick
           local wp = nav_chain[pick]
-          if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH then
+          if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH and (wp.level or 0) == level then
             if wp.arrival and not chain_cued[pick] then nav_say(wp.arrival); chain_cued[pick] = true end
             pathfind_stop() -- arrived; go quiet until the next waypoint opens up
           else
             if wp.say and not chain_said[pick] then nav_say(wp.say); chain_said[pick] = true end
-            route_set_goal(s, pgx, pgy)
+            route_set_goal(s, pgx, pgy, plevel)
           end
         end
       end
@@ -2919,39 +2967,19 @@ function on_draw(canvas)
       end
     end
 
-    -- A dungeon chain's waypoints in this room. The route Link follows on his
-    -- current floor is the A* pathfind_path drawn above. Beyond it, the chain often
-    -- continues to another waypoint in the SAME room but on a LOWER floor, reached
-    -- down the stairs; draw that continuation too, as a real A* path planned on the
-    -- destination floor's grid (never a straight line — that would cut through
-    -- walls). So the whole in-room route reads through: to the stairs on this floor,
-    -- then down and across to the lower point. Only waypoints from the active target
-    -- (nav_chain_i) forward, and on the current floor or below it, are shown: a point
-    -- on an UPPER floor belongs to that floor's overlay, not this one — drawing it
-    -- here just paints a phantom second marker over the wrong geometry. Passed points
-    -- are dropped, and the whole thing is hidden while a room sub-goal is active
+    -- Only the active target — the next waypoint in the sequence — is marked (white);
+    -- the route to it, across floors and all, is the pink A* line drawn above. The
+    -- rest of the chain is deliberately not drawn: those are points Link is not headed
+    -- to yet, and painting them just clutters the map (and, on a two-level room, drops
+    -- phantom markers where a point's tile coincides with the other floor's overlay).
+    -- Its own tile coordinates plot the same on either floor, so a target on the floor
+    -- above/below still shows where to head. Hidden while a room sub-goal is active
     -- (clear the guard, grab the key, open the chest).
-    local cur_level = mem.u8(LOWER_LEVEL)
     if s.module == 0x07 and nav_chain and room_objective(s) == nil then
-      local prev_wp
-      for i, wp in ipairs(nav_chain) do
-        if wp.room == s.dungeon_room and i >= nav_chain_i and (wp.level or 0) >= cur_level then
-          -- Segment from the previous same-room waypoint: on a floor change (down
-          -- the stairs) route on the destination floor so it threads properly.
-          if prev_wp then
-            local path = planned_route(s, prev_wp.tx, prev_wp.ty, wp.tx, wp.ty, wp.level or 0)
-            if path then
-              for k = 1, #path - 1 do
-                local ax, ay = plot(path[k][1] * 8 + 4, path[k][2] * 8 + 4)
-                local bx, by = plot(path[k + 1][1] * 8 + 4, path[k + 1][2] * 8 + 4)
-                canvas:line(ax, ay, bx, by, 0xFF60D0)
-              end
-            end
-          end
-          local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
-          canvas:rect(px - 1, py - 1, 3, 3, (i == nav_chain_i) and 0xFFFFFF or 0xFF60D0)
-          prev_wp = wp
-        end
+      local wp = nav_chain[nav_chain_i]
+      if wp and wp.room == s.dungeon_room then
+        local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
+        canvas:rect(px - 1, py - 1, 3, 3, 0xFFFFFF)
       end
     end
 
