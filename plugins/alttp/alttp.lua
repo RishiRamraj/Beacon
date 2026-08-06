@@ -371,6 +371,12 @@ local BEACON_KINDS = {
   minor = { pitch = 0.5, range = 24,  tremolo = 0.0, gain = 1.0 }, -- steady, incidental
 }
 
+-- NPC types the guide leads Link to as a quest objective rather than ambient people
+-- to pass by. The navigation guide already homes on them, so also sounding the "safe
+-- to approach" NPC tone puts two cues on one target and muddies which to follow —
+-- these are kept off the NPC beacon (they still show on the map and in a scan).
+local BEACON_SKIP_NPC = { [118] = true } -- Princess Zelda (the rescue objective)
+
 -- How much a wall between the player and a source dims its beacon: muffled, not
 -- silenced, so an occluded threat still registers.
 local BEACON_OCCLUDED_SCALE = 0.35
@@ -1777,7 +1783,11 @@ function on_frame(frame)
     local nearest = {}
     for _, sp in ipairs(list) do
       local c = category(sp)
-      if nearest[c] == nil then nearest[c] = sp end
+      -- A quest-objective NPC (Zelda) is led to by the guide, not chirped at as an
+      -- ambient person; skip it here so a farther real NPC can still take the tone.
+      if not (c == "npc" and BEACON_SKIP_NPC[sp.kind]) and nearest[c] == nil then
+        nearest[c] = sp
+      end
     end
 
     -- In combat — an enemy within COMBAT_RANGE — only that nearest enemy sounds;
