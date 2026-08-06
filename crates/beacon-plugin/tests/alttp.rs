@@ -213,6 +213,54 @@ fn alttp_zelda_is_not_chirped_as_an_ambient_npc() {
 }
 
 #[test]
+fn alttp_a_carried_sprite_overhead_is_not_beaconed() {
+    // Sprite state 0x0A is "carried" — an object Link is holding over his head (a
+    // lifted pot/bush/rock). It rides on Link, so it is not a world object to track:
+    // no beacon (nor scan/map entry). On the ground (state 0x09) it sounds normally.
+    let r = Registry::builtin();
+
+    let frame = |state: u8| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09);
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E0022, 0x00);
+        set(0x7E0023, 0x01); // Link X = 0x0100
+        set(0x7E0020, 0x00);
+        set(0x7E0021, 0x01); // Link Y = 0x0100
+        set(0x7E0DD0, state); // slot 0 state
+        set(0x7E0E20, 3); // an unnamed minor sprite
+        set(0x7E0D10, 0x08);
+        set(0x7E0D30, 0x01); // sprite X = 0x0108 (8px east, within minor range)
+        set(0x7E0D00, 0x00);
+        set(0x7E0D20, 0x01); // sprite Y = 0x0100
+        ram
+    };
+
+    // On the ground: a minor beacon sounds (control).
+    let ground = frame(0x09);
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin.on_frame(&ground, 0);
+    plugin.on_frame(&ground, 1);
+    assert!(
+        plugin.beacons().iter().any(|b| b.id == "minor"),
+        "a minor sprite on the ground sounds its beacon"
+    );
+
+    // Carried overhead: no beacon.
+    let carried = frame(0x0A);
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin2.on_frame(&carried, 0);
+    plugin2.on_frame(&carried, 1);
+    assert!(
+        !plugin2.beacons().iter().any(|b| b.id == "minor"),
+        "a carried sprite overhead is not beaconed"
+    );
+}
+
+#[test]
 fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
     // A sprite whose type is not in REF.enemy_types (75) but which has health is
     // still a threat: detected via health and given an enemy beacon.

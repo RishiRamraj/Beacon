@@ -175,7 +175,10 @@ local function sprites()
   local out = {}
   for i = 0, 15 do
     local st = mem.u8(SPRITE.state + i)
-    if st ~= nil and st ~= 0 then
+    -- Skip state 0x0A ("carried"): an object Link is holding over his head — a
+    -- lifted pot, bush, or rock — rides on him, so it is not a thing in the world to
+    -- beacon, map, or scan. (Sprite state jump table: 0x0A = SpriteModule_Carried.)
+    if st ~= nil and st ~= 0 and st ~= 0x0A then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
       local dx, dy = sx - s.x, sy - s.y
