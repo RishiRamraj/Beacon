@@ -371,6 +371,11 @@ local BEACON_KINDS = {
   minor = { pitch = 0.5, range = 24,  tremolo = 0.0, gain = 1.0 }, -- steady, incidental
 }
 
+-- A treasure chest is a fixed landmark, not a loose pickup you chase down, so it
+-- sounds the item tone at a lower volume — present but not competing with the guide
+-- and the pickups. Same pitch/pulse as an item so it still reads as "a good thing".
+local CHEST_BEACON = { pitch = 2.0, range = 224, tremolo = 1.0, gain = 0.5 }
+
 -- NPC types the guide leads Link to as a quest objective rather than ambient people
 -- to pass by. The navigation guide already homes on them, so also sounding the "safe
 -- to approach" NPC tone puts two cues on one target and muddies which to follow —
@@ -1813,7 +1818,7 @@ function on_frame(frame)
     local chest = nearest_chest_tile(now)
     if chest then
       local dx, dy = chest[1] - now.x, chest[2] - now.y
-      sound_beacon(now, "chest", dx, dy, math.abs(dx) + math.abs(dy), BEACON_KINDS.item, combat_engaged)
+      sound_beacon(now, "chest", dx, dy, math.abs(dx) + math.abs(dy), CHEST_BEACON, combat_engaged)
     else
       beacon.clear("chest")
     end
