@@ -1308,6 +1308,64 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
 }
 
 #[test]
+fn alttp_a_layer_swap_stair_cannot_be_walked_across_on_its_entry_floor() {
+    // A layer-swap stair is not flat ground: stepping onto it forces the floor change,
+    // so the pathfinder must not walk across it to the tile beyond on the same floor.
+    // Room 0x72, Link on the upper floor, split by a wall band with a single gap; the
+    // upper waypoint 9 sits past the gap. With plain floor in the gap Link walks
+    // through to it (index 9); with a down-stair in the gap — whose portal is blocked
+    // (impassable landing) — he cannot walk across, so waypoint 9 is unreachable and
+    // the guide holds at waypoint 8.
+    let r = Registry::builtin();
+
+    let frame = |gap: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((159, 470), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x72);
+        set(0x7E00EE, 0); // upper floor
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
+        set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
+        // A wall band across the upper floor at grid row 33, one gap at col 31.
+        for tx in 0..64u32 {
+            set(0x7F2000 + 33 * 64 + tx, 0x01);
+        }
+        set(0x7F2000 + 33 * 64 + 31, gap); // the gap: plain floor, or a down-stair
+        set(0x7F3000 + 33 * 64 + 31, 0x01); // block the stair's landing (portal leads nowhere)
+        ram
+    };
+
+    // Plain floor in the gap: Link walks through to the far upper waypoint (9).
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let open = frame(0x00);
+    plugin.on_frame(&open, 0);
+    plugin.on_frame(&open, 1);
+    plugin.command("advance", &open);
+    plugin.on_frame(&open, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain_i)", &open).unwrap(),
+        "9",
+        "plain floor in the gap is walked through to the far waypoint (index 9)"
+    );
+
+    // A down-stair in the gap (portal blocked): it cannot be walked across, so the far
+    // waypoint is unreachable and the guide holds at the near one (index 8).
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let stair = frame(0x3E);
+    plugin2.on_frame(&stair, 0);
+    plugin2.on_frame(&stair, 1);
+    plugin2.command("advance", &stair);
+    plugin2.on_frame(&stair, 2);
+    assert_eq!(
+        plugin2.eval("return tostring(nav_chain_i)", &stair).unwrap(),
+        "8",
+        "a stair in the gap is not flat ground: it is not walked across to the far waypoint"
+    );
+}
+
+#[test]
 fn alttp_a_closed_locked_door_blocks_the_route() {
     // A closed flaggable door (0xF0-0xFF) is a solid tile to the game's own
     // classifier and must be one to the pathfinder too, so the guide never leads
