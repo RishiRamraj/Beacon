@@ -2723,8 +2723,14 @@ local ROOM_OBJECTIVES = {
   -- before moving on. Listed above the chest so, once both are out, the key first.
   { id = "key",
     cue = "Grab the key.",
+    -- Only while heading INTO the dungeon, not while escorting Zelda back out. On the
+    -- castle-escape backtrack a respawned guard drops a key Link no longer needs (a
+    -- slain guard becomes its own key sprite), and routing to it just pulls the guide
+    -- off the escort. Zelda's follow flag ($7EF3CC) is set only during that escort and
+    -- clear in every other dungeon, so this gates exactly the escort, nothing else.
     active = function(s)
-      return nearest_sprite_kind(s, 228) ~= nil or nearest_sprite_kind(s, 229) ~= nil
+      return mem.u8(0x7EF3CC) == 0
+        and (nearest_sprite_kind(s, 228) ~= nil or nearest_sprite_kind(s, 229) ~= nil)
     end,
     target = function(s)
       local k = nearest_sprite_kind(s, 228) or nearest_sprite_kind(s, 229)
