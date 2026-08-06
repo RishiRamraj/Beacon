@@ -2327,6 +2327,7 @@ local SANCTUARY = {
   { tx = 20, ty = 452, room = 0x70, level = 0 }, -- back up in 0x70, starting the climb out
   { tx = 79, ty = 503, room = 0x71, level = 1 }, -- up into 0x71 (the boomerang chest room), lower floor
   { tx = 124, ty = 524, room = 0x81, level = 0 }, -- up into 0x81 (the guardroom above 0x71)
+  { tx = 159, ty = 455, room = 0x72, level = 0 }, -- up into 0x72, upper floor
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
