@@ -2325,6 +2325,7 @@ local COURTYARD = {
 local SANCTUARY = {
   { tx = 10, ty = 516, room = 0x80, level = 0 }, -- up out of Zelda's cell room, the start of the climb
   { tx = 20, ty = 452, room = 0x70, level = 0 }, -- back up in 0x70, starting the climb out
+  { tx = 79, ty = 503, room = 0x71, level = 1 }, -- up into 0x71 (the boomerang chest room), lower floor
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
