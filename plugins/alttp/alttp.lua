@@ -1594,6 +1594,74 @@ local function sound_beacon(now, id, dx, dy, dist, kind, hushed)
   beacon.set(id, { x = dx, y = dy, pitch = kind.pitch, volume = vol, tremolo = kind.tremolo })
 end
 
+-- ── Enemy weapons ───────────────────────────────────────────────────────────
+-- Some enemies attack with a weapon that is a threat in its own right, apart from
+-- the enemy's body — most vividly the Ball-and-Chain Trooper's flail, a heavy ball
+-- swung on a chain through a wide arc. Enemy weapons get their own beacon type: a
+-- distinct, urgent tone (low and fast-pulsing) so a blind player can hear the arc
+-- itself and dodge it, not just the enemy standing behind it. Never hushed in
+-- combat — the weapon IS the danger. New weapon sources fold into WEAPON.nearest so
+-- they all share the one tone. Everything hangs off one table to spare the main
+-- chunk's local budget (Lua caps a function at 200 locals).
+local WEAPON = {}
+WEAPON.beacon = { pitch = 0.7, range = 224, tremolo = 5.0, gain = 1.8 }
+-- Ball-and-Chain flail geometry, ported from zelda3 SpriteDraw_BNCFlail: a 9-bit
+-- swing angle (sprite_A/B), a radius that grows through the attack (`radius`, indexed
+-- by the attack timer sprite_delay_aux2), and a per-facing pivot (px/py). The aux
+-- arrays sit alongside the ones SPRITE already names.
+WEAPON.flail = {
+  kind = 0x6A, aistate = 0x7E0D80, a = 0x7E0D90, b = 0x7E0DA0, d = 0x7E0DE0, delay2 = 0x7E0E10,
+  radius = {
+    [0] = 0x10, 0x12, 0x14, 0x16, 0x18, 0x1a, 0x1c, 0x1e, 0x20, 0x22, 0x24, 0x26, 0x28, 0x2a, 0x2c, 0x2e,
+    0x30, 0x2e, 0x2c, 0x2a, 0x28, 0x26, 0x24, 0x22, 0x20, 0x1e, 0x1c, 0x1a, 0x18, 0x16, 0x14, 0x12,
+  },
+  px = { [0] = 4, 4, 12, -5 }, py = { [0] = -2, -2, -6, -4 },
+}
+
+-- One swing-axis component: the sine sample scaled by the radius, rounded to the
+-- nearest 1/256th (kSinusLookupTable is a half-sine 0..256; the sign comes from the
+-- angle's 0x100 bit). math.sin lands within a pixel of the ROM table — exact enough
+-- for a directional beacon.
+function WEAPON.component(angle, qq)
+  local a = math.floor(256 * math.sin((angle & 0xff) * math.pi / 256) + 0.5)
+  local m = a >= 256 and qq or (((a * qq) >> 8) + (((a * qq) >> 7) & 1))
+  return (angle & 0x100) ~= 0 and -m or m
+end
+
+-- The swinging ball's world position for the trooper in slot `i`, or nil when its
+-- flail is tucked in (ai_state < 2): only the extended, arcing ball is worth a tone.
+function WEAPON.ball_pos(i)
+  local f = WEAPON.flail
+  if mem.u8(SPRITE.kind + i) ~= f.kind or mem.u8(f.aistate + i) < 2 then return nil end
+  local r0 = mem.u8(f.a + i) | (mem.u8(f.b + i) << 8)
+  local qq = f.radius[mem.u8(f.delay2 + i) & 31]
+  local d = mem.u8(f.d + i) & 3
+  local ox = WEAPON.component(r0, qq) - 4 + f.px[d]
+  local oy = WEAPON.component((r0 + 0x80) & 0x1ff, qq) - 4 + f.py[d]
+  local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
+  local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
+  return sx + ox, sy + oy
+end
+
+-- The nearest enemy weapon to Link as { dx, dy, dist } in world pixels, or nil.
+-- Today that is the Ball-and-Chain flail; other served/thrown weapons can be added
+-- here so they all sound through the one weapon beacon.
+function WEAPON.nearest(s)
+  local best
+  for i = 0, 15 do
+    local st = mem.u8(SPRITE.state + i)
+    if st ~= nil and st ~= 0 then
+      local bx, by = WEAPON.ball_pos(i)
+      if bx then
+        local dx, dy = bx - s.x, by - s.y
+        local dist = math.abs(dx) + math.abs(dy)
+        if best == nil or dist < best.dist then best = { dx = dx, dy = dy, dist = dist } end
+      end
+    end
+  end
+  return best
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -1739,12 +1807,22 @@ function on_frame(frame)
     else
       beacon.clear("chest")
     end
+
+    -- The enemy-weapon tone, on the nearest swinging weapon (the flail ball today).
+    -- Never hushed — it is the acute threat, and its own arc is what has to be dodged.
+    local weapon = WEAPON.nearest(now)
+    if weapon then
+      sound_beacon(now, "weapon", weapon.dx, weapon.dy, weapon.dist, WEAPON.beacon, false)
+    else
+      beacon.clear("weapon")
+    end
   else
     combat_engaged = false
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
       beacon.clear(name)
     end
     beacon.clear("chest")
+    beacon.clear("weapon")
   end
 
   -- Remember where Link has been, for the explore command.

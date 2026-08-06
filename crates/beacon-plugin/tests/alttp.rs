@@ -104,6 +104,67 @@ fn alttp_enemy_is_tracked_by_beacon_and_never_spoken() {
 }
 
 #[test]
+fn alttp_ball_and_chain_flail_sounds_a_weapon_beacon_while_swinging() {
+    // The Ball-and-Chain Trooper (type 0x6A) swings a ball on a chain that is drawn
+    // as OAM, not a sprite slot. Mid-swing (ai_state >= 2) the plugin recomputes the
+    // ball's position from the trooper's swing aux fields and places a distinct
+    // "weapon" beacon on it, separate from the enemy-body beacon. Tucked in, no tone.
+    let r = Registry::builtin();
+
+    let frame = |ai_state: u8| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // in play
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E0022, 0x00);
+        set(0x7E0023, 0x01); // Link X = 0x0100
+        set(0x7E0020, 0x00);
+        set(0x7E0021, 0x01); // Link Y = 0x0100
+        set(0x7E0DD0, 0x09); // slot 0 active
+        set(0x7E0E20, 0x6A); // Ball and Chain Trooper
+        set(0x7E0D10, 0x30);
+        set(0x7E0D30, 0x01); // sprite X = 0x0130 (48px east of Link)
+        set(0x7E0D00, 0x00);
+        set(0x7E0D20, 0x01); // sprite Y = 0x0100
+        set(0x7E0E50, 16); // hp -> a live enemy
+        set(0x7E0D80, ai_state); // sprite_ai_state (>= 2 = swinging)
+        set(0x7E0D90, 0x40); // sprite_A: swing angle low byte
+        set(0x7E0DA0, 0x00); // sprite_B: swing angle high bit
+        set(0x7E0DE0, 1); // sprite_D: facing
+        set(0x7E0E10, 8); // sprite_delay_aux2: mid-extension radius
+        ram
+    };
+
+    // Mid-swing: a weapon beacon tracks the ball, alongside the enemy-body beacon.
+    let swinging = frame(2);
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin.on_frame(&swinging, 0);
+    plugin.on_frame(&swinging, 1);
+    let b = plugin.beacons();
+    assert!(
+        b.iter().any(|x| x.id == "weapon"),
+        "the swinging flail sounds its own weapon beacon: {:?}",
+        b.iter().map(|x| &x.id).collect::<Vec<_>>()
+    );
+    assert!(
+        b.iter().any(|x| x.id == "enemy"),
+        "the trooper body still sounds the enemy beacon"
+    );
+
+    // Flail tucked in (ai_state 0): no weapon beacon, only the enemy body.
+    let idle = frame(0);
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin2.on_frame(&idle, 0);
+    plugin2.on_frame(&idle, 1);
+    assert!(
+        !plugin2.beacons().iter().any(|x| x.id == "weapon"),
+        "a tucked-in flail sounds no weapon beacon"
+    );
+}
+
+#[test]
 fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
     // A sprite whose type is not in REF.enemy_types (75) but which has health is
     // still a threat: detected via health and given an enemy beacon.
