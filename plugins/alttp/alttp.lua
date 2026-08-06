@@ -857,24 +857,30 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty, goal_level)
           g[c] = t; came[c] = n; push(c, t + h(c % FLOOR % 64, c % FLOOR // 64))
         end
       end
-      for _, d in ipairs(dirs) do
-        local cx, cy = nx + d[1], ny + d[2]
-        if cx >= 0 and cx <= 63 and cy >= 0 and cy <= 63
-            and tile_passable(s, ox + cx, oy + cy, lv) then
-          relax(lv * FLOOR + cy * 64 + cx)
-        end
-      end
-      -- One-way layer-swap hop to the same tile on the other floor.
+      -- A layer-swap stair on its ENTRY floor (an up-stair read on the lower floor, a
+      -- down-stair on the upper) is not flat ground: stepping onto it forces the floor
+      -- change, so Link cannot walk across it to the tile beyond on the same floor. On
+      -- such a tile the ONLY move is the one-way hop to the same tile on the other
+      -- floor. Everywhere else (plain floor, or a stair seen from its EXIT floor, which
+      -- is where Link emerges and walks off) the normal in-plane neighbours apply.
+      local to
       if two_floor then
         local attr = tile_attr_at(s, (ox + nx) * 8, (oy + ny) * 8, lv)
-        local to
         if attr then
           if lv == 1 and STAIR_UP[attr] then to = 0        -- up-stairs: lower -> upper
           elseif lv == 0 and STAIR_DOWN[attr] then to = 1 end -- down-stairs: upper -> lower
         end
-        if to ~= nil and tile_passable(s, ox + nx, oy + ny, to) then
-          relax(to * FLOOR + ny * 64 + nx)
+      end
+      if to == nil then
+        for _, d in ipairs(dirs) do
+          local cx, cy = nx + d[1], ny + d[2]
+          if cx >= 0 and cx <= 63 and cy >= 0 and cy <= 63
+              and tile_passable(s, ox + cx, oy + cy, lv) then
+            relax(lv * FLOOR + cy * 64 + cx)
+          end
         end
+      elseif tile_passable(s, ox + nx, oy + ny, to) then
+        relax(to * FLOOR + ny * 64 + nx)
       end
     end
   end
