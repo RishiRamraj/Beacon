@@ -3212,6 +3212,19 @@ function on_draw(canvas)
           end
         end
       end
+
+      -- Direct-pathfind phases (e.g. escorting Zelda) have no chain, but the guide
+      -- still leads along an A* route drawn above as pink corners. Number those
+      -- corners too — in the route's own pink, the active one white — so the
+      -- immediate target always carries a number, not just chain waypoints.
+      if pathfind_active and pathfind_path then
+        for i, wt in ipairs(pathfind_path) do
+          if inwin(wt[1] * 8 + 4, wt[2] * 8 + 4) then
+            local px, py = plot(wt[1] * 8 + 4, wt[2] * 8 + 4)
+            canvas:text(px + 3, py - 3, tostring(i), (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
+          end
+        end
+      end
     end
 
     -- The cross-screen overworld route, drawn through the current 512-pixel
