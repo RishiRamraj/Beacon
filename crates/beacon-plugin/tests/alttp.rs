@@ -1803,6 +1803,58 @@ fn alttp_giant_kill_room_counts_the_far_enemy_and_ignores_hp0_bystanders() {
 }
 
 #[test]
+fn alttp_grab_the_key_is_suppressed_while_escorting_zelda() {
+    // A slain key-guard becomes its own Key sprite (type 228), and the guide normally
+    // says "Grab the key." But while escorting Zelda out of the castle — her follow
+    // flag $7EF3CC is set — a respawned guard's key is not needed, so the cue is
+    // suppressed rather than pulling the guide off the escort.
+    let r = Registry::builtin();
+
+    let frame = |following: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E040C, 0x02);
+        set(0x7E00A0, 0x72);
+        set(0x7EF3C5, 1); // has sword, Zelda not yet delivered
+        set(0x7EF3CC, following); // Zelda follow flag
+        // A dropped Key sprite (type 228) near Link.
+        set(0x7E0DD0, 0x09); // slot 0 active
+        set(0x7E0E20, 228); // Key
+        set(0x7E0D10, 0xF4); // x -> 244 -> tile 30
+        set(0x7E0D30, 0x00);
+        set(0x7E0D00, 0xA4); // y -> 164 -> tile 20
+        set(0x7E0D20, 0x00);
+        ram
+    };
+
+    // Heading in (not following): the guide says to grab the dropped key.
+    let inbound = frame(0);
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin.on_frame(&inbound, 0);
+    plugin.on_frame(&inbound, 1);
+    plugin.command("advance", &inbound);
+    let out = plugin.on_frame(&inbound, 2);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Grab the key")),
+        "a dropped key is called out when heading into the dungeon: {texts:?}"
+    );
+
+    // Escorting Zelda out (follow flag set): the key cue is suppressed.
+    let escort = frame(1);
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin2.on_frame(&escort, 0);
+    plugin2.on_frame(&escort, 1);
+    plugin2.command("advance", &escort);
+    let out2 = plugin2.on_frame(&escort, 2);
+    let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        !texts2.iter().any(|t| t.contains("Grab the key")),
+        "the key cue is suppressed while escorting Zelda out: {texts2:?}"
+    );
+}
+
+#[test]
 fn alttp_escape_room_0x71_chest_is_a_routing_objective() {
     // Room 0x71 on the castle escape is a genuine kill-room (header tag 0x08) that
     // also holds a chest worth the detour, so it is listed in CHEST_ROOMS. Once its
