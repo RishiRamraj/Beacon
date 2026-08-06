@@ -165,6 +165,54 @@ fn alttp_ball_and_chain_flail_sounds_a_weapon_beacon_while_swinging() {
 }
 
 #[test]
+fn alttp_zelda_is_not_chirped_as_an_ambient_npc() {
+    // Princess Zelda (type 118) is the rescue objective the guide leads to, so she is
+    // kept off the ambient "npc" beacon — two cues on one target is confusing. A plain
+    // NPC (Sahasrahla, type 22) still gets the tone.
+    let r = Registry::builtin();
+
+    let frame = |kind: u8| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09);
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E0022, 0x00);
+        set(0x7E0023, 0x01); // Link X = 0x0100
+        set(0x7E0020, 0x00);
+        set(0x7E0021, 0x01); // Link Y = 0x0100
+        set(0x7E0DD0, 0x09); // slot 0 active
+        set(0x7E0E20, kind); // NPC type
+        set(0x7E0D10, 0x30);
+        set(0x7E0D30, 0x01); // sprite X = 0x0130 (near)
+        set(0x7E0D00, 0x00);
+        set(0x7E0D20, 0x01); // sprite Y = 0x0100
+        ram
+    };
+
+    // A plain NPC gets the npc beacon (control).
+    let plain = frame(22); // Sahasrahla
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin.on_frame(&plain, 0);
+    plugin.on_frame(&plain, 1);
+    assert!(
+        plugin.beacons().iter().any(|b| b.id == "npc"),
+        "an ordinary NPC still sounds the npc beacon"
+    );
+
+    // Zelda does not — the guide leads to her instead.
+    let zelda = frame(118);
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin2.on_frame(&zelda, 0);
+    plugin2.on_frame(&zelda, 1);
+    assert!(
+        !plugin2.beacons().iter().any(|b| b.id == "npc"),
+        "Zelda the objective is not chirped as an ambient npc"
+    );
+}
+
+#[test]
 fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
     // A sprite whose type is not in REF.enemy_types (75) but which has health is
     // still a threat: detected via health and given an enemy beacon.
