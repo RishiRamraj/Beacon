@@ -2329,6 +2329,7 @@ local SANCTUARY = {
   { tx = 124, ty = 524, room = 0x81, level = 0 }, -- up into 0x81 (the guardroom above 0x71)
   { tx = 134, ty = 512, room = 0x82, level = 0 }, -- up into 0x82, upper floor
   { tx = 159, ty = 455, room = 0x72, level = 0 }, -- up into 0x72, upper floor
+  { tx = 119, ty = 15, room = 0x01, level = 1 }, -- up into 0x01, lower floor
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
