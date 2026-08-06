@@ -2317,6 +2317,15 @@ local COURTYARD = {
   { tx = 44, ty = 518, room = 0x80, say = "Free Princess Zelda." }, -- her cell, down the stairs from 0x70 — the rescue
 }
 
+-- The escort back out: once Zelda is freed the return trip leads up through the
+-- castle to the hidden north passage and out to the Sanctuary. Authored room by
+-- room by playing it (the room-graph heuristic just heads for the nearest exit,
+-- which does not know the hidden passage). Wired to the "sanct" goal; grows as the
+-- route is walked.
+local SANCTUARY = {
+  { tx = 20, ty = 452, room = 0x70, level = 0 }, -- back up in 0x70, starting the climb out
+}
+
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
 -- world-tile waypoints. The overworld guide homes on the active one
 -- (nav_chain[nav_chain_i]) and the map renderer draws the whole remaining chain —
@@ -2581,7 +2590,7 @@ local GOALS = {
     done = { { 0x7EF3CC, 1 }, { 0x7EF3C5, 2 } }, chain = COURTYARD },
   { id = "sanct", goal = "Escort Zelda to the Sanctuary",
     hint = "Lead Zelda back up through the castle and out the hidden north passage to the Sanctuary.",
-    done = { 0x7EF3C5, 2 }, room = SANCTUARY_ROOM, entrance_area = SANCTUARY_AREA,
+    done = { 0x7EF3C5, 2 }, chain = SANCTUARY, room = SANCTUARY_ROOM, entrance_area = SANCTUARY_AREA,
     leave = "Head for the Sanctuary." },
   -- Post-intro: the pendant hunt, the Master Sword, Agahnim, the seven crystals,
   -- then Ganon. Each `dungeon` goal routes to its overworld area; inside the dungeon
