@@ -2323,6 +2323,7 @@ local COURTYARD = {
 -- which does not know the hidden passage). Wired to the "sanct" goal; grows as the
 -- route is walked.
 local SANCTUARY = {
+  { tx = 10, ty = 516, room = 0x80, level = 0 }, -- up out of Zelda's cell room, the start of the climb
   { tx = 20, ty = 452, room = 0x70, level = 0 }, -- back up in 0x70, starting the climb out
 }
 
