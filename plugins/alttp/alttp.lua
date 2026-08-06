@@ -2306,6 +2306,7 @@ local COURTYARD = {
   { tx = 88, ty = 495, room = 0x71, level = 1 }, -- lower-floor anchor by the chest, where the route to the next room (0x70) and its key-soldier begins
   { tx = 84, ty = 455, room = 0x71, level = 1, gate = past_locked_door(79, 486, 0) }, -- floor-1 door out of 0x71, gated on the key/door: keyless Link is held at the chest anchor to go fetch the key in 0x70 first, then this opens up. The room is open on the lower floor, so the pathfinder alone would reach here early — the gate, not a collision block, is what holds it.
   { tx = 10, ty = 452, room = 0x70, level = 0 }, -- into room 0x70
+  { tx = 44, ty = 518, room = 0x80, say = "Free Princess Zelda." }, -- her cell, down the stairs from 0x70 — the rescue
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
