@@ -148,6 +148,15 @@ local function is_enemy(sp)
   return (sp.hp ~= nil and sp.hp > 0) or REF.enemy_types[sp.kind] == true
 end
 
+-- Whether a sprite is live enough to draw on the map: it has health, or it is a
+-- pickup / person that carries no health by design (items, NPCs, switches — things
+-- to walk to). A spent sprite that is hp 0 and neither is dead or inert (a defeated
+-- enemy, a projectile, incidental scenery) and just clutters the map. Princess Zelda
+-- and other story NPCs are hp 0 but classified as NPCs, so they stay.
+local function is_live(sp)
+  return (sp.hp ~= nil and sp.hp > 0) or REF.item_types[sp.kind] or REF.npc_types[sp.kind]
+end
+
 -- What to call an enemy: its type name only when the type is a classified enemy,
 -- otherwise just "enemy" — a damageable sprite the table does not name is still a
 -- threat, and a wrong name would be worse than none.
@@ -222,6 +231,39 @@ local FORCE_KILL_ROOMS = {
   -- re-arms the sub-goal, and the room's reuse for the lower area is never a
   -- kill-room.
   [0x72] = function(s) return not room_chest_opened(s.dungeon_room) end,
+  -- 0x70: two guards flank the way through; the eastern one drops the key for the
+  -- locked door out, so the first objective is to defeat them. No clear-tag, so force
+  -- it. Always on: the kill objective self-clears once no counting enemy remains, and
+  -- the escape runs one-way forward, so a backtrack re-arm never arises in practice.
+  [0x70] = function(_) return true end,
+  -- 0x80: the jail-cell room. The enemy in the far east holds the big key, so the
+  -- whole room is one kill objective — a "giant" kill-room (see GIANT_KILL_ROOMS)
+  -- whose enemies count across the whole screen, not just the near ones, so the
+  -- guide leads Link east to that enemy instead of dropping the objective once the
+  -- nearer guards fall. No clear-tag, so force it; the escape is one-way forward.
+  [0x80] = function(_) return true end,
+}
+
+-- Kill-rooms whose fighting area is the whole room, not just what is on screen.
+-- In an ordinary kill-room the enemy tally only counts sprites within ~one screen
+-- of Link (ENEMY_ONSCREEN), so a sprite loaded from an adjacent room can't hold the
+-- room "uncleared" forever. A giant kill-room deliberately spans the whole 512-pixel
+-- room: a key-holder waiting at the far side must still count from across it, so the
+-- tally uses a room-sized reach (ENEMY_INROOM) here. Keyed by dungeon room id.
+local GIANT_KILL_ROOMS = { [0x80] = true }
+
+-- Debug map only: the tile bounds of a kill-room's fighting pits, in world tiles,
+-- each drawn as a 1px rectangle. A dungeon room is one 64-tile block, but the parts
+-- that actually gate progress are smaller chambers walled off by green ledge tiles;
+-- a room can hold several such pits, so each room maps to a LIST of boxes and the
+-- overlay outlines them all. Edges (n/e/s/w = north/east/south/west) are read off
+-- the green walls so an outline hugs its pit rather than framing the whole screen.
+--   0x71: two guard pits side by side, every edge on a green ledge wall.
+local KILL_REGION = {
+  [0x71] = {
+    { n = 491, e = 90,  s = 506, w = 69 },  -- west pit
+    { n = 487, e = 122, s = 506, w = 101 }, -- east pit
+  },
 }
 
 -- Is Link in a dungeon room gated on defeating enemies?
@@ -241,15 +283,23 @@ end
 -- screen and must not hold the room "uncleared" forever. Kept generous (a bit
 -- past the 256x224 screen) so an on-screen enemy near a room edge still counts.
 local ENEMY_ONSCREEN = 144
+-- A giant kill-room counts enemies across the whole 512-pixel room, so a key-holder
+-- waiting at the far side still registers from anywhere in the room.
+local ENEMY_INROOM = 512
 
 local function nearest_pending_enemy(s)
+  local reach = GIANT_KILL_ROOMS[s.dungeon_room] and ENEMY_INROOM or ENEMY_ONSCREEN
   local best, bd
   for i = 0, 15 do
     local st = mem.u8(SPRITE.state + i)
-    if st ~= nil and st ~= 0 and (mem.u8(SPRITE_FLAGS4 + i) & 0x40) == 0 then
+    -- hp 0 is dead or inert (or a bystander NPC like caged Zelda) — never a pending
+    -- enemy, so it can't hold a room "uncleared", especially a giant kill-room whose
+    -- wide reach would otherwise sweep such a sprite in from across the room.
+    if st ~= nil and st ~= 0 and (mem.u8(SPRITE_FLAGS4 + i) & 0x40) == 0
+        and (mem.u8(SPRITE.hp + i) or 0) > 0 then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
-      if math.abs(sx - s.x) <= ENEMY_ONSCREEN and math.abs(sy - s.y) <= ENEMY_ONSCREEN then
+      if math.abs(sx - s.x) <= reach and math.abs(sy - s.y) <= reach then
         local d = math.abs(sx - s.x) + math.abs(sy - s.y)
         if bd == nil or d < bd then best, bd = { sx, sy }, d end
       end
@@ -657,6 +707,15 @@ for _, a in ipairs({
   0x08, 0x4B,                                                 -- deep water (0x09 shallow is wadeable)
   0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56,                   -- solid object
 }) do IMPASSABLE[a] = true end
+-- Flaggable doors (0xF0-0xFF): locked doors and doors held shut by a room flag.
+-- The game's own tile classifier makes every value in this range a solid
+-- collision (zelda3 tile_detect.c TileBehavior_FlaggableDoor); opening one
+-- rewrites its attribute in the $7F2000 table to a passable value (a passage or
+-- open-door tile). So a tile still reading 0xF0-0xFF is a CLOSED door the route
+-- must not cross — this is what stops the guide leading Link through a locked
+-- door before he holds its key. Once the door is opened the tile no longer reads
+-- in this range, so the same route opens up with no special-casing here.
+for a = 0xF0, 0xFF do IMPASSABLE[a] = true end
 
 -- In-room layer-swap staircases (BG1<->BG2): a tile Link steps onto to change floor
 -- within one room, split by direction. Up-stairs (lower floor -> upper) read
@@ -2123,6 +2182,26 @@ local UNCLE_APPROACH = {
 -- the door Link is inside the castle (room 0x61), and the in-room pathfinder leads
 -- him to it. Reaching it retires the chain and hands off to the room-graph route,
 -- which carries on through the castle to Zelda's cell.
+-- A gate on a waypoint that lies past a locked door: the driver treats the
+-- waypoint (and, being later in the chain, the ones after it) as not-yet-eligible
+-- until Link can actually pass the door — either he holds a small key to open it,
+-- or it is already open. Room 0x71 is open enough on the lower floor that the
+-- pathfinder can reach the far waypoint without ever crossing the door, so a pure
+-- collision block is not enough; the guide must be told the dependency. The door
+-- tile at (dtx,dty,dlvl) reads 0xF0-0xFF while shut and is rewritten out of that
+-- range once opened (see IMPASSABLE), so its live value reports the door's state;
+-- the key count covers the window after Link has the key but before he spends it
+-- at the door. Keyed by a real game signal, not a hand-set flag, so it re-opens on
+-- its own. Small keys for the current dungeon live at $7EF36F.
+local CUR_DUNGEON_KEYS = 0x7EF36F
+local function past_locked_door(dtx, dty, dlvl)
+  return function(s)
+    if mem.u8(CUR_DUNGEON_KEYS) > 0 then return true end
+    local a = tile_attr_at(s, dtx * 8, dty * 8, dlvl)
+    return a == nil or a < 0xF0 or a > 0xFF
+  end
+end
+
 local COURTYARD = {
   { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
   { tx = 256, ty = 225, say = "Go to the castle." },
@@ -2136,8 +2215,8 @@ local COURTYARD = {
   { tx = 149, ty = 507, room = 0x72, level = 1 }, -- lower floor, reached down those stairs
   { tx = 129, ty = 560, room = 0x82, level = 1 },
   { tx = 79, ty = 518, room = 0x81, level = 1 },
-  { tx = 79, ty = 487, room = 0x71, level = 0, say = "Go to locked door." }, -- in front of the locked door on floor 0 (the door tile 0xF0 is impassable to A*); the pathfinder climbs the layer-swap stairs up from the chest on its own
-  { tx = 84, ty = 455, room = 0x71, level = 1 }, -- floor-1 door out of 0x71, across the floor-0 pocket and back down the stairs once the door is keyed
+  { tx = 88, ty = 495, room = 0x71, level = 1 }, -- lower-floor anchor by the chest, where the route to the next room (0x70) and its key-soldier begins
+  { tx = 84, ty = 455, room = 0x71, level = 1, gate = past_locked_door(79, 486, 0) }, -- floor-1 door out of 0x71, gated on the key/door: keyless Link is held at the chest anchor to go fetch the key in 0x70 first, then this opens up. The room is open on the lower floor, so the pathfinder alone would reach here early — the gate, not a collision block, is what holds it.
   { tx = 10, ty = 452, room = 0x70, level = 0 }, -- into room 0x70
 }
 
@@ -2160,6 +2239,12 @@ local COURTYARD = {
 -- arrival); a `say` line, if present, is spoken as the guide sets off toward it.
 nav_chain = nil
 nav_chain_i = 1
+-- Debug map overlay toggle. When on, the map renderer adds developer aids on top
+-- of the normal schematic: every waypoint of the active chain that belongs to the
+-- current room, tagged with its 1-based order in the chain, and a coloured outline
+-- around any room that is currently a kill-room. Off by default so the player's
+-- map stays clean; flipped by the `map_debug` command and readable from eval_lua.
+map_debug = false
 local chain_cued = {} -- cue index -> announced, so each cue speaks once per chain
 -- Furthest hard index reached per chain (keyed by the chain table). Persists
 -- across a dungeon excursion — chain_stop drops the live chain but not this — so
@@ -2679,7 +2764,7 @@ nav_update = function(s)
         chain_probe_in = 12
         local pick, pgx, pgy, plevel
         for i, wp in ipairs(nav_chain) do
-          if wp.room == s.dungeon_room then
+          if wp.room == s.dungeon_room and (wp.gate == nil or wp.gate(s)) then
             local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level)
             if plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then pick, pgx, pgy, plevel = i, gx, gy, wp.level end
           end
@@ -2781,6 +2866,13 @@ end)
 on_command("pathfind_stop", function()
   nav_stop()
   say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
+end)
+
+-- Toggle the debug map overlay (numbered room waypoints + kill-room outlines).
+on_command("map_debug", function()
+  map_debug = not map_debug
+  say(map_debug and "Map debug on." or "Map debug off.",
+      { priority = "navigation", category = "on-demand" })
 end)
 
 -- "Guide me somewhere I haven't been." Routes toward the nearest reachable tile
@@ -2944,7 +3036,7 @@ function on_draw(canvas)
       minor = 0x40C0F0,
     }
     for _, sp in ipairs(sprites()) do
-      if inwin(sp.x, sp.y) then
+      if is_live(sp) and inwin(sp.x, sp.y) then
         local px, py = plot(sp.x, sp.y)
         canvas:rect(px - 1, py - 1, 3, 3, class_col[category(sp)])
       end
@@ -2978,6 +3070,50 @@ function on_draw(canvas)
       if wp and wp.room == s.dungeon_room then
         local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
         canvas:rect(px - 1, py - 1, 3, 3, 0xFFFFFF)
+      end
+    end
+
+    -- Debug overlay (toggled by the `map_debug` command): developer aids the
+    -- normal map hides. Only in a dungeon, where the room and its waypoints live.
+    if map_debug and s.module == 0x07 then
+      -- A kill-room's boundary, in a distinct red (never the pink of the nav route).
+      -- When the room's fighting pit is mapped (KILL_REGION), draw a 1px rectangle on
+      -- its tile bounds so the border hugs the real pit instead of framing the whole
+      -- screen. Rooms with no mapped pit fall back to a frame outside the playfield.
+      if kill_room(s) then
+        local kc = 0xE83838
+        local reg = KILL_REGION[s.dungeon_room]
+        if reg then
+          for _, b in ipairs(reg) do
+            local x0, y0 = plot(b.w * 8, b.n * 8)             -- NW corner
+            local x1, y1 = plot((b.e + 1) * 8, (b.s + 1) * 8) -- SE corner (tile far edge)
+            canvas:line(x0, y0, x1, y0, kc) -- north
+            canvas:line(x0, y1, x1, y1, kc) -- south
+            canvas:line(x0, y0, x0, y1, kc) -- west
+            canvas:line(x1, y0, x1, y1, kc) -- east
+          end
+        else
+          for t = 1, 2 do
+            canvas:line(fx - t, fy - t, fx + fw + t, fy - t, kc)             -- top
+            canvas:line(fx - t, fy + fw + t, fx + fw + t, fy + fw + t, kc)   -- bottom
+            canvas:line(fx - t, fy - t, fx - t, fy + fw + t, kc)             -- left
+            canvas:line(fx + fw + t, fy - t, fx + fw + t, fy + fw + t, kc)   -- right
+          end
+        end
+      end
+      -- Every waypoint of the active chain that belongs to this room, each tagged
+      -- with its 1-based order in the chain so the routing sequence is legible.
+      -- Cyan for the ordinary points, white for the active target, so the debug
+      -- markers never read as the pink route or the orange dropped markers.
+      if nav_chain then
+        for i, wp in ipairs(nav_chain) do
+          if wp.room == s.dungeon_room and inwin(wp.tx * 8 + 4, wp.ty * 8 + 4) then
+            local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
+            local wc = (i == nav_chain_i) and 0xFFFFFF or 0x50D0F0
+            canvas:rect(px - 1, py - 1, 3, 3, wc)
+            canvas:text(px + 3, py - 3, tostring(i), wc)
+          end
+        end
       end
     end
 

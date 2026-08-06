@@ -91,3 +91,8 @@ label = "Say the current quest objective"
 id    = "advance"
 label = "Guide to the next quest step"
 key   = "KeyL"                       # "L" for the lead/guide; rebindable
+
+[[command]]
+id    = "map_debug"
+label = "Toggle debug map overlay"
+key   = "KeyM"                       # "M" for map; rebindable

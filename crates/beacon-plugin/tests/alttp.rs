@@ -1151,6 +1151,114 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
 }
 
 #[test]
+fn alttp_a_closed_locked_door_blocks_the_route() {
+    // A closed flaggable door (0xF0-0xFF) is a solid tile to the game's own
+    // classifier and must be one to the pathfinder too, so the guide never leads
+    // Link through a locked door he cannot yet open. Same room-0x72 setup as the
+    // cross-floor test: a down-stair (0x3E) at (151,499) whose lower-floor landing
+    // is the ONLY way to the lower-floor waypoint (index 10). With the landing
+    // passable the guide crosses to it; with the landing a closed door it cannot,
+    // and holds at the last reachable upper waypoint (index 9) — the door blocks
+    // exactly as a wall would, and opening it (which rewrites the tile out of the
+    // 0xF0 range) would restore the crossing with no special-casing.
+    let r = Registry::builtin();
+
+    let frame = |landing: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((156, 485), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x72);
+        set(0x7E00EE, 0); // upper floor
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
+        set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
+        set(0x7F2000 + 51 * 64 + 23, 0x3E); // upper floor: a down-stair
+        set(0x7F3000 + 51 * 64 + 23, landing); // lower floor: the landing under it
+        ram
+    };
+
+    // Passable landing (0x00): the guide crosses down to the lower waypoint (10).
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let open = frame(0x00);
+    plugin.on_frame(&open, 0);
+    plugin.on_frame(&open, 1);
+    plugin.command("advance", &open);
+    plugin.on_frame(&open, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain_i)", &open).unwrap(),
+        "10",
+        "an open landing lets the guide cross to the lower-floor waypoint"
+    );
+
+    // Closed locked door (0xF0) on the landing: the crossing is blocked, so the
+    // lower waypoint is unreachable and the guide holds at the upper one (9).
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let locked = frame(0xF0);
+    plugin2.on_frame(&locked, 0);
+    plugin2.on_frame(&locked, 1);
+    plugin2.command("advance", &locked);
+    plugin2.on_frame(&locked, 2);
+    assert_eq!(
+        plugin2.eval("return tostring(nav_chain_i)", &locked).unwrap(),
+        "9",
+        "a closed locked door blocks the route: the guide does not lead through it"
+    );
+}
+
+#[test]
+fn alttp_locked_door_gate_holds_the_route_at_the_chest_until_keyed() {
+    // Room 0x71 (Boomerang Chest Room) is open enough on the lower floor that the
+    // pathfinder reaches the far waypoint (index 15, past the locked door) without
+    // ever crossing the door, so a collision block alone cannot keep the guide out.
+    // The waypoints past the door carry a `gate` on the small-key / door state:
+    // keyless, the guide holds at the chest anchor (index 13, where the route out to
+    // the key in 0x70 begins); once Link holds a key the far waypoint opens up.
+    let r = Registry::builtin();
+
+    let frame = |keys: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((85, 495), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x71); // Boomerang Chest Room
+        set(0x7E00EE, 1); // lower floor (Link's grid at 0x7F3000 is open)
+        set(0x7E040C, 0x02); // Hyrule Castle
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
+        set(0x7EF36F, keys); // current-dungeon small keys
+        set(0x7F2000 + (486 & 63) * 64 + (79 & 63), 0xF0); // upper-floor door still shut
+        ram
+    };
+
+    // Keyless: the far waypoint is gated off, so the guide holds at the anchor (13).
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let keyless = frame(0);
+    plugin.on_frame(&keyless, 0);
+    plugin.on_frame(&keyless, 1);
+    plugin.command("advance", &keyless);
+    plugin.on_frame(&keyless, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain_i)", &keyless).unwrap(),
+        "13",
+        "keyless, the guide holds at the chest anchor and does not lead past the locked door"
+    );
+
+    // With a small key the gate opens and the guide advances past the door (14).
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let keyed = frame(1);
+    plugin2.on_frame(&keyed, 0);
+    plugin2.on_frame(&keyed, 1);
+    plugin2.command("advance", &keyed);
+    plugin2.on_frame(&keyed, 2);
+    assert_eq!(
+        plugin2.eval("return tostring(nav_chain_i)", &keyed).unwrap(),
+        "14",
+        "with the key the gate opens and the route continues past the door"
+    );
+}
+
+#[test]
 fn alttp_nav_left_on_but_idle_re_arms_itself() {
     // A savestate load can leave nav on while its followers have been cleared, at an
     // unchanged navigation signature. Without a self-heal the guide stays silently
@@ -1421,6 +1529,119 @@ fn alttp_forced_kill_room_stays_cleared_after_its_chest_is_opened() {
     assert!(
         texts2.iter().any(|t| t.contains("Defeat all enemies")),
         "chest not yet open: the kill objective is armed: {texts2:?}"
+    );
+}
+
+#[test]
+fn alttp_room_0x70_is_forced_to_a_kill_room() {
+    // Room 0x70 on the escape has no clear-tag, but two guards block the way and the
+    // eastern one drops the key for the locked door out. It is forced to a kill-room:
+    // the first objective is to defeat them, and it self-clears once none remain.
+    let r = Registry::builtin();
+
+    // Room 0x70, Link at (20,20); `alive` toggles a Blue Soldier (type 66) at (30,20).
+    let frame = |alive: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7EF3C5, 2);
+        set(0x7E040C, 0x02);
+        set(0x7E00A0, 0x70); // room 0x70 -> forced kill-room
+        set(0x7E0DD0, if alive { 0x09 } else { 0x00 }); // slot 0 state
+        set(0x7E0E20, 66); // Blue Soldier
+        set(0x7E0D10, 0xF4); // x -> 244 -> tile 30
+        set(0x7E0D00, 0xA4); // y -> 164 -> tile 20
+        set(0x7E0E50, 4); // health
+        ram
+    };
+
+    // Guards alive: the room states the kill requirement, though it carries no tag.
+    let live = frame(true);
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin.on_frame(&live, 0);
+    plugin.on_frame(&live, 1);
+    plugin.command("advance", &live);
+    let out = plugin.on_frame(&live, 2);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Defeat all enemies")),
+        "0x70 is forced to a kill-room: {texts:?}"
+    );
+
+    // Guards down: no counting enemy, so the kill objective drops and the route resumes.
+    let clear = frame(false);
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin2.on_frame(&clear, 0);
+    plugin2.on_frame(&clear, 1);
+    plugin2.command("advance", &clear);
+    let out2 = plugin2.on_frame(&clear, 2);
+    let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        !texts2.iter().any(|t| t.contains("Defeat all enemies")),
+        "with the guards down the kill objective drops: {texts2:?}"
+    );
+}
+
+#[test]
+fn alttp_giant_kill_room_counts_the_far_enemy_and_ignores_hp0_bystanders() {
+    // Room 0x80 is a giant kill-room: the enemy tally reaches across the whole room
+    // so the big-key holder waiting in the far east still counts (an ordinary room's
+    // ~144px window would miss it). And hp-0 sprites never count, so the caged Zelda
+    // NPC (type 118, hp 0) sitting in the room can't hold it "uncleared" forever.
+    let r = Registry::builtin();
+
+    // Slot 0 is always Zelda (hp 0, a bystander). Slot 1 is the Ball-and-Chain
+    // trooper far to the east; `enemy_alive` toggles it.
+    let frame = |enemy_alive: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((10, 518), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E040C, 0x02);
+        set(0x7E00A0, 0x80); // Jail Cell Room -> giant kill-room
+        // Slot 0: Princess Zelda (type 118), hp 0 — must never count.
+        set(0x7E0DD0, 0x09);
+        set(0x7E0E20, 118);
+        set(0x7E0D10, 0x64); // x = 0x0164 -> tile 44 (near Link)
+        set(0x7E0D30, 0x01);
+        set(0x7E0D00, 0x34); // y = 0x1034 -> tile 518
+        set(0x7E0D20, 0x10);
+        set(0x7E0E50, 0); // Zelda hp 0
+        // Slot 1: Ball-and-Chain Trooper (type 106), ~328px east — beyond the ~144px
+        // on-screen window, so it only registers under the giant room-wide reach.
+        set(0x7E0DD1, if enemy_alive { 0x09 } else { 0x00 });
+        set(0x7E0E21, 106);
+        set(0x7E0D11, 0x9C); // x = 0x019C -> tile 51
+        set(0x7E0D31, 0x01);
+        set(0x7E0D01, 0x34); // y -> tile 518
+        set(0x7E0D21, 0x10);
+        set(0x7E0E51, if enemy_alive { 16 } else { 0 });
+        ram
+    };
+
+    // Trooper alive in the far east: the giant reach catches it, so the room states
+    // its kill requirement even though Zelda (hp 0) sits nearer.
+    let live = frame(true);
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin.on_frame(&live, 0);
+    plugin.on_frame(&live, 1);
+    plugin.command("advance", &live);
+    let out = plugin.on_frame(&live, 2);
+    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Defeat all enemies")),
+        "the far eastern enemy counts under the room-wide reach: {texts:?}"
+    );
+
+    // Trooper gone: only Zelda (hp 0) remains, and hp 0 never counts, so the kill
+    // objective drops rather than sending Link at the caged princess.
+    let clear = frame(false);
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    plugin2.on_frame(&clear, 0);
+    plugin2.on_frame(&clear, 1);
+    plugin2.command("advance", &clear);
+    let out2 = plugin2.on_frame(&clear, 2);
+    let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
+    assert!(
+        !texts2.iter().any(|t| t.contains("Defeat all enemies")),
+        "the hp-0 Zelda bystander does not hold the room uncleared: {texts2:?}"
     );
 }
 
