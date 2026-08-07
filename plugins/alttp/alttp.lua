@@ -2346,6 +2346,7 @@ local SANCTUARY = {
   { tx = 119, ty = 15, room = 0x01, level = 1 }, -- up into 0x01, lower floor
   { tx = 151, ty = 369, room = 0x52, level = 0 }, -- into 0x52 (the escape route diverges from the way in here)
   { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
+  { tx = 134, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
