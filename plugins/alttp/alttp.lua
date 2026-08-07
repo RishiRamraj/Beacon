@@ -893,12 +893,21 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty, goal_level)
             if tile_passable(s, ox + cx, oy + cy, lv) then
               relax(lv * FLOOR + cy * 64 + cx)
             elseif two_floor and lv == 0
-                and tile_attr_at(s, (ox + cx) * 8, (oy + cy) * 8, 0) == 0x1C
-                and tile_passable(s, ox + cx, oy + cy, 1) then
-              -- Stepping off the upper platform into the overlay-mask hole: Link falls
-              -- to the same tile on the lower floor. One-way (no relax from lv == 1) and
-              -- portal-only (the hole is impassable in-plane, so he can't cross it flat).
-              relax(1 * FLOOR + cy * 64 + cx)
+                and tile_attr_at(s, (ox + cx) * 8, (oy + cy) * 8, 0) == 0x1C then
+              -- Stepping off the upper platform into the overlay-mask hole: Link falls to
+              -- the lower floor. If the tile straight below is walled off, the fall keeps
+              -- going the same way ACROSS the hole to the first open lower-floor tile —
+              -- the ledge-hop landing (Link dropped 7 tiles west here, clearing a walled
+              -- barrier). Scan the contiguous hole in the step direction for that landing;
+              -- a solid lower-floor tile under the hole just inhibits the drop there, not
+              -- the whole fall. One-way (no relax from lv == 1) and portal-only (the hole
+              -- is impassable in-plane, so Link can never cross it as flat ground).
+              local fx, fy = cx, cy
+              while fx >= 0 and fx <= 63 and fy >= 0 and fy <= 63
+                  and tile_attr_at(s, (ox + fx) * 8, (oy + fy) * 8, 0) == 0x1C do
+                if tile_passable(s, ox + fx, oy + fy, 1) then relax(1 * FLOOR + fy * 64 + fx); break end
+                fx, fy = fx + d[1], fy + d[2]
+              end
             end
           end
         end
@@ -2359,7 +2368,7 @@ local SANCTUARY = {
   { tx = 134, ty = 512, room = 0x82, level = 0 }, -- up into 0x82, upper floor
   { tx = 159, ty = 455, room = 0x72, level = 0 }, -- up into 0x72, upper floor
   { tx = 119, ty = 15, room = 0x01, level = 1 }, -- up into 0x01, lower floor
-  { tx = 151, ty = 369, room = 0x52, level = 0, via = true, arrival = "Drop off the ledge to the lower floor." }, -- UP over the right-side ledge (via = mandatory): the escape climbs the stairs and drops back down here to dodge the soldiers on the lower-floor line. The arrival cue fires only if the guide can't route the drop itself and goes quiet here.
+  { tx = 151, ty = 369, room = 0x52, level = 0, via = true }, -- UP over the right-side ledge (via = mandatory): the escape climbs the stairs and drops back down here to dodge the soldiers on the lower-floor line.
   { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
   { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
 }
@@ -2490,6 +2499,24 @@ end
 local function chain_start(s, chain, i)
   nav_chain = chain
   chain.arrived = 0 -- reset the `via`-gate high-water mark for this run of the chain
+  -- Seed it from Link's position so a mid-room re-arm (toggling the guide, a reload)
+  -- doesn't send him back through a `via` detour he has already taken. A via waypoint
+  -- counts as reached if Link is standing on it, or is already near the waypoint that
+  -- follows it — its landing, where the detour rejoins the route (the drop scatters a
+  -- few tiles, so this reach is looser than CHAIN_REACH). At the room's entrance he is
+  -- far from that landing, so the gate still fires and leads the detour as intended.
+  if s.module == 0x07 then
+    local ltx, lty = s.x >> 3, s.y >> 3
+    local level = mem.u8(LOWER_LEVEL)
+    for j, wp in ipairs(chain) do
+      local here = wp.room == s.dungeon_room and (wp.level or 0) == level
+        and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH
+      local nxt = wp.via and chain[j + 1]
+      local landed = nxt and nxt.room == s.dungeon_room and (nxt.level or 0) == level
+        and math.abs(ltx - nxt.tx) + math.abs(lty - nxt.ty) <= 12
+      if here or landed then chain.arrived = math.max(chain.arrived, j) end
+    end
+  end
   chain_cued = {}
   chain_said = {}
   chain_last_room = nil

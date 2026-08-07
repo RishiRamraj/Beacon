@@ -1424,6 +1424,68 @@ fn alttp_an_overlay_mask_hole_is_a_one_way_drop_to_the_lower_floor() {
 }
 
 #[test]
+fn alttp_a_ledge_drop_lands_across_a_walled_barrier() {
+    // Off a raised platform Link falls to the lower floor; if the tile straight below is
+    // walled off, the fall keeps going the same way across the hole to the first open
+    // lower-floor tile — a ledge-hop landing (in 0x52's escape he drops ~7 tiles west,
+    // clear of a walled barrier). Room 0x72, Link upstairs due north of a one-tile-wide
+    // hole column; the lower-floor waypoint (index 10, at 149,507) is below it. The lower
+    // floor straight under the hole's upper half is walled, so only a fall that scans on
+    // to the open floor below reaches the waypoint.
+    let r = Registry::builtin();
+
+    let frame = |open_landing: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((149, 488), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x72);
+        set(0x7E00EE, 0); // upper floor
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
+        set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
+        // A one-tile hole column at tx=149 on the upper floor, rows 495..505. Grid is
+        // indexed (ty & 63) * 64 + (tx & 63).
+        let cell = |tx: u32, ty: u32| (ty & 63) * 64 + (tx & 63);
+        for ty in 495..=505u32 {
+            set(0x7F2000 + cell(149, ty), 0x1C);
+            // Lower floor beneath the hole's upper half is walled (01); its lower half is
+            // the open landing (00) that reaches the waypoint — only when open_landing.
+            let low = if ty >= 501 && open_landing { 0x00 } else { 0x01 };
+            set(0x7F3000 + cell(149, ty), low);
+        }
+        ram
+    };
+
+    // Open floor below the walled part: the fall scans down to it and reaches waypoint 10.
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let f = frame(true);
+    plugin.on_frame(&f, 0);
+    plugin.on_frame(&f, 1);
+    plugin.command("advance", &f);
+    plugin.on_frame(&f, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain_i)", &f).unwrap(),
+        "10",
+        "the fall scans across the hole to the open floor and reaches the lower waypoint (10)"
+    );
+
+    // Every lower tile under the hole walled: the drop cannot land, so the lower waypoint
+    // stays unreachable and the guide holds at the last upper one (index 9).
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let f2 = frame(false);
+    plugin2.on_frame(&f2, 0);
+    plugin2.on_frame(&f2, 1);
+    plugin2.command("advance", &f2);
+    plugin2.on_frame(&f2, 2);
+    assert_eq!(
+        plugin2.eval("return tostring(nav_chain_i)", &f2).unwrap(),
+        "9",
+        "with every lower tile under the hole walled the drop cannot land (index 9)"
+    );
+}
+
+#[test]
 fn alttp_a_closed_locked_door_blocks_the_route() {
     // A closed flaggable door (0xF0-0xFF) is a solid tile to the game's own
     // classifier and must be one to the pathfinder too, so the guide never leads
