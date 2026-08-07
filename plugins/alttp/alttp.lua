@@ -2359,7 +2359,7 @@ local SANCTUARY = {
   { tx = 134, ty = 512, room = 0x82, level = 0 }, -- up into 0x82, upper floor
   { tx = 159, ty = 455, room = 0x72, level = 0 }, -- up into 0x72, upper floor
   { tx = 119, ty = 15, room = 0x01, level = 1 }, -- up into 0x01, lower floor
-  { tx = 151, ty = 369, room = 0x52, level = 0 }, -- into 0x52 (the escape route diverges from the way in here)
+  { tx = 151, ty = 369, room = 0x52, level = 0, via = true, arrival = "Drop off the ledge to the lower floor." }, -- UP over the right-side ledge (via = mandatory): the escape climbs the stairs and drops back down here to dodge the soldiers on the lower-floor line. The arrival cue fires only if the guide can't route the drop itself and goes quiet here.
   { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
   { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
 }
@@ -2489,6 +2489,7 @@ end
 -- waypoint, room by room, re-aiming each frame — so there is nothing to aim here.
 local function chain_start(s, chain, i)
   nav_chain = chain
+  chain.arrived = 0 -- reset the `via`-gate high-water mark for this run of the chain
   chain_cued = {}
   chain_said = {}
   chain_last_room = nil
@@ -2918,11 +2919,18 @@ nav_update = function(s)
             local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level)
             if plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then pick, pgx, pgy, plevel = i, gx, gy, wp.level end
           end
+          -- A `via` waypoint is a mandatory intermediate: once it is the reachable pick,
+          -- hold the "furthest reachable" scan here until Link has actually arrived at it
+          -- (nav_chain.arrived), so the chain can't shortcut past it to a later same-room
+          -- waypoint. 0x52's escape climbs the ledge and drops back down to dodge the
+          -- soldiers standing on the shorter lower-floor line to the next waypoint.
+          if wp.via and pick == i and (nav_chain.arrived or 0) < i then break end
         end
         if pick then
           nav_chain_i = pick
           local wp = nav_chain[pick]
           if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH and (wp.level or 0) == level then
+            nav_chain.arrived = math.max(nav_chain.arrived or 0, pick) -- clears any `via` gate at/behind here
             if wp.arrival and not chain_cued[pick] then nav_say(wp.arrival); chain_cued[pick] = true end
             pathfind_stop() -- arrived; go quiet until the next waypoint opens up
           else
