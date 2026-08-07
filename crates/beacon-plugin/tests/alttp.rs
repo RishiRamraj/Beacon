@@ -1366,6 +1366,64 @@ fn alttp_a_layer_swap_stair_cannot_be_walked_across_on_its_entry_floor() {
 }
 
 #[test]
+fn alttp_an_overlay_mask_hole_is_a_one_way_drop_to_the_lower_floor() {
+    // 0x1C is the upper layer's overlay mask: a hole where the raised platform is
+    // absent. Link cannot stand on it or walk across it as flat ground (doing so was the
+    // layer-swap bug), but he CAN step off the ledge into it and fall to the lower floor
+    // — a one-way down portal, like a down-stair reached by stepping toward it. Room
+    // 0x72, Link upstairs; its chain ends at a lower-floor waypoint (index 10) reachable
+    // only by a floor crossing. With every tile plain floor the two levels are
+    // disconnected and that point is unreachable (the guide holds upstairs at index 9);
+    // punching a 0x1C hole (passable landing beneath) drops Link through to it (index
+    // 10). The drop is upper-only, so it never doubles as a way back up.
+    let r = Registry::builtin();
+
+    // `tile` sits at (151,499) on the upper floor, with a passable lower-floor landing.
+    let frame = |tile: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((156, 485), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x72);
+        set(0x7E00EE, 0); // upper floor
+        set(0x7EF34A, 1); // Lamp
+        set(0x7EF359, 1); // sword
+        set(0x7EF3CC, 0); // Zelda not following
+        set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
+        set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
+        // (151,499): (499 & 63) = 51, (151 & 63) = 23.
+        set(0x7F2000 + 51 * 64 + 23, tile); // upper floor: the hole (or plain floor)
+        set(0x7F3000 + 51 * 64 + 23, 0x00); // lower floor: passable landing
+        ram
+    };
+
+    // A 0x1C hole: Link drops off the ledge into it and reaches the lower waypoint (10).
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let hole = frame(0x1C);
+    plugin.on_frame(&hole, 0);
+    plugin.on_frame(&hole, 1);
+    plugin.command("advance", &hole);
+    plugin.on_frame(&hole, 2);
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain_i)", &hole).unwrap(),
+        "10",
+        "an overlay-mask hole drops Link to the lower-floor waypoint (index 10)"
+    );
+
+    // Plain floor there: no floor crossing anywhere, so the two levels stay separate and
+    // the lower waypoint is unreachable — the guide holds at the last upper one (9).
+    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let solid = frame(0x00);
+    plugin2.on_frame(&solid, 0);
+    plugin2.on_frame(&solid, 1);
+    plugin2.command("advance", &solid);
+    plugin2.on_frame(&solid, 2);
+    assert_eq!(
+        plugin2.eval("return tostring(nav_chain_i)", &solid).unwrap(),
+        "9",
+        "with no floor crossing the lower-floor waypoint stays unreachable (index 9)"
+    );
+}
+
+#[test]
 fn alttp_a_closed_locked_door_blocks_the_route() {
     // A closed flaggable door (0xF0-0xFF) is a solid tile to the game's own
     // classifier and must be one to the pathfinder too, so the guide never leads

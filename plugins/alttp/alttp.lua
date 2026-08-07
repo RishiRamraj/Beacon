@@ -740,6 +740,13 @@ for a = 0xF0, 0xFF do IMPASSABLE[a] = true end
 -- stair finder further down, which is why they are split up/down rather than pooled.)
 local STAIR_UP   = { [0x1D] = true, [0x1E] = true, [0x1F] = true }
 local STAIR_DOWN = { [0x3D] = true, [0x3E] = true, [0x3F] = true }
+-- 0x1C is the upper layer's overlay mask (zelda3 TileBehavior_OverlayMask_1C): the
+-- raised platform is absent, so the square is a hole down to the lower level. It is not
+-- standable upper-floor ground (walking across it as flat floor is the layer-swap bug),
+-- but Link CAN walk off the ledge into it and fall — a one-way drop, upper only. Like a
+-- down-stair, but reached by stepping toward it rather than onto it, and the whole
+-- masked region is one big drop rather than a single stair tile. Matched inline as the
+-- literal 0x1C in plan_path (a named local would blow the 200-per-chunk local budget).
 
 local function tile_passable(s, wtx, wty, level)
   local attr = tile_attr_at(s, wtx * 8, wty * 8, level)
@@ -882,9 +889,17 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty, goal_level)
       if to == nil then
         for _, d in ipairs(dirs) do
           local cx, cy = nx + d[1], ny + d[2]
-          if cx >= 0 and cx <= 63 and cy >= 0 and cy <= 63
-              and tile_passable(s, ox + cx, oy + cy, lv) then
-            relax(lv * FLOOR + cy * 64 + cx)
+          if cx >= 0 and cx <= 63 and cy >= 0 and cy <= 63 then
+            if tile_passable(s, ox + cx, oy + cy, lv) then
+              relax(lv * FLOOR + cy * 64 + cx)
+            elseif two_floor and lv == 0
+                and tile_attr_at(s, (ox + cx) * 8, (oy + cy) * 8, 0) == 0x1C
+                and tile_passable(s, ox + cx, oy + cy, 1) then
+              -- Stepping off the upper platform into the overlay-mask hole: Link falls
+              -- to the same tile on the lower floor. One-way (no relax from lv == 1) and
+              -- portal-only (the hole is impassable in-plane, so he can't cross it flat).
+              relax(1 * FLOOR + cy * 64 + cx)
+            end
           end
         end
       elseif tile_passable(s, ox + nx, oy + ny, to) then
