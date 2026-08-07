@@ -745,6 +745,14 @@ local function tile_passable(s, wtx, wty, level)
   local attr = tile_attr_at(s, wtx * 8, wty * 8, level)
   if attr == nil or IMPASSABLE[attr] then return false end
   if s.module == 0x07 and attr == 0x04 then return false end -- indoor wall
+  -- 0x1C is the upper layer's overlay mask (zelda3 TileBehavior_OverlayMask_1C):
+  -- the raised platform is absent here, so this square is really the level below,
+  -- a one-way drop, not standable upper-floor ground. Treating it as flat floor let
+  -- A* walk "across" it on the upper level — in effect routing the lower level up to
+  -- the upper without a stair. Block it so a two-level room's drop is respected: the
+  -- route reaches the far point by the real upper-floor path (or a stair), not the
+  -- drop it cannot climb back up.
+  if s.module == 0x07 and attr == 0x1C then return false end
   return true
 end
 
