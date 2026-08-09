@@ -2451,7 +2451,8 @@ local COURTYARD = {
   { tx = 129, ty = 560, room = 0x82, level = 1 },
   { tx = 79, ty = 518, room = 0x81, level = 1 },
   { tx = 88, ty = 495, room = 0x71, level = 1 }, -- lower-floor anchor by the chest, where the route to the next room (0x70) and its key-soldier begins
-  { tx = 84, ty = 455, room = 0x71, level = 1, gate = past_locked_door(79, 486, 0) }, -- floor-1 door out of 0x71, gated on the key/door: keyless Link is held at the chest anchor to go fetch the key in 0x70 first, then this opens up. The room is open on the lower floor, so the pathfinder alone would reach here early — the gate, not a collision block, is what holds it.
+  { tx = 79, ty = 486, room = 0x71, level = 0, gate = function(s) return mem.u8(0x7EF36F) > 0 end, done = function(s, wp) local a = tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level or 0); return a == nil or a < 0xF0 or a > 0xFF end }, -- the locked door itself, up on the UPPER floor (2x2 at 79-80,485-486). Reached by a clean straight climb up the swap stair and north — no floor-flip back to L1, so no wall-cross. gate: only a target once Link holds a key to open it; done: clears once the door's tile stops reading as locked (0xF0-0xFF).
+  { tx = 84, ty = 455, room = 0x71, level = 1, gate = function(s) local a = tile_attr_at(s, 79 * 8, 486 * 8, 0); return a == nil or a < 0xF0 or a > 0xFF end }, -- floor-1 door out of 0x71. gate: not a target until the locked door above (79,486) is actually OPEN — so Link is led to unlock that door first rather than aimed here early (which forces the pathfinder up-and-back through the wall). Once the door is open the way to here is clear.
   { tx = 10, ty = 452, room = 0x70, level = 0 }, -- into room 0x70
   { tx = 44, ty = 518, room = 0x80, say = "Free Princess Zelda." }, -- her cell, down the stairs from 0x70 — the rescue
 }

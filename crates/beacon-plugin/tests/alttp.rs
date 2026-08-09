@@ -1050,7 +1050,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "16,1",
+        armed, "17,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -1136,7 +1136,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "16,2",
+        resumed, "17,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1180,7 +1180,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "16,2",
+        armed, "17,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1219,7 +1219,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "16,4",
+        "17,4",
         "the dungeon leg targets the Find Zelda waypoint (index 4)"
     );
     assert!(
@@ -1603,16 +1603,16 @@ fn alttp_a_closed_locked_door_blocks_the_route() {
 }
 
 #[test]
-fn alttp_locked_door_gate_holds_the_route_at_the_chest_until_keyed() {
-    // Room 0x71 (Boomerang Chest Room) is open enough on the lower floor that the
-    // pathfinder reaches the far waypoint (index 15, past the locked door) without
-    // ever crossing the door, so a collision block alone cannot keep the guide out.
-    // The waypoints past the door carry a `gate` on the small-key / door state:
-    // keyless, the guide holds at the chest anchor (index 13, where the route out to
-    // the key in 0x70 begins); once Link holds a key the far waypoint opens up.
+fn alttp_locked_door_gate_holds_the_route_until_the_door_is_open() {
+    // Room 0x71 (Boomerang Chest Room) is open on the lower floor, so a collision block
+    // alone can't keep the guide from the far exit (index 15). The exit is gated on the
+    // upper-floor locked door (79,486) being OPEN — not merely on holding a key. So the
+    // guide holds at the chest anchor (index 13) both keyless and while the door is still
+    // shut (a key alone no longer opens the gate — Link is meant to be led to the door,
+    // index 14, to unlock it first); only once the door reads open does the exit open up.
     let r = Registry::builtin();
 
-    let frame = |keys: u8| -> Vec<u8> {
+    let frame = |keys: u8, door_open: bool| -> Vec<u8> {
         let mut ram = dungeon_frame((85, 495), (0, 0), &[]);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E00A0, 0x71); // Boomerang Chest Room
@@ -1623,34 +1623,36 @@ fn alttp_locked_door_gate_holds_the_route_at_the_chest_until_keyed() {
         set(0x7EF3CC, 0); // Zelda not following
         set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
         set(0x7EF36F, keys); // current-dungeon small keys
-        set(0x7F2000 + (486 & 63) * 64 + (79 & 63), 0xF0); // upper-floor door still shut
+        // upper-floor door (79,486): 0xF0 shut, plain floor once opened
+        set(0x7F2000 + (486 & 63) * 64 + (79 & 63), if door_open { 0x00 } else { 0xF0 });
         ram
     };
+    let arm = |ram: &Vec<u8>| -> String {
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(ram, 0);
+        p.on_frame(ram, 1);
+        p.command("advance", ram);
+        p.on_frame(ram, 2);
+        p.eval("return tostring(nav_chain_i)", ram).unwrap()
+    };
 
-    // Keyless: the far waypoint is gated off, so the guide holds at the anchor (13).
-    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    let keyless = frame(0);
-    plugin.on_frame(&keyless, 0);
-    plugin.on_frame(&keyless, 1);
-    plugin.command("advance", &keyless);
-    plugin.on_frame(&keyless, 2);
+    // Keyless, door shut: holds at the chest anchor (13).
     assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &keyless).unwrap(),
+        arm(&frame(0, false)),
         "13",
-        "keyless, the guide holds at the chest anchor and does not lead past the locked door"
+        "keyless, the guide holds at the chest anchor"
     );
-
-    // With a small key the gate opens and the guide advances past the door (14).
-    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    let keyed = frame(1);
-    plugin2.on_frame(&keyed, 0);
-    plugin2.on_frame(&keyed, 1);
-    plugin2.command("advance", &keyed);
-    plugin2.on_frame(&keyed, 2);
+    // Keyed but the door still shut: still holds — a key alone no longer opens the exit.
     assert_eq!(
-        plugin2.eval("return tostring(nav_chain_i)", &keyed).unwrap(),
-        "14",
-        "with the key the gate opens and the route continues past the door"
+        arm(&frame(1, false)),
+        "13",
+        "with a key but the door still shut, the guide still holds at the anchor"
+    );
+    // Door open: the exit past the door opens up (15).
+    assert_eq!(
+        arm(&frame(1, true)),
+        "15",
+        "with the door open the route continues to the exit past it"
     );
 }
 
