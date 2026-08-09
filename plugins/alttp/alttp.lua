@@ -1728,8 +1728,9 @@ end
 -- pushes. Global (not local) to stay under the chunk's 200-local cap and to let MCP
 -- inspect it, mirroring how the nav chain and pathfinder state are exposed.
 PUSH = {
-  -- Bright and fast, unlike the soft sonar "path" ping: reads as "aligned — push now".
-  beacon = { pitch = 3.0, range = 48, tremolo = 8.0, gain = 1.0 },
+  -- Low and slow, a heavy grind — the sound of heaving something big — and distinct
+  -- from the soft sonar "path" ping. Sounds while aligned: "push here".
+  beacon = { pitch = 0.35, range = 48, tremolo = 3.0, gain = 1.0 },
   reach = 3, -- tiles from the object that count as being "on" it
 }
 -- Sit every tracking waypoint on its object while that object's sprite is in the room;
