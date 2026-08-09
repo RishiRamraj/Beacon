@@ -1509,6 +1509,7 @@ fn alttp_a_push_waypoint_tracks_its_object_and_aligns_only_when_facing_it() {
         set(0x7E0D30, (mx >> 8) as u8);
         set(0x7E0D00, (my & 0xFF) as u8);
         set(0x7E0D20, (my >> 8) as u8);
+        set(0x7E0ED0, 0x90); // sprite_G for slot 0: the mantle's fully-pushed latch
     }
 
     // One eval: track the object, then probe alignment facing the push way, the wrong
@@ -1523,7 +1524,8 @@ fn alttp_a_push_waypoint_tracks_its_object_and_aligns_only_when_facing_it() {
     // hand-built Link state (PUSH.active only reads x/y/dungeon_room/direction).
     let script = r#"
         nav_chain = { { room = 0x51, level = 0, tx = 0, ty = 0,
-                        track = 0xEE, track_dx = -6, track_dy = 2, push = 6 } }
+                        track = 0xEE, track_dx = -6, track_dy = 2, push = 6,
+                        done = function(k) return mem.u8(0x7E0ED0 + k) == 0x90 end } }
         PUSH.track({ dungeon_room = 0x51 })
         local tracked = nav_chain[1].tx .. "," .. nav_chain[1].ty
         local s = { x = 91*8+4, y = 326*8+4, dungeon_room = 0x51, direction = 6 }
@@ -1532,12 +1534,15 @@ fn alttp_a_push_waypoint_tracks_its_object_and_aligns_only_when_facing_it() {
         local on_north = (PUSH.active(s) ~= nil) and (s.direction == nav_chain[1].push)
         s.x = (91 + 6) * 8 + 4 -- step off, out of reach
         local off = PUSH.active(s) ~= nil
-        return tracked .. "|" .. tostring(on_east) .. "|" .. tostring(on_north) .. "|" .. tostring(off)
+        -- PUSH.track recorded the sprite slot; done() reads its fully-pushed latch.
+        local done = nav_chain[1].slot ~= nil and nav_chain[1].done(nav_chain[1].slot)
+        return tracked .. "|" .. tostring(on_east) .. "|" .. tostring(on_north)
+            .. "|" .. tostring(off) .. "|slot" .. tostring(nav_chain[1].slot) .. "|" .. tostring(done)
     "#;
     assert_eq!(
         plugin.eval(script, &ram).unwrap(),
-        "91,326|true|false|false",
-        "waypoint tracks the mantle; aligned only when on it and facing the push way"
+        "91,326|true|false|false|slot0|true",
+        "waypoint tracks the mantle; aligned only facing the push way; slot recorded and done() reads the fully-pushed latch"
     );
 }
 

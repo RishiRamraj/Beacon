@@ -1736,17 +1736,24 @@ PUSH = {
   beacon = { pitch = 0.8, range = 48, tremolo = 3.0, gain = 1.0 },
   reach = 3, -- tiles from the object that count as being "on" it
 }
--- Sit every tracking waypoint on its object while that object's sprite is in the room;
--- out of the room the waypoint keeps its last position (its authored fallback). Call
--- once per frame before the nav re-aim and the beacon pass so both see the live spot.
+-- Sit every tracking waypoint on its object while that object's sprite is in the room,
+-- and remember the sprite's slot so a `done` predicate can read its state; out of the
+-- room the waypoint keeps its last position (its authored fallback) and clears the slot.
+-- Call once per frame before the nav re-aim and the beacon pass so both see the live spot.
 function PUSH.track(s)
   if not nav_chain then return end
   for _, wp in ipairs(nav_chain) do
     if wp.track and wp.room == s.dungeon_room then
-      local p = nearest_sprite_kind(s, wp.track)
-      if p then
-        wp.tx = (p[1] >> 3) + (wp.track_dx or 0)
-        wp.ty = (p[2] >> 3) + (wp.track_dy or 0)
+      wp.slot = nil
+      for i = 0, 15 do
+        if mem.u8(SPRITE.state + i) ~= 0 and mem.u8(SPRITE.kind + i) == wp.track then
+          wp.slot = i
+          local x = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
+          local y = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
+          wp.tx = (x >> 3) + (wp.track_dx or 0)
+          wp.ty = (y >> 3) + (wp.track_dy or 0)
+          break
+        end
       end
     end
   end
@@ -1770,13 +1777,16 @@ end
 -- cue, so it drops the instant the player holds the push direction (the shove itself has
 -- the game's own push sound effect). Pressing is read from the held-controller register
 -- rather than from movement, since a block inches so slowly Link's position barely
--- changes frame to frame. Silent otherwise; kept off the "path" id so it never fights
--- the guide.
+-- changes frame to frame. It also goes silent once the object is fully pushed: a
+-- waypoint's optional `done(slot)` predicate reads the tracked sprite's own state (the
+-- Movable Mantle latches sprite_G to 0x90 at its end stop). Kept off the "path" id so it
+-- never fights the guide.
 function PUSH.tone(s)
   local wp = PUSH.active(s)
   local d = wp and DIRS[wp.push]
   local pushing = d and (mem.u8(0x7E00F0) & d.dpad) ~= 0
-  if wp and s.direction == wp.push and not pushing then
+  local done = wp and wp.done and wp.slot and wp.done(wp.slot)
+  if wp and s.direction == wp.push and not pushing and not done then
     local dx, dy = wp.tx * 8 + 4 - s.x, wp.ty * 8 + 4 - s.y
     sound_beacon(s, "push", dx, dy, math.abs(dx) + math.abs(dy), PUSH.beacon, false)
   else
@@ -2451,7 +2461,8 @@ local SANCTUARY = {
   { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
   { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
   { tx = 95, ty = 389, room = 0x61, level = 0 }, -- west into 0x61, upper floor
-  { tx = 91, ty = 326, room = 0x51, level = 0, track = 0xEE, track_dx = -2, track_dy = 2, push = 6 }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset (-2,+2) onto its left/push side; push = 6 (face east) to shove it. tx/ty are the fallback until the sprite loads. Zelda's dialogue already narrates the push.
+  { tx = 91, ty = 326, room = 0x51, level = 0, track = 0xEE, track_dx = -2, track_dy = 2, push = 6,
+    done = function(k) return mem.u8(0x7E0ED0 + k) == 0x90 end }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset (-2,+2) onto its left/push side; push = 6 (face east) to shove it. done: the mantle latches sprite_G ($7E0ED0+slot) to 0x90 at its end stop (zelda3 Sprite_EE_MovableMantle), so the tone stops once fully pushed. tx/ty are the fallback until the sprite loads. Zelda's dialogue narrates the push.
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
