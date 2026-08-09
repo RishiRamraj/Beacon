@@ -1763,11 +1763,14 @@ function PUSH.active(s)
   end
   return nil
 end
--- Sound the alignment tone when Link is on a push object AND facing its push
--- direction; silence it otherwise. Kept off the "path" id so it never fights the guide.
-function PUSH.tone(s)
+-- Sound the alignment tone when Link is on a push object, facing its push direction,
+-- and standing STILL — it is a "you're lined up, now push" orientation cue, so it drops
+-- the instant he moves (the shove itself has the game's own push sound effect). Silent
+-- otherwise. Kept off the "path" id so it never fights the guide. `moving` is whether
+-- Link's position changed this frame.
+function PUSH.tone(s, moving)
   local wp = PUSH.active(s)
-  if wp and s.direction == wp.push then
+  if wp and s.direction == wp.push and not moving then
     local dx, dy = wp.tx * 8 + 4 - s.x, wp.ty * 8 + 4 - s.y
     sound_beacon(s, "push", dx, dy, math.abs(dx) + math.abs(dy), PUSH.beacon, false)
   else
@@ -1939,8 +1942,8 @@ function on_frame(frame)
     end
 
     -- The alignment tone for a movable object: sounds only while Link is on a push
-    -- waypoint and facing its push direction.
-    PUSH.tone(now)
+    -- waypoint, facing its push direction, and standing still (not mid-shove).
+    PUSH.tone(now, now.x ~= was.x or now.y ~= was.y)
   else
     combat_engaged = false
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
