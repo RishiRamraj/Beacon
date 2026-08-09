@@ -2497,6 +2497,7 @@ local SANCTUARY = {
   { tx = 111, ty = 133, room = 0x21, level = 0, gate = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return a < 0xF0 or a > 0xFF or mem.u8(0x7EF36F) > 0 end }, -- west into 0x21, then the locked door north (2x2 at 111-112,133-134). Same open-or-keyed gate as 0x32: an open door is always a target; a locked one only once Link holds a key (the key-holder rat here drops it).
   { tx = 111, ty = 76, room = 0x11, level = 0, push = 0,
     done = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return a < 0x70 or a > 0x7F end }, -- north into 0x11 to the dungeon push-block (tile 0x76 at 111-112,76-77). A TILE push obstacle (no sprite to track), so just push = 0 (face north) drives the alignment tone. done: once shoved, its tile stops reading as a push-block (0x70-0x7F) — so the tone goes silent when the block can move no further.
+  { tx = 111, ty = 68, room = 0x11, level = 0 }, -- north through where the block was, further into 0x11
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
