@@ -864,7 +864,14 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty, goal_level)
   g[start] = 0
   push(start, h(slx, sly))
   local dirs = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
+  -- Cap the search. A real route in a 64x64 room settles in a few hundred expansions;
+  -- only an UNREACHABLE goal makes A* sweep the whole two-floor grid (~8192 nodes), and
+  -- doing that every re-plan is what makes an unreachable-waypoint room lag. Bail out as
+  -- "no path" well before then — far above any genuine route, far below a full sweep.
+  local budget = 3000
   while #heap > 0 do
+    budget = budget - 1
+    if budget <= 0 then return nil end
     local n = pop()
     if n == goal then
       local rev, cur = {}, n
@@ -911,14 +918,16 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty, goal_level)
               -- Stepping off the upper platform into the overlay-mask hole: Link falls to
               -- the lower floor. If the tile straight below is walled off, the fall keeps
               -- going the same way ACROSS the hole to the first open lower-floor tile —
-              -- the ledge-hop landing (Link dropped 7 tiles west here, clearing a walled
-              -- barrier). Scan the contiguous hole in the step direction for that landing;
-              -- a solid lower-floor tile under the hole just inhibits the drop there, not
-              -- the whole fall. One-way (no relax from lv == 1) and portal-only (the hole
-              -- is impassable in-plane, so Link can never cross it as flat ground).
+              -- the ledge-hop landing (0x52's drop clears a two-tile walled barrier).
+              -- Scan the contiguous hole in the step direction for that landing, but only
+              -- a few tiles: a real ledge hop is short, so a bounded scan both keeps
+              -- plan_path cheap over big hole regions and refuses to "fall" across a wide
+              -- wall band to the far side. One-way (no relax from lv == 1) and portal-only
+              -- (the hole is impassable in-plane, so Link can never cross it flat).
               local fx, fy = cx, cy
-              while fx >= 0 and fx <= 63 and fy >= 0 and fy <= 63
-                  and tile_attr_at(s, (ox + fx) * 8, (oy + fy) * 8, 0) == 0x1C do
+              for _ = 1, 4 do
+                if fx < 0 or fx > 63 or fy < 0 or fy > 63
+                    or tile_attr_at(s, (ox + fx) * 8, (oy + fy) * 8, 0) ~= 0x1C then break end
                 if tile_passable(s, ox + fx, oy + fy, 1) then relax(1 * FLOOR + fy * 64 + fx); break end
                 fx, fy = fx + d[1], fy + d[2]
               end

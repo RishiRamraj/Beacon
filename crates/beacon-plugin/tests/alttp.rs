@@ -1449,7 +1449,8 @@ fn alttp_a_ledge_drop_lands_across_a_walled_barrier() {
             set(0x7F2000 + cell(149, ty), 0x1C);
             // Lower floor beneath the hole's upper half is walled (01); its lower half is
             // the open landing (00) that reaches the waypoint — only when open_landing.
-            let low = if ty >= 501 && open_landing { 0x00 } else { 0x01 };
+            // The barrier is 3 tiles (495-497) so the fall lands within the bounded scan.
+            let low = if ty >= 498 && open_landing { 0x00 } else { 0x01 };
             set(0x7F3000 + cell(149, ty), low);
         }
         ram
