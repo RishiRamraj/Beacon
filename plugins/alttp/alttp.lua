@@ -264,10 +264,15 @@ local GIANT_KILL_ROOMS = { [0x80] = true }
 -- overlay outlines them all. Edges (n/e/s/w = north/east/south/west) are read off
 -- the green walls so an outline hugs its pit rather than framing the whole screen.
 --   0x71: two guard pits side by side, every edge on a green ledge wall.
+--   0x72: one walled fighting chamber (regular walls, not green ledges); the outline
+--         hugs the dark floor inside — cols 153-166, rows 458-474.
 local KILL_REGION = {
   [0x71] = {
     { n = 491, e = 90,  s = 506, w = 69 },  -- west pit
     { n = 487, e = 122, s = 506, w = 101 }, -- east pit
+  },
+  [0x72] = {
+    { n = 458, e = 166, s = 474, w = 153 }, -- the central chamber floor
   },
 }
 
