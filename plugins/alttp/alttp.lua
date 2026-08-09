@@ -2467,6 +2467,7 @@ local SANCTUARY = {
   { tx = 159, ty = 261, room = 0x42, level = 0 }, -- east into 0x42, upper floor
   { tx = 176, ty = 218, room = 0x32, level = 0, done = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return not (a >= 0x58 and a <= 0x5D) end }, -- north into 0x32 to the chest (2x2 at 176-177,218-219). done: the chest's own tile stops reading as a chest tile (0x58-0x5D) once opened — a direct signal, unlike the $7EF000 chest-opened bit which is not set for this room.
   { tx = 159, ty = 197, room = 0x32, level = 0, gate = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return a < 0xF0 or a > 0xFF or mem.u8(0x7EF36F) > 0 end }, -- the locked door north (2x2 at 159-160,197-198). gate: an OPEN door (tile no longer 0xF0-0xFF) is always a target so the guide leads Link through it; a still-locked door is a target only once he holds a small key ($7EF36F), else the guide stays on the chest (its key) rather than a door he cannot open.
+  { tx = 131, ty = 175, room = 0x22, level = 0 }, -- north into 0x22, upper floor
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
