@@ -757,7 +757,14 @@ local STAIR_DOWN = { [0x3D] = true, [0x3E] = true, [0x3F] = true }
 
 local function tile_passable(s, wtx, wty, level)
   local attr = tile_attr_at(s, wtx * 8, wty * 8, level)
-  if attr == nil or IMPASSABLE[attr] then return false end
+  if attr == nil then return false end
+  -- A flaggable/locked door (0xF0-0xFF) is solid, EXCEPT the route may lead through one
+  -- while Link holds a small key ($7EF36F) to open it — otherwise, with the door still a
+  -- hard wall, the pathfinder detours the long way round (up a stair, across the wall on
+  -- the map) instead of the door it means to take. The waypoint's own past_locked_door
+  -- gate still decides whether to aim beyond the door; this just lets the path cross it.
+  if attr >= 0xF0 and attr <= 0xFF then return mem.u8(0x7EF36F) > 0 end
+  if IMPASSABLE[attr] then return false end
   if s.module == 0x07 and attr == 0x04 then return false end -- indoor wall
   -- 0x1C is the upper layer's overlay mask (zelda3 TileBehavior_OverlayMask_1C):
   -- the raised platform is absent here, so this square is really the level below,
