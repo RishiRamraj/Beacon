@@ -2465,7 +2465,7 @@ local SANCTUARY = {
     done = function(s, wp) return wp.slot ~= nil and mem.u8(0x7E0ED0 + wp.slot) == 0x90 end }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset (-2,+2) onto its left/push side; push = 6 (face east) to shove it. done: the mantle latches sprite_G ($7E0ED0+slot) to 0x90 at its end stop (zelda3 Sprite_EE_MovableMantle), so the tone stops and the chain advances once fully pushed. tx/ty are the fallback until the sprite loads. Zelda's dialogue narrates the push.
   { tx = 117, ty = 260, room = 0x41, level = 0 }, -- north through the opened passage into 0x41, upper floor
   { tx = 159, ty = 261, room = 0x42, level = 0 }, -- east into 0x42, upper floor
-  { tx = 176, ty = 218, room = 0x32, level = 0, done = function(s, wp) return room_chest_opened(s.dungeon_room) end }, -- north into 0x32 to the chest (2x2 at 176-177,218-219). done: once the room's chest is opened (its $7EF000 bit), the waypoint clears and the guide moves on.
+  { tx = 176, ty = 218, room = 0x32, level = 0, done = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return not (a >= 0x58 and a <= 0x5D) end }, -- north into 0x32 to the chest (2x2 at 176-177,218-219). done: the chest's own tile stops reading as a chest tile (0x58-0x5D) once opened — a direct signal, unlike the $7EF000 chest-opened bit which is not set for this room.
   { tx = 159, ty = 197, room = 0x32, level = 0, gate = function(s) return mem.u8(0x7EF36F) > 0 end }, -- the locked door north (2x2 at 159-160,197-198). gate: only a target once Link holds a small key ($7EF36F) to open it — otherwise the guide stays on the chest (its key) rather than leading to a door he cannot open.
 }
 
