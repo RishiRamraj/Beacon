@@ -2463,6 +2463,7 @@ local SANCTUARY = {
   { tx = 95, ty = 389, room = 0x61, level = 0 }, -- west into 0x61, upper floor
   { tx = 91, ty = 326, room = 0x51, level = 0, track = 0xEE, track_dx = -2, track_dy = 2, push = 6,
     done = function(k) return mem.u8(0x7E0ED0 + k) == 0x90 end }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset (-2,+2) onto its left/push side; push = 6 (face east) to shove it. done: the mantle latches sprite_G ($7E0ED0+slot) to 0x90 at its end stop (zelda3 Sprite_EE_MovableMantle), so the tone stops once fully pushed. tx/ty are the fallback until the sprite loads. Zelda's dialogue narrates the push.
+  { tx = 117, ty = 260, room = 0x41, level = 0 }, -- north through the opened passage into 0x41, upper floor
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
