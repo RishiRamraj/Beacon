@@ -1486,6 +1486,62 @@ fn alttp_a_ledge_drop_lands_across_a_walled_barrier() {
 }
 
 #[test]
+fn alttp_a_push_waypoint_tracks_its_object_and_aligns_only_when_facing_it() {
+    // General movable-object strategy: a chain waypoint with `track = <sprite kind>`
+    // follows the object's live sprite (offset onto the push side), and `push =
+    // <facing>` names the direction Link must face to shove it. The alignment is true
+    // only while Link is ON the object AND facing that way — the cue that drives the
+    // distinct "push" tone. Movable Mantle (0xEE) at (97,324); a one-waypoint push chain
+    // offset (-6,+2) should ride to (91,326).
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let mut ram = dungeon_frame((91, 326), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x51);
+        set(0x7E00EE, 0);
+        set(0x7E0DD0, 0x09); // slot 0 active
+        set(0x7E0E20, 0xEE); // Movable Mantle
+        let mx = 97u16 * 8 + 4;
+        let my = 324u16 * 8 + 4;
+        set(0x7E0D10, (mx & 0xFF) as u8);
+        set(0x7E0D30, (mx >> 8) as u8);
+        set(0x7E0D00, (my & 0xFF) as u8);
+        set(0x7E0D20, (my >> 8) as u8);
+    }
+
+    // One eval: track the object, then probe alignment facing the push way, the wrong
+    // way, and standing off the object entirely.
+    // Drive on_frame so the plugin's `prev` is populated from this frame; sprites()
+    // (which PUSH.track walks) reads that file-local, so it must be set for real.
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+
+    // One eval: inject a one-waypoint push chain, track the object, then probe alignment
+    // facing the push way, the wrong way, and standing off the object entirely. `s` is a
+    // hand-built Link state (PUSH.active only reads x/y/dungeon_room/direction).
+    let script = r#"
+        nav_chain = { { room = 0x51, level = 0, tx = 0, ty = 0,
+                        track = 0xEE, track_dx = -6, track_dy = 2, push = 6 } }
+        PUSH.track({ dungeon_room = 0x51 })
+        local tracked = nav_chain[1].tx .. "," .. nav_chain[1].ty
+        local s = { x = 91*8+4, y = 326*8+4, dungeon_room = 0x51, direction = 6 }
+        local on_east = (PUSH.active(s) ~= nil) and (s.direction == nav_chain[1].push)
+        s.direction = 0
+        local on_north = (PUSH.active(s) ~= nil) and (s.direction == nav_chain[1].push)
+        s.x = (91 + 6) * 8 + 4 -- step off, out of reach
+        local off = PUSH.active(s) ~= nil
+        return tracked .. "|" .. tostring(on_east) .. "|" .. tostring(on_north) .. "|" .. tostring(off)
+    "#;
+    assert_eq!(
+        plugin.eval(script, &ram).unwrap(),
+        "91,326|true|false|false",
+        "waypoint tracks the mantle; aligned only when on it and facing the push way"
+    );
+}
+
+#[test]
 fn alttp_a_closed_locked_door_blocks_the_route() {
     // A closed flaggable door (0xF0-0xFF) is a solid tile to the game's own
     // classifier and must be one to the pathfinder too, so the guide never leads
