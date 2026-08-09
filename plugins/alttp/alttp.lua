@@ -2371,6 +2371,7 @@ local SANCTUARY = {
   { tx = 151, ty = 369, room = 0x52, level = 0, via = true }, -- UP over the right-side ledge (via = mandatory): the escape climbs the stairs and drops back down here to dodge the soldiers on the lower-floor line.
   { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
   { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
+  { tx = 95, ty = 389, room = 0x61, level = 0 }, -- west into 0x61, upper floor
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
