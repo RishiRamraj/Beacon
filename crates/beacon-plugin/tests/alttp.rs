@@ -1308,14 +1308,13 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
 }
 
 #[test]
-fn alttp_a_layer_swap_stair_cannot_be_walked_across_on_its_entry_floor() {
-    // A layer-swap stair is not flat ground: stepping onto it forces the floor change,
-    // so the pathfinder must not walk across it to the tile beyond on the same floor.
-    // Room 0x72, Link on the upper floor, split by a wall band with a single gap; the
-    // upper waypoint 9 sits past the gap. With plain floor in the gap Link walks
-    // through to it (index 9); with a down-stair in the gap — whose portal is blocked
-    // (impassable landing) — he cannot walk across, so waypoint 9 is unreachable and
-    // the guide holds at waypoint 8.
+fn alttp_a_down_staircase_is_walked_across_not_treated_as_a_wall() {
+    // A down-STAIRCASE (0x3D-0x3F) is an in-room stair Link simply walks down, whose far
+    // end may be the SAME floor (e.g. 0x55's exit pocket) — so unlike a swap-layer stair
+    // the pathfinder MAY walk across it. Room 0x72, Link upstairs, split by a wall band
+    // with a single gap; the upper waypoint 9 sits past it. A down-staircase in the gap
+    // is crossed to it (index 9), exactly as plain floor would be; a solid wall there is
+    // not, so the guide holds at the near waypoint (index 8).
     let r = Registry::builtin();
 
     let frame = |gap: u8| -> Vec<u8> {
@@ -1332,36 +1331,35 @@ fn alttp_a_layer_swap_stair_cannot_be_walked_across_on_its_entry_floor() {
         for tx in 0..64u32 {
             set(0x7F2000 + 33 * 64 + tx, 0x01);
         }
-        set(0x7F2000 + 33 * 64 + 31, gap); // the gap: plain floor, or a down-stair
-        set(0x7F3000 + 33 * 64 + 31, 0x01); // block the stair's landing (portal leads nowhere)
+        set(0x7F2000 + 33 * 64 + 31, gap); // the gap: a down-staircase, or a solid wall
+        set(0x7F3000 + 33 * 64 + 31, 0x01); // lower floor blocked: no valid hop down here
         ram
     };
 
-    // Plain floor in the gap: Link walks through to the far upper waypoint (9).
+    // A down-staircase in the gap: walked across to the far upper waypoint (9).
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    let open = frame(0x00);
-    plugin.on_frame(&open, 0);
-    plugin.on_frame(&open, 1);
-    plugin.command("advance", &open);
-    plugin.on_frame(&open, 2);
+    let stair = frame(0x3E);
+    plugin.on_frame(&stair, 0);
+    plugin.on_frame(&stair, 1);
+    plugin.command("advance", &stair);
+    plugin.on_frame(&stair, 2);
     assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &open).unwrap(),
+        plugin.eval("return tostring(nav_chain_i)", &stair).unwrap(),
         "9",
-        "plain floor in the gap is walked through to the far waypoint (index 9)"
+        "a down-staircase in the gap is walked across to the far waypoint (index 9)"
     );
 
-    // A down-stair in the gap (portal blocked): it cannot be walked across, so the far
-    // waypoint is unreachable and the guide holds at the near one (index 8).
+    // A solid wall in the gap: cannot pass, so the guide holds at the near one (index 8).
     let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    let stair = frame(0x3E);
-    plugin2.on_frame(&stair, 0);
-    plugin2.on_frame(&stair, 1);
-    plugin2.command("advance", &stair);
-    plugin2.on_frame(&stair, 2);
+    let wall = frame(0x01);
+    plugin2.on_frame(&wall, 0);
+    plugin2.on_frame(&wall, 1);
+    plugin2.command("advance", &wall);
+    plugin2.on_frame(&wall, 2);
     assert_eq!(
-        plugin2.eval("return tostring(nav_chain_i)", &stair).unwrap(),
+        plugin2.eval("return tostring(nav_chain_i)", &wall).unwrap(),
         "8",
-        "a stair in the gap is not flat ground: it is not walked across to the far waypoint"
+        "a solid wall in the gap is not crossed: the guide holds at the near waypoint"
     );
 }
 
