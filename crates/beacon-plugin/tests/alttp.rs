@@ -1525,7 +1525,7 @@ fn alttp_a_push_waypoint_tracks_its_object_and_aligns_only_when_facing_it() {
     let script = r#"
         nav_chain = { { room = 0x51, level = 0, tx = 0, ty = 0,
                         track = 0xEE, track_dx = -6, track_dy = 2, push = 6,
-                        done = function(k) return mem.u8(0x7E0ED0 + k) == 0x90 end } }
+                        done = function(s, wp) return wp.slot ~= nil and mem.u8(0x7E0ED0 + wp.slot) == 0x90 end } }
         PUSH.track({ dungeon_room = 0x51 })
         local tracked = nav_chain[1].tx .. "," .. nav_chain[1].ty
         local s = { x = 91*8+4, y = 326*8+4, dungeon_room = 0x51, direction = 6 }
@@ -1535,7 +1535,7 @@ fn alttp_a_push_waypoint_tracks_its_object_and_aligns_only_when_facing_it() {
         s.x = (91 + 6) * 8 + 4 -- step off, out of reach
         local off = PUSH.active(s) ~= nil
         -- PUSH.track recorded the sprite slot; done() reads its fully-pushed latch.
-        local done = nav_chain[1].slot ~= nil and nav_chain[1].done(nav_chain[1].slot)
+        local done = nav_chain[1].done(s, nav_chain[1])
         return tracked .. "|" .. tostring(on_east) .. "|" .. tostring(on_north)
             .. "|" .. tostring(off) .. "|slot" .. tostring(nav_chain[1].slot) .. "|" .. tostring(done)
     "#;

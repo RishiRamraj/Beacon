@@ -1785,7 +1785,7 @@ function PUSH.tone(s)
   local wp = PUSH.active(s)
   local d = wp and DIRS[wp.push]
   local pushing = d and (mem.u8(0x7E00F0) & d.dpad) ~= 0
-  local done = wp and wp.done and wp.slot and wp.done(wp.slot)
+  local done = wp and wp.done and wp.done(s, wp)
   if wp and s.direction == wp.push and not pushing and not done then
     local dx, dy = wp.tx * 8 + 4 - s.x, wp.ty * 8 + 4 - s.y
     sound_beacon(s, "push", dx, dy, math.abs(dx) + math.abs(dy), PUSH.beacon, false)
@@ -2462,10 +2462,11 @@ local SANCTUARY = {
   { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
   { tx = 95, ty = 389, room = 0x61, level = 0 }, -- west into 0x61, upper floor
   { tx = 91, ty = 326, room = 0x51, level = 0, track = 0xEE, track_dx = -2, track_dy = 2, push = 6,
-    done = function(k) return mem.u8(0x7E0ED0 + k) == 0x90 end }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset (-2,+2) onto its left/push side; push = 6 (face east) to shove it. done: the mantle latches sprite_G ($7E0ED0+slot) to 0x90 at its end stop (zelda3 Sprite_EE_MovableMantle), so the tone stops once fully pushed. tx/ty are the fallback until the sprite loads. Zelda's dialogue narrates the push.
+    done = function(s, wp) return wp.slot ~= nil and mem.u8(0x7E0ED0 + wp.slot) == 0x90 end }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset (-2,+2) onto its left/push side; push = 6 (face east) to shove it. done: the mantle latches sprite_G ($7E0ED0+slot) to 0x90 at its end stop (zelda3 Sprite_EE_MovableMantle), so the tone stops and the chain advances once fully pushed. tx/ty are the fallback until the sprite loads. Zelda's dialogue narrates the push.
   { tx = 117, ty = 260, room = 0x41, level = 0 }, -- north through the opened passage into 0x41, upper floor
   { tx = 159, ty = 261, room = 0x42, level = 0 }, -- east into 0x42, upper floor
-  { tx = 176, ty = 218, room = 0x32, level = 0 }, -- north into 0x32 to the chest (2x2 at 176-177,218-219); guide snaps to the open spot just south of it
+  { tx = 176, ty = 218, room = 0x32, level = 0, done = function(s, wp) return room_chest_opened(s.dungeon_room) end }, -- north into 0x32 to the chest (2x2 at 176-177,218-219). done: once the room's chest is opened (its $7EF000 bit), the waypoint clears and the guide moves on.
+  { tx = 159, ty = 197, room = 0x32, level = 0, gate = function(s) return mem.u8(0x7EF36F) > 0 end }, -- the locked door north (2x2 at 159-160,197-198). gate: only a target once Link holds a small key ($7EF36F) to open it — otherwise the guide stays on the chest (its key) rather than leading to a door he cannot open.
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
@@ -3037,8 +3038,14 @@ nav_update = function(s)
         local pick, pgx, pgy, plevel
         for i, wp in ipairs(nav_chain) do
           if wp.room == s.dungeon_room and (wp.gate == nil or wp.gate(s)) then
-            local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level)
-            if plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then pick, pgx, pgy, plevel = i, gx, gy, wp.level end
+            if wp.done and wp.done(s, wp) then
+              -- Its objective is already met (a chest looted, a block fully shoved):
+              -- count it reached and never target it again, so the guide advances past it.
+              nav_chain.arrived = math.max(nav_chain.arrived or 0, i)
+            else
+              local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level)
+              if plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then pick, pgx, pgy, plevel = i, gx, gy, wp.level end
+            end
           end
           -- A `via` waypoint is a mandatory intermediate: once it is the reachable pick,
           -- hold the "furthest reachable" scan here until Link has actually arrived at it
