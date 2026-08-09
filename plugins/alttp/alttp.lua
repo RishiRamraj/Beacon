@@ -2440,7 +2440,7 @@ local SANCTUARY = {
   { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
   { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
   { tx = 95, ty = 389, room = 0x61, level = 0 }, -- west into 0x61, upper floor
-  { tx = 91, ty = 326, room = 0x51, level = 0, track = 0xEE, track_dx = -6, track_dy = 2, push = 6 }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset onto its left/push side; push = 6 (face east) to shove it. tx/ty are the fallback until the sprite loads. Zelda's dialogue already narrates the push.
+  { tx = 91, ty = 326, room = 0x51, level = 0, track = 0xEE, track_dx = -2, track_dy = 2, push = 6 }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset (-2,+2) onto its left/push side; push = 6 (face east) to shove it. tx/ty are the fallback until the sprite loads. Zelda's dialogue already narrates the push.
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
