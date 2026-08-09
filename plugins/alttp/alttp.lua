@@ -1729,8 +1729,9 @@ end
 -- inspect it, mirroring how the nav chain and pathfinder state are exposed.
 PUSH = {
   -- Low and slow, a heavy grind — the sound of heaving something big — and distinct
-  -- from the soft sonar "path" ping. Sounds while aligned: "push here".
-  beacon = { pitch = 0.35, range = 48, tremolo = 3.0, gain = 1.0 },
+  -- from the soft sonar "path" ping. Sounds while aligned: "push here". Pitch 0.8: as
+  -- low/heavy as stays audible here — 0.5 and lower rendered too deep to hear.
+  beacon = { pitch = 0.8, range = 48, tremolo = 3.0, gain = 1.0 },
   reach = 3, -- tiles from the object that count as being "on" it
 }
 -- Sit every tracking waypoint on its object while that object's sprite is in the room;
