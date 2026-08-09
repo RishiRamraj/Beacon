@@ -2372,7 +2372,7 @@ local SANCTUARY = {
   { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
   { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
   { tx = 95, ty = 389, room = 0x61, level = 0 }, -- west into 0x61, upper floor
-  { tx = 91, ty = 326, room = 0x51, level = 0, arrival = "Face right and push the ornament to open the secret passage." }, -- the throne-room ornament: push it from the left (walk right into it) to reveal the passage to the Sanctuary
+  { tx = 91, ty = 326, room = 0x51, level = 0 }, -- the throne-room ornament: guide to the push spot; Zelda's own dialogue tells the player to push it from the left, so no arrival cue here
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
