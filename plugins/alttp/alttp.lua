@@ -132,6 +132,7 @@ local SPRITE = {
   y_lo  = 0x7E0D00,
   y_hi  = 0x7E0D20,
   hp    = 0x7E0E50,
+  die   = 0x7E0CBA, -- sprite_die_action: non-zero = drops a key/big-key on death
 }
 
 -- Sprite classification tables (names, enemy/item/npc sets) live in data.lua under
@@ -2892,7 +2893,42 @@ end
 -- Link off the linear route to every chest it passes. Keyed by dungeon room id.
 local CHEST_ROOMS = { [0x72] = true, [0x71] = true }
 
+-- A specific enemy made into an objective. Some rooms hang a key on ONE designated
+-- enemy (zelda3 sets sprite_die_action, which makes Sprite_DoTheDeath drop a small/big
+-- key when it dies) — so the guide should lead Link to THAT enemy, not the nearest
+-- random one, when the key is what he is here for. The nearest live match, as {x, y}, or
+-- nil. Global (not local) to stay under the chunk's 200-local cap and to let MCP inspect
+-- it, like the PUSH movable-object helpers.
+function key_holder(s)
+  local best, bd
+  for i = 0, 15 do
+    local st = mem.u8(SPRITE.state + i)
+    if st ~= nil and st ~= 0 and (mem.u8(SPRITE.hp + i) or 0) > 0
+        and mem.u8(SPRITE.die + i) ~= 0 then
+      local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
+      local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
+      local d = math.abs(sx - s.x) + math.abs(sy - s.y)
+      if bd == nil or d < bd then best, bd = { sx, sy }, d end
+    end
+  end
+  return best
+end
+
 local ROOM_OBJECTIVES = {
+  -- The enemy carrying the key comes first: go for it, then its dropped key, then the
+  -- rest. Gated off the Zelda escort out (like the dropped-key objective), since the
+  -- escape does not stop to fight for keys.
+  { id = "keyholder",
+    cue = "Defeat the enemy holding the key.",
+    -- Not gated off the Zelda escort (unlike the dropped-key objective): the escape can
+    -- still need a key on the way out, and a LIVE key-holder is a real forward target —
+    -- a respawned guard in an already-cleared room carries no key (die_action 0), so this
+    -- only fires on an enemy that genuinely still drops one.
+    active = function(s) return key_holder(s) ~= nil end,
+    target = function(s)
+      local e = key_holder(s)
+      if e then return walkable_near(s, e[1], e[2]) end
+    end },
   { id = "kill",
     cue = "Defeat all enemies.",
     active = function(s)
