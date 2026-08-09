@@ -53,11 +53,13 @@ local MODULE_SILENT = {
 -- The four facings (Link's $7E002F direction byte): compass word and unit vector,
 -- in one table so direction->word and direction->vector are not re-encoded as inline
 -- ladders (used by facing(), the map arrow, and the route follower's alignment).
+-- `dpad` is this facing's bit in the held-controller register $7E00F0 (low nibble
+-- U 0x08 / D 0x04 / L 0x02 / R 0x01), so "is the player pressing this way" is one AND.
 local DIRS = {
-  [0] = { word = "north", dx = 0, dy = -1 },
-  [2] = { word = "south", dx = 0, dy = 1 },
-  [4] = { word = "west", dx = -1, dy = 0 },
-  [6] = { word = "east", dx = 1, dy = 0 },
+  [0] = { word = "north", dx = 0, dy = -1, dpad = 0x08 },
+  [2] = { word = "south", dx = 0, dy = 1, dpad = 0x04 },
+  [4] = { word = "west", dx = -1, dy = 0, dpad = 0x02 },
+  [6] = { word = "east", dx = 1, dy = 0, dpad = 0x01 },
 }
 
 local function facing(direction)
@@ -1764,13 +1766,17 @@ function PUSH.active(s)
   return nil
 end
 -- Sound the alignment tone when Link is on a push object, facing its push direction,
--- and standing STILL — it is a "you're lined up, now push" orientation cue, so it drops
--- the instant he moves (the shove itself has the game's own push sound effect). Silent
--- otherwise. Kept off the "path" id so it never fights the guide. `moving` is whether
--- Link's position changed this frame.
-function PUSH.tone(s, moving)
+-- and NOT currently pressing that way — it is a "you're lined up, now push" orientation
+-- cue, so it drops the instant the player holds the push direction (the shove itself has
+-- the game's own push sound effect). Pressing is read from the held-controller register
+-- rather than from movement, since a block inches so slowly Link's position barely
+-- changes frame to frame. Silent otherwise; kept off the "path" id so it never fights
+-- the guide.
+function PUSH.tone(s)
   local wp = PUSH.active(s)
-  if wp and s.direction == wp.push and not moving then
+  local d = wp and DIRS[wp.push]
+  local pushing = d and (mem.u8(0x7E00F0) & d.dpad) ~= 0
+  if wp and s.direction == wp.push and not pushing then
     local dx, dy = wp.tx * 8 + 4 - s.x, wp.ty * 8 + 4 - s.y
     sound_beacon(s, "push", dx, dy, math.abs(dx) + math.abs(dy), PUSH.beacon, false)
   else
@@ -1942,8 +1948,8 @@ function on_frame(frame)
     end
 
     -- The alignment tone for a movable object: sounds only while Link is on a push
-    -- waypoint, facing its push direction, and standing still (not mid-shove).
-    PUSH.tone(now, now.x ~= was.x or now.y ~= was.y)
+    -- waypoint, facing its push direction, and not pressing into it (not mid-shove).
+    PUSH.tone(now)
   else
     combat_engaged = false
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
