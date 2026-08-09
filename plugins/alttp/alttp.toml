@@ -91,8 +91,3 @@ label = "Say the current quest objective"
 id    = "advance"
 label = "Guide to the next quest step"
 key   = "KeyL"                       # "L" for the lead/guide; rebindable
-
-[[command]]
-id    = "map_debug"
-label = "Toggle debug map overlay"
-key   = "KeyU"                       # M is the host's map toggle and O/most letters are taken; U is free. Rebindable.

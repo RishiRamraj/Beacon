@@ -2467,9 +2467,8 @@ nav_chain_i = 1
 -- Debug map overlay toggle. When on, the map renderer adds developer aids on top
 -- of the normal schematic: every waypoint of the active chain that belongs to the
 -- current room, tagged with its 1-based order in the chain, and a coloured outline
--- around any room that is currently a kill-room. Off by default so the player's
--- map stays clean; flipped by the `map_debug` command and readable from eval_lua.
-map_debug = false
+-- around any room that is currently a kill-room. Always drawn in a dungeon (there is
+-- no toggle) — these developer aids are wanted on at all times during authoring.
 local chain_cued = {} -- cue index -> announced, so each cue speaks once per chain
 -- Furthest hard index reached per chain (keyed by the chain table). Persists
 -- across a dungeon excursion — chain_stop drops the live chain but not this — so
@@ -3125,13 +3124,6 @@ on_command("pathfind_stop", function()
   say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
 end)
 
--- Toggle the debug map overlay (numbered room waypoints + kill-room outlines).
-on_command("map_debug", function()
-  map_debug = not map_debug
-  say(map_debug and "Map debug on." or "Map debug off.",
-      { priority = "navigation", category = "on-demand" })
-end)
-
 -- "Guide me somewhere I haven't been." Routes toward the nearest reachable tile
 -- in this area that Link has not yet walked near.
 on_command("explore", function()
@@ -3330,9 +3322,9 @@ function on_draw(canvas)
       end
     end
 
-    -- Debug overlay (toggled by the `map_debug` command): developer aids the
-    -- normal map hides. Only in a dungeon, where the room and its waypoints live.
-    if map_debug and s.module == 0x07 then
+    -- Debug overlay: developer aids the normal map hides, always on. Only in a
+    -- dungeon, where the room and its waypoints live.
+    if s.module == 0x07 then
       -- A kill-room's boundary, in a distinct red (never the pink of the nav route).
       -- When the room's fighting pit is mapped (KILL_REGION), draw a 1px rectangle on
       -- its tile bounds so the border hugs the real pit instead of framing the whole
