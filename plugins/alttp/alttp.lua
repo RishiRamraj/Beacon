@@ -1714,6 +1714,65 @@ function WEAPON.nearest(s)
   return best
 end
 
+-- ── Movable objects: push waypoints ─────────────────────────────────────────
+-- A general strategy for quest steps that need Link to shove a movable object a set
+-- way (the throne-room Movable Mantle today; more to come). A chain waypoint declares
+-- one, no hand-placed coordinates required beyond a fallback:
+--   track = <sprite kind>    the waypoint FOLLOWS that object's live sprite, so the
+--                            guide keeps pointing at it as it slides
+--   push  = <facing 0/2/4/6> the direction Link must face to push it (see DIRS)
+--   track_dx / track_dy      optional tile offset onto the standing/push side
+-- The navigation guide leads Link to the object as usual. Then, while he is on it, a
+-- steady tone DISTINCT from the sonar guide sounds only when he faces the push
+-- direction, so a blind player rocks the stick until the "aligned" tone confirms and
+-- pushes. Global (not local) to stay under the chunk's 200-local cap and to let MCP
+-- inspect it, mirroring how the nav chain and pathfinder state are exposed.
+PUSH = {
+  -- Bright and fast, unlike the soft sonar "path" ping: reads as "aligned — push now".
+  beacon = { pitch = 3.0, range = 48, tremolo = 8.0, gain = 1.0 },
+  reach = 3, -- tiles from the object that count as being "on" it
+}
+-- Sit every tracking waypoint on its object while that object's sprite is in the room;
+-- out of the room the waypoint keeps its last position (its authored fallback). Call
+-- once per frame before the nav re-aim and the beacon pass so both see the live spot.
+function PUSH.track(s)
+  if not nav_chain then return end
+  for _, wp in ipairs(nav_chain) do
+    if wp.track and wp.room == s.dungeon_room then
+      local p = nearest_sprite_kind(s, wp.track)
+      if p then
+        wp.tx = (p[1] >> 3) + (wp.track_dx or 0)
+        wp.ty = (p[2] >> 3) + (wp.track_dy or 0)
+      end
+    end
+  end
+end
+-- The push waypoint Link is currently on (has `push`, in this room/floor, within
+-- reach), else nil.
+function PUSH.active(s)
+  if not nav_chain then return nil end
+  local ltx, lty = s.x >> 3, s.y >> 3
+  local level = mem.u8(LOWER_LEVEL)
+  for _, wp in ipairs(nav_chain) do
+    if wp.push and wp.room == s.dungeon_room and (wp.level or 0) == level
+        and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= PUSH.reach then
+      return wp
+    end
+  end
+  return nil
+end
+-- Sound the alignment tone when Link is on a push object AND facing its push
+-- direction; silence it otherwise. Kept off the "path" id so it never fights the guide.
+function PUSH.tone(s)
+  local wp = PUSH.active(s)
+  if wp and s.direction == wp.push then
+    local dx, dy = wp.tx * 8 + 4 - s.x, wp.ty * 8 + 4 - s.y
+    sound_beacon(s, "push", dx, dy, math.abs(dx) + math.abs(dy), PUSH.beacon, false)
+  else
+    beacon.clear("push")
+  end
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -1823,6 +1882,10 @@ function on_frame(frame)
   if in_play(now) then
     local list = sprites()
 
+    -- Keep any tracking waypoint sitting on its movable object before nav and beacons
+    -- read its position this frame.
+    PUSH.track(now)
+
     -- Spatial-audio beacons: one tone per class, on the nearest sprite of that
     -- class within its reach. `list` is sorted nearest-first, so the first sprite
     -- seen for a class is its closest one.
@@ -1872,6 +1935,10 @@ function on_frame(frame)
     else
       beacon.clear("weapon")
     end
+
+    -- The alignment tone for a movable object: sounds only while Link is on a push
+    -- waypoint and facing its push direction.
+    PUSH.tone(now)
   else
     combat_engaged = false
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
@@ -1879,6 +1946,7 @@ function on_frame(frame)
     end
     beacon.clear("chest")
     beacon.clear("weapon")
+    beacon.clear("push")
   end
 
   -- Remember where Link has been, for the explore command.
@@ -2372,7 +2440,7 @@ local SANCTUARY = {
   { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
   { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
   { tx = 95, ty = 389, room = 0x61, level = 0 }, -- west into 0x61, upper floor
-  { tx = 91, ty = 326, room = 0x51, level = 0 }, -- the throne-room ornament: guide to the push spot; Zelda's own dialogue tells the player to push it from the left, so no arrival cue here
+  { tx = 91, ty = 326, room = 0x51, level = 0, track = 0xEE, track_dx = -6, track_dy = 2, push = 6 }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset onto its left/push side; push = 6 (face east) to shove it. tx/ty are the fallback until the sprite loads. Zelda's dialogue already narrates the push.
 }
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
