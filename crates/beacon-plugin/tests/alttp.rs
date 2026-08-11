@@ -550,7 +550,9 @@ fn alttp_in_combat_the_guide_ducks_and_only_the_enemy_sounds() {
     plugin.on_frame(&calm, 0);
     plugin.command("pathfind", &calm);
     plugin.on_frame(&calm, 1);
-    let calm_vol = path_beacon(&plugin).expect("the guide sounds when clear").volume;
+    let calm_vol = path_beacon(&plugin)
+        .expect("the guide sounds when clear")
+        .volume;
     assert!(
         plugin.beacons().iter().any(|b| b.id == "item"),
         "the item sounds when clear"
@@ -830,8 +832,10 @@ fn alttp_advance_inside_an_unchained_dungeon_stays_quiet() {
     let out = plugin.command("advance", &room);
     let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
     assert!(
-        !texts.iter().any(|t| t.contains("Bow") || t.contains("Big Key")
-            || t.to_lowercase().contains("boss") || t.to_lowercase().contains("exit")),
+        !texts.iter().any(|t| t.contains("Bow")
+            || t.contains("Big Key")
+            || t.to_lowercase().contains("boss")
+            || t.to_lowercase().contains("exit")),
         "no retired spine chatter inside an un-chained dungeon: {texts:?}"
     );
     plugin.on_frame(&room, 2);
@@ -1273,7 +1277,7 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
         set(0x7EF3CC, 0); // Zelda not following
         set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
         set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
-        // (151,499): (499 & 63) = 51, (151 & 63) = 23.
+                             // (151,499): (499 & 63) = 51, (151 & 63) = 23.
         set(0x7F2000 + 51 * 64 + 23, stair); // upper floor: the stair
         set(0x7F3000 + 51 * 64 + 23, 0x00); // lower floor: passable landing
         ram
@@ -1327,7 +1331,7 @@ fn alttp_a_down_staircase_is_walked_across_not_treated_as_a_wall() {
         set(0x7EF3CC, 0); // Zelda not following
         set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
         set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
-        // A wall band across the upper floor at grid row 33, one gap at col 31.
+                             // A wall band across the upper floor at grid row 33, one gap at col 31.
         for tx in 0..64u32 {
             set(0x7F2000 + 33 * 64 + tx, 0x01);
         }
@@ -1387,7 +1391,7 @@ fn alttp_an_overlay_mask_hole_is_a_one_way_drop_to_the_lower_floor() {
         set(0x7EF3CC, 0); // Zelda not following
         set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
         set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
-        // (151,499): (499 & 63) = 51, (151 & 63) = 23.
+                             // (151,499): (499 & 63) = 51, (151 & 63) = 23.
         set(0x7F2000 + 51 * 64 + 23, tile); // upper floor: the hole (or plain floor)
         set(0x7F3000 + 51 * 64 + 23, 0x00); // lower floor: passable landing
         ram
@@ -1415,7 +1419,9 @@ fn alttp_an_overlay_mask_hole_is_a_one_way_drop_to_the_lower_floor() {
     plugin2.command("advance", &solid);
     plugin2.on_frame(&solid, 2);
     assert_eq!(
-        plugin2.eval("return tostring(nav_chain_i)", &solid).unwrap(),
+        plugin2
+            .eval("return tostring(nav_chain_i)", &solid)
+            .unwrap(),
         "9",
         "with no floor crossing the lower-floor waypoint stays unreachable (index 9)"
     );
@@ -1442,15 +1448,19 @@ fn alttp_a_ledge_drop_lands_across_a_walled_barrier() {
         set(0x7EF3CC, 0); // Zelda not following
         set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
         set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
-        // A one-tile hole column at tx=149 on the upper floor, rows 495..505. Grid is
-        // indexed (ty & 63) * 64 + (tx & 63).
+                             // A one-tile hole column at tx=149 on the upper floor, rows 495..505. Grid is
+                             // indexed (ty & 63) * 64 + (tx & 63).
         let cell = |tx: u32, ty: u32| (ty & 63) * 64 + (tx & 63);
         for ty in 495..=505u32 {
             set(0x7F2000 + cell(149, ty), 0x1C);
             // Lower floor beneath the hole's upper half is walled (01); its lower half is
             // the open landing (00) that reaches the waypoint — only when open_landing.
             // The barrier is 3 tiles (495-497) so the fall lands within the bounded scan.
-            let low = if ty >= 498 && open_landing { 0x00 } else { 0x01 };
+            let low = if ty >= 498 && open_landing {
+                0x00
+            } else {
+                0x01
+            };
             set(0x7F3000 + cell(149, ty), low);
         }
         ram
@@ -1595,7 +1605,9 @@ fn alttp_a_closed_locked_door_blocks_the_route() {
     plugin2.command("advance", &locked);
     plugin2.on_frame(&locked, 2);
     assert_eq!(
-        plugin2.eval("return tostring(nav_chain_i)", &locked).unwrap(),
+        plugin2
+            .eval("return tostring(nav_chain_i)", &locked)
+            .unwrap(),
         "9",
         "a closed locked door blocks the route: the guide does not lead through it"
     );
@@ -1622,8 +1634,11 @@ fn alttp_locked_door_gate_holds_the_route_until_the_door_is_open() {
         set(0x7EF3CC, 0); // Zelda not following
         set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
         set(0x7EF36F, keys); // current-dungeon small keys
-        // upper-floor door (79,486): 0xF0 shut, plain floor once opened
-        set(0x7F2000 + (486 & 63) * 64 + (79 & 63), if door_open { 0x00 } else { 0xF0 });
+                             // upper-floor door (79,486): 0xF0 shut, plain floor once opened
+        set(
+            0x7F2000 + (486 & 63) * 64 + (79 & 63),
+            if door_open { 0x00 } else { 0xF0 },
+        );
         ram
     };
     let arm = |ram: &Vec<u8>| -> String {
@@ -1679,7 +1694,9 @@ fn alttp_nav_left_on_but_idle_re_arms_itself() {
     plugin.command("advance", &ram); // engage -> chain armed
     plugin.on_frame(&ram, 2);
     assert_eq!(
-        plugin.eval("return tostring(nav_chain ~= nil)", &ram).unwrap(),
+        plugin
+            .eval("return tostring(nav_chain ~= nil)", &ram)
+            .unwrap(),
         "true",
         "engaging arms the chain"
     );
@@ -1697,7 +1714,9 @@ fn alttp_nav_left_on_but_idle_re_arms_itself() {
     // One more frame at the same position: the self-heal must re-arm the chain.
     plugin.on_frame(&ram, 3);
     assert_eq!(
-        plugin.eval("return tostring(nav_chain ~= nil)", &ram).unwrap(),
+        plugin
+            .eval("return tostring(nav_chain ~= nil)", &ram)
+            .unwrap(),
         "true",
         "nav left on but idle re-aims itself without a toggle"
     );
@@ -1716,7 +1735,7 @@ fn alttp_navigation_starts_itself_when_link_gets_up_in_his_house() {
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E00A0, 0x04);
         set(0x7E00A1, 0x01); // dungeon_room 0x0104 = Link's house
-        // Lamp ($7EF34A) and progress ($7EF3C5) left at 0.
+                             // Lamp ($7EF34A) and progress ($7EF3C5) left at 0.
     }
 
     assert_eq!(
@@ -1993,7 +2012,7 @@ fn alttp_giant_kill_room_counts_the_far_enemy_and_ignores_hp0_bystanders() {
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E040C, 0x02);
         set(0x7E00A0, 0x80); // Jail Cell Room -> giant kill-room
-        // Slot 0: Princess Zelda (type 118), hp 0 — must never count.
+                             // Slot 0: Princess Zelda (type 118), hp 0 — must never count.
         set(0x7E0DD0, 0x09);
         set(0x7E0E20, 118);
         set(0x7E0D10, 0x64); // x = 0x0164 -> tile 44 (near Link)
@@ -2001,8 +2020,8 @@ fn alttp_giant_kill_room_counts_the_far_enemy_and_ignores_hp0_bystanders() {
         set(0x7E0D00, 0x34); // y = 0x1034 -> tile 518
         set(0x7E0D20, 0x10);
         set(0x7E0E50, 0); // Zelda hp 0
-        // Slot 1: Ball-and-Chain Trooper (type 106), ~328px east — beyond the ~144px
-        // on-screen window, so it only registers under the giant room-wide reach.
+                          // Slot 1: Ball-and-Chain Trooper (type 106), ~328px east — beyond the ~144px
+                          // on-screen window, so it only registers under the giant room-wide reach.
         set(0x7E0DD1, if enemy_alive { 0x09 } else { 0x00 });
         set(0x7E0E21, 106);
         set(0x7E0D11, 0x9C); // x = 0x019C -> tile 51
@@ -2057,7 +2076,7 @@ fn alttp_grab_the_key_is_suppressed_while_escorting_zelda() {
         set(0x7E00A0, 0x72);
         set(0x7EF3C5, 1); // has sword, Zelda not yet delivered
         set(0x7EF3CC, following); // Zelda follow flag
-        // A dropped Key sprite (type 228) near Link.
+                                  // A dropped Key sprite (type 228) near Link.
         set(0x7E0DD0, 0x09); // slot 0 active
         set(0x7E0E20, 228); // Key
         set(0x7E0D10, 0xF4); // x -> 244 -> tile 30
@@ -2222,5 +2241,276 @@ fn alttp_intro_without_the_lamp_backtracks_to_the_house() {
     assert!(
         texts.iter().any(|t| t.to_lowercase().contains("lantern")),
         "backtracks for the lantern instead of pressing on: {texts:?}"
+    );
+}
+
+// ── Room sweeps ─────────────────────────────────────────────────────────────
+// "Show me everything in this room": a generated waypoint chain over whatever the
+// room still holds, rather than an authored route through it. Loot and enemies are
+// the same mechanism with different collectors, so these test the mechanism once
+// through each mode.
+
+/// A dungeon frame with Link at `link`, in room `room` on the upper floor, and no
+/// walls — a bare room for a sweep to find things in.
+fn sweep_room(link: (u16, u16), room: u8) -> Vec<u8> {
+    let mut ram = dungeon_frame(link, (0, 0), &[]);
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    set(0x7E00A0, room);
+    set(0x7E00EE, 0); // upper floor
+    ram
+}
+
+/// Writes sprite slot `slot`: state, kind, world position, health.
+fn sprite_slot(ram: &mut [u8], slot: u32, kind: u8, tile: (u16, u16), hp: u8) {
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    let (x, y) = (tile.0 * 8 + 4, tile.1 * 8 + 4);
+    set(0x7E0DD0 + slot, 0x09); // active
+    set(0x7E0E20 + slot, kind);
+    set(0x7E0D10 + slot, (x & 0xFF) as u8);
+    set(0x7E0D30 + slot, (x >> 8) as u8);
+    set(0x7E0D00 + slot, (y & 0xFF) as u8);
+    set(0x7E0D20 + slot, (y >> 8) as u8);
+    set(0x7E0E50 + slot, hp);
+}
+
+/// Paints a 2x2 chest with its top-left tile at `tile`, as the game lays one out.
+fn chest_tiles(ram: &mut [u8], tile: (u16, u16)) {
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    for dy in 0..2u32 {
+        for dx in 0..2u32 {
+            let (tx, ty) = (tile.0 as u32 + dx, tile.1 as u32 + dy);
+            set(0x7F2000 + (ty & 63) * 64 + (tx & 63), 0x58);
+        }
+    }
+}
+
+#[test]
+fn alttp_a_loot_sweep_waypoints_every_chest_and_pickup_nearest_first() {
+    // The loot collector turns each unopened chest and each loose pickup in the room
+    // into one waypoint. A chest occupies a 2x2 tile block, and must yield ONE
+    // waypoint (at its top-left), not four — the dedupe is what keeps a chest room
+    // from reading as a dozen errands. The chain is sorted nearest-first from Link,
+    // which is what makes the sweep a greedy tour, and is flagged `sweep` so the
+    // dungeon leg takes the nearest reachable errand rather than the furthest.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let mut ram = sweep_room((10, 10), 0x51);
+    chest_tiles(&mut ram, (20, 20)); // far: 160px away
+    sprite_slot(&mut ram, 0, 217, (14, 10), 0); // Green Rupee, near: 32px away
+
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+    let on: Vec<String> = plugin
+        .command("sweep", &ram)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        on.iter().any(|t| t.contains("Loot sweep on")),
+        "the first press arms the loot sweep: {on:?}"
+    );
+
+    // The next frame collects the room and builds the chain.
+    let spoken: Vec<String> = plugin
+        .on_frame(&ram, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        spoken.iter().any(|t| t.contains("Two items to collect")),
+        "the count is announced: {spoken:?}"
+    );
+
+    let script = r#"
+        return #nav_chain .. "|" .. tostring(nav_chain.sweep)
+            .. "|" .. tostring(nav_chain[1].slot)
+            .. "|" .. nav_chain[2].name .. "@" .. nav_chain[2].tx .. "," .. nav_chain[2].ty
+    "#;
+    assert_eq!(
+        plugin.eval(script, &ram).unwrap(),
+        "2|true|0|chest@20,20",
+        "one waypoint per pickup and per chest (its top-left tile), pickup first as the nearer"
+    );
+}
+
+#[test]
+fn alttp_sweep_waypoints_clear_as_their_loot_is_taken_and_hand_the_guide_back() {
+    // Each sweep waypoint carries its own completion test: a chest's tile stops
+    // reading as a chest once opened, and a pickup's sprite slot goes free once
+    // collected. When the last one clears, the sweep says so and stands down — which
+    // is what lets the quest route resume in a room that has been picked clean.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let mut ram = sweep_room((10, 10), 0x51);
+    chest_tiles(&mut ram, (20, 20));
+    sprite_slot(&mut ram, 0, 217, (14, 10), 0);
+
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+    plugin.command("sweep", &ram);
+    plugin.on_frame(&ram, 2);
+
+    // Neither errand is done yet.
+    // `prev` is a file-local the plugin keeps to itself; a done predicate only reads
+    // the module off the state, so a hand-built one is enough here.
+    let probe = r#"
+        local s = { module = 0x07 }
+        local c, i
+        for _, wp in ipairs(nav_chain) do
+          if wp.name == "chest" then c = wp else i = wp end
+        end
+        return tostring(c.done(s, c)) .. "|" .. tostring(i.done(s, i))
+    "#;
+    assert_eq!(
+        plugin.eval(probe, &ram).unwrap(),
+        "false|false",
+        "an unopened chest and an uncollected pickup are both outstanding"
+    );
+
+    // Open the chest (its tiles are rewritten out of the chest range) and take the
+    // pickup (its slot goes inactive).
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        for dy in 0..2u32 {
+            for dx in 0..2u32 {
+                set(0x7F2000 + ((20 + dy) & 63) * 64 + ((20 + dx) & 63), 0x00);
+            }
+        }
+        set(0x7E0DD0, 0x00); // slot 0 free
+    }
+    assert_eq!(
+        plugin.eval(probe, &ram).unwrap(),
+        "true|true",
+        "both clear from the game's own signals, with no bookkeeping of our own"
+    );
+
+    // Run frames until the throttled re-collect notices the room is empty.
+    let mut cleared = false;
+    for f in 3..24 {
+        if plugin
+            .on_frame(&ram, f)
+            .iter()
+            .any(|i| i.text.contains("Room swept"))
+        {
+            cleared = true;
+            break;
+        }
+    }
+    assert!(cleared, "the swept room is announced");
+    assert_eq!(
+        plugin.eval("return tostring(nav_chain)", &ram).unwrap(),
+        "nil",
+        "the sweep drops its chain and hands the guide back"
+    );
+}
+
+#[test]
+fn alttp_a_kill_sweep_waypoints_every_live_enemy_and_follows_it() {
+    // The second press cycles to the enemy sweep. Every live enemy in the room gets a
+    // waypoint — room-wide, not just on-screen, since the point is finding the one
+    // skulking in a corner — and each waypoint rides its sprite, so the guide leads
+    // to where the enemy is now rather than where it was when collected. A struck-out
+    // enemy's waypoint clears itself.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let mut ram = sweep_room((10, 10), 0x51);
+    sprite_slot(&mut ram, 0, 65, (40, 40), 4); // Green Soldier, far corner
+    sprite_slot(&mut ram, 1, 65, (16, 10), 4); // Green Soldier, near
+
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+    plugin.command("sweep", &ram); // loot
+    let on: Vec<String> = plugin
+        .command("sweep", &ram) // enemies
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        on.iter().any(|t| t.contains("Enemy sweep on")),
+        "the second press cycles to the enemy sweep: {on:?}"
+    );
+
+    let spoken: Vec<String> = plugin
+        .on_frame(&ram, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        spoken.iter().any(|t| t.contains("Two enemies to defeat")),
+        "the count is announced: {spoken:?}"
+    );
+    assert_eq!(
+        plugin
+            .eval(
+                r#"return #nav_chain .. "|" .. tostring(nav_chain[1].slot) .. "@" .. nav_chain[1].tx"#,
+                &ram
+            )
+            .unwrap(),
+        "2|1@16",
+        "both enemies, the nearer one first"
+    );
+
+    // The near soldier walks four tiles east; its waypoint goes with it.
+    sprite_slot(&mut ram, 1, 65, (20, 10), 4);
+    plugin.on_frame(&ram, 3);
+    assert_eq!(
+        plugin
+            .eval(r#"return tostring(nav_chain[1].tx)"#, &ram)
+            .unwrap(),
+        "20",
+        "the waypoint follows the enemy that carries it"
+    );
+
+    // Struck out: hp 0 clears its waypoint, and the sweep drops to one target.
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0E50 + 1, 0);
+    }
+    let mut down_to_one = false;
+    for f in 4..40 {
+        plugin.on_frame(&ram, f);
+        if plugin.eval("return tostring(#nav_chain)", &ram).unwrap() == "1" {
+            down_to_one = true;
+            break;
+        }
+    }
+    assert!(
+        down_to_one,
+        "the defeated enemy leaves the sweep, the far one remains"
+    );
+}
+
+#[test]
+fn alttp_a_sweep_of_an_empty_room_says_so_and_leaves_the_guide_alone() {
+    // Arming a sweep in a room with nothing to do must not seize the guide: it
+    // reports the room finished and stands down, so the quest route keeps leading.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let ram = sweep_room((10, 10), 0x51);
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+    plugin.command("sweep", &ram);
+    let spoken: Vec<String> = plugin
+        .on_frame(&ram, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        spoken.iter().any(|t| t.contains("Room swept")),
+        "an empty room reports itself swept: {spoken:?}"
+    );
+    assert_eq!(
+        plugin
+            .eval(
+                "return tostring(SWEEP.chain) .. \"|\" .. tostring(nav_chain)",
+                &ram
+            )
+            .unwrap(),
+        "nil|nil",
+        "no chain is installed, so the quest guide is untouched"
     );
 }
