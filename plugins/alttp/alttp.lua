@@ -2663,6 +2663,77 @@ local function chain_stop()
   chain_last_room = nil
 end
 
+-- Lead one step along the active chain's dungeon leg: pick the waypoint of Link's
+-- current room to head for, and aim the in-room pathfinder at it. Two pick policies,
+-- because two kinds of chain want opposite ends of the room's waypoints:
+--
+--   * An authored quest chain is one long linear route, so the target is the LAST
+--     waypoint of this room Link can currently REACH. A waypoint behind a locked
+--     door is unreachable, so the guide leads to the door (an earlier waypoint)
+--     until it opens, then advances past it. No progress bookkeeping and
+--     backtrack-proof: any room re-aims at its last reachable waypoint.
+--   * A generated sweep chain (`chain.sweep`) is a set of errands in one room with
+--     no order forced on it, so the target is the FIRST reachable one — and since
+--     the sweep keeps its chain sorted nearest-first, that is the closest one left.
+--
+-- A two-level room is ONE contiguous space to the pathfinder: it crosses the
+-- layer-swap stairs on its own, so a waypoint is a candidate whatever floor it is
+-- on — reachability (plan_path across floors, one-way drops respected) is the only
+-- test. Each candidate is snapped and planned on its own floor (wp.level). Re-aim
+-- on a floor change too, since the flip opens or closes cross-floor routes (a
+-- one-way drop is gone once taken). A global so the sweep driver can call it; it
+-- closes over the chain bookkeeping locals above either way.
+function chain_dungeon_leg(s)
+  local ltx, lty = s.x >> 3, s.y >> 3
+  local level = mem.u8(LOWER_LEVEL)
+  local reaimed = chain_last_room ~= s.dungeon_room or chain_last_level ~= level
+  chain_probe_in = chain_probe_in - 1
+  -- Keep following a still-valid route; re-pick the target only when not following
+  -- one, when Link changed rooms or floors, or on the throttled re-probe (which
+  -- catches a door that just opened, making a further waypoint reachable).
+  local cur = nav_chain[nav_chain_i]
+  local following = pathfind_active and cur and cur.room == s.dungeon_room and not reaimed
+  if not following or chain_probe_in <= 0 then
+    chain_probe_in = 12
+    local pick, pgx, pgy, plevel
+    for i, wp in ipairs(nav_chain) do
+      if wp.room == s.dungeon_room and (wp.gate == nil or wp.gate(s, wp)) then
+        if wp.done and wp.done(s, wp) then
+          -- Its objective is already met (a chest looted, a block fully shoved):
+          -- count it reached and never target it again, so the guide advances past it.
+          nav_chain.arrived = math.max(nav_chain.arrived or 0, i)
+        else
+          local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level)
+          if plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then
+            pick, pgx, pgy, plevel = i, gx, gy, wp.level
+            if nav_chain.sweep then break end -- nearest-first: the first reachable errand wins
+          end
+        end
+      end
+      -- A `via` waypoint is a mandatory intermediate: once it is the reachable pick,
+      -- hold the "furthest reachable" scan here until Link has actually arrived at it
+      -- (nav_chain.arrived), so the chain can't shortcut past it to a later same-room
+      -- waypoint. 0x52's escape climbs the ledge and drops back down to dodge the
+      -- soldiers standing on the shorter lower-floor line to the next waypoint.
+      if wp.via and pick == i and (nav_chain.arrived or 0) < i then break end
+    end
+    if pick then
+      nav_chain_i = pick
+      local wp = nav_chain[pick]
+      if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH and (wp.level or 0) == level then
+        nav_chain.arrived = math.max(nav_chain.arrived or 0, pick) -- clears any `via` gate at/behind here
+        if wp.arrival and not chain_cued[pick] then nav_say(wp.arrival); chain_cued[pick] = true end
+        pathfind_stop() -- arrived; go quiet until the next waypoint opens up
+      else
+        if wp.say and not chain_said[pick] then nav_say(wp.say); chain_said[pick] = true end
+        route_set_goal(s, pgx, pgy, plevel)
+      end
+    end
+  end
+  chain_last_room = s.dungeon_room
+  chain_last_level = level
+end
+
 -- ── The main-quest goal engine ──────────────────────────────────────────────
 -- Guidance is data, not per-goal code. GOALS lists the quest's checkpoints in
 -- order; each is a plain record — where it lives, what it says, and the save byte
@@ -2918,6 +2989,260 @@ function key_holder(s)
   return best
 end
 
+-- ── Room sweeps ─────────────────────────────────────────────────────────────
+-- "Show me everything in this room." A sweep is a generated waypoint chain rather
+-- than an authored one: a collector lists what the room still holds, each item
+-- becomes a waypoint that clears itself when its own errand is done, and the chain
+-- is re-collected as the room changes under Link. Everything downstream — the A*
+-- route, the guide tone, the map overlay, the arrival handling — is the ordinary
+-- chain machinery, so a sweep costs a collector and nothing else.
+--
+-- The whole mode is deliberately generic: `loot` and `kill` differ only in what
+-- their collector returns and how a target reads as finished. A future sweep (every
+-- pot to lift, every torch to light) is another entry in SWEEP.MODES.
+--
+-- One sweep runs at a time, per room, until toggled off. While it has anything left
+-- it drives the guide, overriding the quest route; when the room is finished it says
+-- so, goes quiet and hands the guide back, then re-collects on entering the next
+-- room. Globals throughout (like PUSH) to stay under the chunk's 200-local cap and
+-- to let MCP inspect the live sweep.
+SWEEP = {
+  kind = nil,    -- "loot" | "kill" while a sweep runs, else nil
+  chain = nil,   -- the generated chain, while it has targets left
+  room = nil,    -- the room it was collected for
+  level = nil,   -- and the floor, since tile targets are read off one floor
+  sig = nil,     -- identity of the outstanding target set, so the chain is rebuilt only on change
+  said = nil,    -- last count announced, so a steady room is not re-announced
+  probe = 0,     -- frames until the next re-collect
+}
+SWEEP.PROBE = 15   -- frames between re-collections; a sprite scan plus a tile scan
+SWEEP.KEYS = { [228] = true, [229] = true } -- small key / big key sprite drops
+
+-- A tile target is finished when its tile stops reading as a chest — the game
+-- rewrites an opened chest's tile out of the chest range, so this needs no flag.
+function SWEEP.tile_done(s, wp)
+  local a = tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level)
+  return a == nil or not CHEST_TILES[a]
+end
+
+-- A sprite target is gone when its slot is free or has been reused by something
+-- else. The kind is part of the identity precisely because slots are recycled.
+function SWEEP.sprite_gone(s, wp)
+  return wp.slot == nil or mem.u8(SPRITE.state + wp.slot) == 0
+    or mem.u8(SPRITE.kind + wp.slot) ~= wp.kind
+end
+
+-- An enemy is finished when it is gone or out of health. (A defeated enemy lingers
+-- a few frames as its death animation, at hp 0 — done the moment it is struck out.)
+function SWEEP.enemy_done(s, wp)
+  return SWEEP.sprite_gone(s, wp) or (mem.u8(SPRITE.hp + wp.slot) or 0) == 0
+end
+
+-- The 512-pixel room window Link stands in, as world tile coordinates. Sprites
+-- outside it belong to a neighbouring room that happens to be loaded.
+function SWEEP.window(s)
+  local ox, oy = s.x - s.x % 512, s.y - s.y % 512
+  return ox, oy
+end
+
+-- Everything in the room worth picking up: unopened chests, loose pickups, and key
+-- drops. Chests are tiles, not sprites, and each occupies a 2x2 block — only its
+-- top-left tile is taken, so one chest is one waypoint rather than four. Tiles are
+-- read off the floor Link is on (the collision table only describes one at a time),
+-- so a two-floor room is swept a floor at a time; sprites are room-wide.
+function SWEEP.loot(s)
+  local out = {}
+  local level = mem.u8(LOWER_LEVEL)
+  local ox, oy = SWEEP.window(s)
+  local otx, oty = ox >> 3, oy >> 3
+  for y = 0, 63 do
+    for x = 0, 63 do
+      local a = tile_attr_at(s, (otx + x) * 8, (oty + y) * 8, level)
+      if a and CHEST_TILES[a] then
+        local w = x > 0 and tile_attr_at(s, (otx + x - 1) * 8, (oty + y) * 8, level)
+        local n = y > 0 and tile_attr_at(s, (otx + x) * 8, (oty + y - 1) * 8, level)
+        if not (w and CHEST_TILES[w]) and not (n and CHEST_TILES[n]) then
+          out[#out + 1] = { tx = otx + x, ty = oty + y, level = level, name = "chest",
+            id = "c" .. (otx + x) .. "." .. (oty + y), done = SWEEP.tile_done }
+        end
+      end
+    end
+  end
+  for _, sp in ipairs(sprites()) do
+    if (REF.item_types[sp.kind] or SWEEP.KEYS[sp.kind])
+        and sp.x >= ox and sp.x < ox + 512 and sp.y >= oy and sp.y < oy + 512 then
+      out[#out + 1] = { tx = sp.x >> 3, ty = sp.y >> 3, level = level, slot = sp.slot,
+        kind = sp.kind, name = sprite_name(sp.kind),
+        id = "s" .. sp.slot .. "." .. sp.kind, done = SWEEP.sprite_gone }
+    end
+  end
+  return out
+end
+
+-- Every live enemy in the room. Mirrors the room-clear tally (health above zero and
+-- not flagged out of it, matching Sprite_CheckIfRoomIsClear) so the sweep agrees
+-- with the game about what is still standing, but lists them all rather than the
+-- nearest — and room-wide rather than on-screen, since the point is to find the one
+-- skulking in the far corner.
+function SWEEP.kill(s)
+  local out = {}
+  local level = mem.u8(LOWER_LEVEL)
+  local ox, oy = SWEEP.window(s)
+  for _, sp in ipairs(sprites()) do
+    if (sp.hp or 0) > 0 and is_enemy(sp) and (mem.u8(SPRITE_FLAGS4 + sp.slot) & 0x40) == 0
+        and sp.x >= ox and sp.x < ox + 512 and sp.y >= oy and sp.y < oy + 512 then
+      out[#out + 1] = { tx = sp.x >> 3, ty = sp.y >> 3, level = level, slot = sp.slot,
+        kind = sp.kind, name = enemy_name(sp),
+        id = "s" .. sp.slot .. "." .. sp.kind, done = SWEEP.enemy_done }
+    end
+  end
+  return out
+end
+
+SWEEP.MODES = {
+  loot = { collect = SWEEP.loot, on = "Loot sweep on.",
+    noun = "item", nouns = "items", verb = "to collect.", clear = "Room swept." },
+  kill = { collect = SWEEP.kill, on = "Enemy sweep on.",
+    noun = "enemy", nouns = "enemies", verb = "to defeat.", clear = "Room clear." },
+}
+
+-- The outstanding target set's identity: what has to change before the chain is
+-- worth rebuilding. Positions are deliberately left out — a wandering enemy moves
+-- every frame but is still the same errand, and its waypoint follows it live.
+function SWEEP.signature(list)
+  local ids = {}
+  for i, t in ipairs(list) do ids[i] = t.id end
+  table.sort(ids)
+  return table.concat(ids, "|")
+end
+
+-- Order the chain nearest-first from Link. The dungeon leg takes the first
+-- reachable waypoint of a sweep chain, so this ordering is what makes the sweep a
+-- greedy tour: always the closest errand left, re-sorted as Link works through them.
+function SWEEP.sort(s, chain)
+  table.sort(chain, function(a, b)
+    return math.abs(a.tx * 8 - s.x) + math.abs(a.ty * 8 - s.y)
+      < math.abs(b.tx * 8 - s.x) + math.abs(b.ty * 8 - s.y)
+  end)
+end
+
+-- Keep each sprite-backed waypoint sitting on its sprite, so the guide leads to
+-- where the enemy is now rather than where it was when collected.
+function SWEEP.follow(s)
+  if SWEEP.chain == nil then return end
+  for _, wp in ipairs(SWEEP.chain) do
+    if wp.slot and not wp.done(s, wp) then
+      wp.tx = (mem.u8(SPRITE.x_lo + wp.slot) + mem.u8(SPRITE.x_hi + wp.slot) * 256) >> 3
+      wp.ty = (mem.u8(SPRITE.y_lo + wp.slot) + mem.u8(SPRITE.y_hi + wp.slot) * 256) >> 3
+    end
+  end
+end
+
+-- Hand the guide back: drop the sweep's chain and force the quest navigator to
+-- re-aim (its signature is unchanged by a sweep, so without this it would sit idle
+-- believing it is still routed).
+function SWEEP.release()
+  if SWEEP.chain and nav_chain == SWEEP.chain then
+    nav_chain = nil
+    nav_chain_i = 1
+  end
+  SWEEP.chain = nil
+  nav_sig = nil
+  nav_idle_sig = nil
+end
+
+-- Re-collect the room and rebuild the chain if the set of outstanding targets has
+-- changed; otherwise just re-sort what is left. Announces the count on a change,
+-- and the mode's "room finished" line once nothing remains.
+function SWEEP.refresh(s)
+  local m = SWEEP.MODES[SWEEP.kind]
+  local list = m.collect(s)
+  local sig = SWEEP.signature(list)
+  if sig == SWEEP.sig then
+    if SWEEP.chain then SWEEP.sort(s, SWEEP.chain) end
+    return
+  end
+  SWEEP.sig = sig
+  if #list == 0 then
+    SWEEP.release()
+    if SWEEP.said ~= "clear" then
+      nav_say(m.clear)
+      SWEEP.said = "clear"
+    end
+    return
+  end
+  local chain = { sweep = true }
+  for i, t in ipairs(list) do
+    chain[i] = { tx = t.tx, ty = t.ty, level = t.level, room = s.dungeon_room,
+      slot = t.slot, kind = t.kind, name = t.name, id = t.id, done = t.done }
+  end
+  SWEEP.sort(s, chain)
+  SWEEP.chain = chain
+  nav_chain = chain
+  nav_chain_i = 1
+  chain_probe_in = 0 -- re-pick immediately against the new set
+  if SWEEP.said ~= #list then
+    nav_say(count_word(#list) .. " " .. (#list == 1 and m.noun or m.nouns) .. " " .. m.verb)
+    SWEEP.said = #list
+  end
+end
+
+-- Per-frame while a sweep is armed, ahead of the quest navigator. Returns whether
+-- the sweep is driving the guide: true while it has targets left in this room, so
+-- the caller stands down; false when it is off, out of a dungeon, or done here, so
+-- the quest route resumes.
+function SWEEP.update(s)
+  if SWEEP.kind == nil or not in_play(s) then return false end
+  if s.module ~= 0x07 then
+    if SWEEP.chain then SWEEP.release() end
+    SWEEP.room = nil
+    return false
+  end
+  local level = mem.u8(LOWER_LEVEL)
+  if SWEEP.room ~= s.dungeon_room or SWEEP.level ~= level then
+    SWEEP.room, SWEEP.level = s.dungeon_room, level
+    SWEEP.sig, SWEEP.said, SWEEP.probe = nil, nil, 0
+    if SWEEP.chain then SWEEP.release() end
+  end
+  SWEEP.probe = SWEEP.probe - 1
+  if SWEEP.probe <= 0 then
+    SWEEP.probe = SWEEP.PROBE
+    SWEEP.refresh(s)
+  end
+  if SWEEP.chain == nil then return false end
+  nav_chain = SWEEP.chain -- reclaim it if the quest navigator re-aimed under us
+  SWEEP.follow(s)
+  chain_dungeon_leg(s)
+  return true
+end
+
+-- The order one key cycles through: off, loot, enemies, off again. A single
+-- binding reaches both modes, which is what the ten-custom-command budget allows —
+-- and SWEEP.set names a mode directly for anything driving the plugin over MCP.
+SWEEP.CYCLE = { "loot", "kill" }
+
+function SWEEP.cycle()
+  local at = 0
+  for i, k in ipairs(SWEEP.CYCLE) do if SWEEP.kind == k then at = i end end
+  local nxt = SWEEP.CYCLE[at + 1]
+  SWEEP.kind = nil -- so set() reads as a switch, never as a toggle-off
+  return SWEEP.set(nxt)
+end
+
+-- Toggle a sweep mode on, or off if it is already the one running. Switching
+-- straight from one mode to the other replaces it. Returns the line to speak.
+function SWEEP.set(kind)
+  if SWEEP.kind == kind then kind = nil end
+  SWEEP.release()
+  SWEEP.kind = kind
+  SWEEP.room, SWEEP.level, SWEEP.sig, SWEEP.said, SWEEP.probe = nil, nil, nil, nil, 0
+  if kind == nil then return "Sweep off." end
+  room_route_stop()
+  ow_route_stop()
+  pathfind_stop()
+  return SWEEP.MODES[kind].on
+end
+
 local ROOM_OBJECTIVES = {
   -- The enemy carrying the key comes first: go for it, then its dropped key, then the
   -- rest. Gated off the Zelda escort out (like the dropped-key objective), since the
@@ -3001,6 +3326,10 @@ end
 -- Per-frame while the assist is on: re-aim when the module or objective changes.
 -- Runs before the followers it feeds so a fresh target takes effect this frame.
 nav_update = function(s)
+  -- A room sweep outranks the quest route while it has errands left in this room,
+  -- and runs whether or not the quest guide is on — it is its own mode. Once the
+  -- room is finished it stands down and the rest of this runs as usual.
+  if SWEEP.update(s) then return end
   if not nav_active or not in_play(s) then return end
   local v = read_progress()
   local sig = nav_signature(s, v)
@@ -3078,63 +3407,9 @@ nav_update = function(s)
         ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
       end
     else
-      -- Dungeon leg. The quest is one long linear route; in whatever room Link is in,
-      -- head to the LAST chain waypoint of that room he can currently REACH. A
-      -- waypoint behind a locked door is unreachable, so the guide leads to the door
-      -- (an earlier waypoint) until it is opened, then advances to the one beyond.
-      -- No progress bookkeeping and backtrack-proof: any room re-aims at its last
-      -- reachable waypoint. A room's sub-goal already took precedence above.
-      -- A two-level room is ONE contiguous space to the pathfinder: it crosses the
-      -- layer-swap stairs on its own, so a waypoint is a candidate whatever floor it
-      -- is on — reachability (plan_path across floors, one-way drops respected) is the
-      -- only test. Each candidate is snapped and planned on its own floor (wp.level).
-      -- Re-aim on a floor change too, since the flip opens or closes cross-floor
-      -- routes (a one-way drop is gone once taken).
-      local level = mem.u8(LOWER_LEVEL)
-      local reaimed = chain_last_room ~= s.dungeon_room or chain_last_level ~= level
-      chain_probe_in = chain_probe_in - 1
-      -- Keep following a still-valid route; re-pick the target only when not
-      -- following one, when Link changed rooms or floors, or on the throttled
-      -- re-probe (which catches a door that just opened, making a further waypoint
-      -- reachable).
-      local cur = nav_chain[nav_chain_i]
-      local following = pathfind_active and cur and cur.room == s.dungeon_room and not reaimed
-      if not following or chain_probe_in <= 0 then
-        chain_probe_in = 12
-        local pick, pgx, pgy, plevel
-        for i, wp in ipairs(nav_chain) do
-          if wp.room == s.dungeon_room and (wp.gate == nil or wp.gate(s, wp)) then
-            if wp.done and wp.done(s, wp) then
-              -- Its objective is already met (a chest looted, a block fully shoved):
-              -- count it reached and never target it again, so the guide advances past it.
-              nav_chain.arrived = math.max(nav_chain.arrived or 0, i)
-            else
-              local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level)
-              if plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then pick, pgx, pgy, plevel = i, gx, gy, wp.level end
-            end
-          end
-          -- A `via` waypoint is a mandatory intermediate: once it is the reachable pick,
-          -- hold the "furthest reachable" scan here until Link has actually arrived at it
-          -- (nav_chain.arrived), so the chain can't shortcut past it to a later same-room
-          -- waypoint. 0x52's escape climbs the ledge and drops back down to dodge the
-          -- soldiers standing on the shorter lower-floor line to the next waypoint.
-          if wp.via and pick == i and (nav_chain.arrived or 0) < i then break end
-        end
-        if pick then
-          nav_chain_i = pick
-          local wp = nav_chain[pick]
-          if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH and (wp.level or 0) == level then
-            nav_chain.arrived = math.max(nav_chain.arrived or 0, pick) -- clears any `via` gate at/behind here
-            if wp.arrival and not chain_cued[pick] then nav_say(wp.arrival); chain_cued[pick] = true end
-            pathfind_stop() -- arrived; go quiet until the next waypoint opens up
-          else
-            if wp.say and not chain_said[pick] then nav_say(wp.say); chain_said[pick] = true end
-            route_set_goal(s, pgx, pgy, plevel)
-          end
-        end
-      end
-      chain_last_room = s.dungeon_room
-      chain_last_level = level
+      -- Dungeon leg: lead to the room's last reachable waypoint. A room's sub-goal
+      -- already took precedence above.
+      chain_dungeon_leg(s)
     end
   end
 end
@@ -3213,6 +3488,12 @@ on_command("advance", function()
   local v = read_progress()
   nav_sig = nav_signature(s, v)
   nav_reaim(s, v)
+end)
+
+-- Sweep the room: lead to every piece of loot in it, then (next press) to every
+-- enemy in it, one waypoint at a time. One key cycles off -> loot -> enemies -> off.
+on_command("sweep", function()
+  say(SWEEP.cycle(), { priority = "navigation", category = "on-demand" })
 end)
 
 on_command("pathfind_stop", function()
