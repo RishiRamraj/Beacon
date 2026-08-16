@@ -138,6 +138,13 @@ PNG the agent can see), the configuration walk (`open_config`, `config_navigate`
 round-trip, stepping, commands, settings, and binding — as a quick check that
 agent control works against your ROM.
 
+`scripts/waypoints.py` is the socket put to work: a line shell for editing the
+ALttP plugin's authored guide routes against the game as you play it. Attach it to
+a `--control` session, walk Link to a spot, and `move 14` puts waypoint 14 exactly
+where you are standing — no reading coordinates out of a debugger. It edits
+`plugins/alttp/waypoints.lua` in place and can `reload` the plugin to try the
+change immediately.
+
 `scripts/capture_map.py <alttp.sfc>` shows the extreme case: an agent boots the
 ROM, skips the intro, creates a save file (navigating the name-entry screen),
 starts a new game, advances the opening until Link is controllable, and fetches
