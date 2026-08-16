@@ -2514,3 +2514,159 @@ fn alttp_a_sweep_of_an_empty_room_says_so_and_leaves_the_guide_alone() {
         "no chain is installed, so the quest guide is untouched"
     );
 }
+
+// ── Waypoint predicates ─────────────────────────────────────────────────────
+// The authored chains are pure data in waypoints.lua, so their gates and dones
+// arrive as declarative clauses that WP compiles into the closures the driver
+// calls. What each chain does with its gates is covered by the route tests above;
+// these cover the clause vocabulary itself, which is the part the editor writes.
+
+/// A bare upper-floor dungeon frame with the given tiles painted (tx, ty, attr).
+fn clause_frame(tiles: &[(u16, u16, u8)]) -> Vec<u8> {
+    let mut ram = dungeon_frame((10, 10), (0, 0), &[]);
+    for &(tx, ty, attr) in tiles {
+        let off = 0x7F2000 + (ty as u32 & 63) * 64 + (tx as u32 & 63);
+        ram[wram_offset(off).unwrap()] = attr;
+    }
+    ram
+}
+
+/// Every clause, against one frame. `s` need only carry the module for a tile
+/// read, so the probe builds a literal rather than reaching for the file-local
+/// state the real drivers pass in.
+const CLAUSE_PROBE: &str = r#"
+  local s = { module = 0x07 }
+  local wp = { tx = 20, ty = 20, level = 0 }   -- the locked door
+  local out = {}
+  local function t(c) out[#out + 1] = tostring(WP.test(s, wp, c)) end
+  t({"tile_inside", 0xF0, 0xFF})                                  -- the door is shut
+  t({"tile_outside", 0xF0, 0xFF})
+  t({"at", 21, 21, 0, {"tile_outside", 0xF0, 0xFF}})              -- the open tile beside it
+  t({"not", {"tile_inside", 0xF0, 0xFF}})
+  t({"any", {"tile_outside", 0xF0, 0xFF}, {"keys"}})              -- open-or-keyed
+  t({"all", {"tile_inside", 0xF0, 0xFF}, {"byte", 0x7EF3C5, 2}})
+  t({"keys"})
+  t({"byte", 0x7EF3C5, 2})
+  t({"byte", 0x7EF3C5, 3})
+  t({"bit", 0x7EF374, 0x02})                                      -- pendant of Wisdom
+  t({"bit", 0x7EF374, 0x04})
+  return table.concat(out, "|")
+"#;
+
+#[test]
+fn alttp_waypoint_clauses_report_the_game_state_they_name() {
+    let r = Registry::builtin();
+    let read = |keys: u8| -> String {
+        // A locked door at (20,20) and open floor at (21,21).
+        let mut ram = clause_frame(&[(20, 20, 0xF0), (21, 21, 0x00)]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7EF36F, keys);
+        set(0x7EF3C5, 2); // quest progress: Zelda delivered
+        set(0x7EF374, 0x02); // pendants: Wisdom only
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.eval(CLAUSE_PROBE, &ram).unwrap()
+    };
+
+    assert_eq!(
+        read(0),
+        "true|false|true|false|false|true|false|true|false|true|false",
+        "keyless, a shut door reads shut and the open-or-keyed gate stays closed"
+    );
+    // The one clause the key moves: open-or-keyed opens on the key alone.
+    assert_eq!(
+        read(1),
+        "true|false|true|false|true|true|true|true|false|true|false",
+        "holding a key opens the open-or-keyed gate, and nothing else changes"
+    );
+}
+
+#[test]
+fn alttp_a_push_clause_reads_the_tracked_sprites_end_stop() {
+    // `pushed` is the one clause about a sprite rather than a tile: the Movable
+    // Mantle latches sprite_G to 0x90 when it can go no further. Before the sprite
+    // is even found (no slot) the errand cannot be done.
+    let r = Registry::builtin();
+    let read = |slot: Option<u8>, latch: u8| -> String {
+        let mut ram = clause_frame(&[]);
+        ram[wram_offset(0x7E0ED0 + 3).unwrap()] = latch;
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        let wp = match slot {
+            Some(n) => format!("{{ tx = 0, ty = 0, slot = {n} }}"),
+            None => "{ tx = 0, ty = 0 }".to_string(),
+        };
+        p.eval(
+            &format!("return tostring(WP.test({{ module = 0x07 }}, {wp}, {{\"pushed\"}}))"),
+            &ram,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        read(None, 0x90),
+        "false",
+        "no tracked sprite yet, so not pushed"
+    );
+    assert_eq!(
+        read(Some(3), 0x00),
+        "false",
+        "the mantle has not reached its stop"
+    );
+    assert_eq!(read(Some(3), 0x90), "true", "latched at the end stop");
+}
+
+#[test]
+fn alttp_an_unknown_clause_never_gates_a_waypoint_shut() {
+    // A typo in waypoints.lua is an editing mistake, not a reason to wedge the
+    // guide: an unrecognised or absent clause degrades to an ungated waypoint.
+    let r = Registry::builtin();
+    let ram = clause_frame(&[]);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    assert_eq!(
+        p.eval(
+            r#"
+              local s, wp = { module = 0x07 }, { tx = 0, ty = 0 }
+              return tostring(WP.test(s, wp, {"frobnicate", 1}))
+                .. "|" .. tostring(WP.test(s, wp, nil))
+                .. "|" .. tostring(WP.test(s, wp, {"any", {"nope"}}))
+            "#,
+            &ram
+        )
+        .unwrap(),
+        "true|true|true",
+        "unknown and absent clauses read as true, nested ones too"
+    );
+}
+
+#[test]
+fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
+    // waypoints.lua is the editor's file: chains, their prose, and clauses. The
+    // plugin compiles the clauses into closures in place at load, so the chain the
+    // driver walks is the same table the file declared.
+    let r = Registry::builtin();
+    let ram = clause_frame(&[]);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    assert_eq!(
+        p.eval(
+            r#"
+              local c, sanct = WAYPOINTS.COURTYARD, WAYPOINTS.SANCTUARY
+              return table.concat({
+                #WAYPOINTS.UNCLE_APPROACH, #c, #sanct,
+                type(c.note),                 -- the chain's own prose
+                type(c[14].note),             -- the locked door's rationale
+                type(c[14].gate),             -- ...compiled from a clause
+                type(c[14].done),
+                type(sanct[12].done),         -- the Movable Mantle's push
+                type(c[1].gate),              -- an ungated waypoint stays ungated
+              }, "|")
+            "#,
+            &ram
+        )
+        .unwrap(),
+        "3|17|20|string|string|function|function|function|nil",
+        "chains arrive whole, prose intact, clauses compiled to closures"
+    );
+}

@@ -380,6 +380,7 @@ fn read_plugin_dir(dir: &Path) -> Result<PluginSpec, Error> {
 const ALTTP_MANIFEST: &str = include_str!("../../../plugins/alttp/alttp.toml");
 const ALTTP_LUA: &str = include_str!("../../../plugins/alttp/alttp.lua");
 const ALTTP_DATA: &str = include_str!("../../../plugins/alttp/data.lua");
+const ALTTP_WAYPOINTS: &str = include_str!("../../../plugins/alttp/waypoints.lua");
 
 /// The set of known plugins and the ROM-hash lookup over them.
 #[derive(Debug, Default, Clone)]
@@ -402,7 +403,10 @@ impl Registry {
             .map(|name| {
                 let source = match name.as_str() {
                     "data.lua" => ALTTP_DATA,
-                    other => panic!("built-in alttp declares module '{other}' with no embedded source"),
+                    "waypoints.lua" => ALTTP_WAYPOINTS,
+                    other => {
+                        panic!("built-in alttp declares module '{other}' with no embedded source")
+                    }
                 };
                 (format!("{name} (built-in)"), source.to_string())
             })

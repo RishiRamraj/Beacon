@@ -9,8 +9,9 @@ script = "alttp.lua"
 
 # Extra Lua files loaded (in order) into the same state before the script. Each is
 # its own chunk with its own local budget, so bulky reference data lives apart from
-# the main logic; data.lua hands its tables over through the global `REF` namespace.
-modules = ["data.lua"]
+# the main logic; data.lua hands its tables over through the global `REF` namespace,
+# waypoints.lua its authored guide chains through `WAYPOINTS`.
+modules = ["data.lua", "waypoints.lua"]
 
 [game]
 name   = "The Legend of Zelda: A Link to the Past"
