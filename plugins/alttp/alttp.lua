@@ -762,8 +762,8 @@ local function tile_passable(s, wtx, wty, level)
   -- A flaggable/locked door (0xF0-0xFF) is solid, EXCEPT the route may lead through one
   -- while Link holds a small key ($7EF36F) to open it — otherwise, with the door still a
   -- hard wall, the pathfinder detours the long way round (up a stair, across the wall on
-  -- the map) instead of the door it means to take. The waypoint's own past_locked_door
-  -- gate still decides whether to aim beyond the door; this just lets the path cross it.
+  -- the map) instead of the door it means to take. The waypoint's own locked-door gate
+  -- still decides whether to aim beyond the door; this just lets the path cross it.
   if attr >= 0xF0 and attr <= 0xFF then return mem.u8(0x7EF36F) > 0 end
   if IMPASSABLE[attr] then return false end
   if s.module == 0x07 and attr == 0x04 then return false end -- indoor wall
@@ -2407,98 +2407,103 @@ end
 local HOUSE_AREA = 0x2C -- Link's house sits on this overworld area (its interior is room 0x104)
 local SANCTUARY_AREA, SANCTUARY_ROOM = 0x13, 0x12
 
--- The overworld approach from Link's house to the castle entrance, as the player's
--- own authored cues (mapped live by playing). The uncle beat drives this chain once
--- Link is in the castle overworld area, so the guide speaks these cues rather than
--- restating the objective. Each cue is an `arrival` line — spoken when Link reaches
--- that spot (in place of the generic "you have arrived"), the guide leading there
--- silently over the sonar path. The last waypoint is the castle-entrance bush.
-local UNCLE_APPROACH = {
-  { tx = 280, ty = 316, arrival = "South of the castle.", cue = true },
-  { tx = 304, ty = 213, arrival = "Pick up the bush." },
-  { tx = 304, ty = 212, arrival = "Enter the tunnel.", after_lift = true },
+-- ===========================================================================
+-- Waypoint predicate compiler.
+--
+-- A waypoint's `gate` (may the guide aim here yet?) and `done` (has this errand
+-- already been carried out?) used to be hand-written closures sitting beside the
+-- coordinates. They now arrive from waypoints.lua as declarative clauses —
+-- {"keys"}, {"tile_outside", 0xF0, 0xFF} — and WP.compile turns each into the
+-- closure the chain driver calls. The point is not brevity: it makes a chain pure
+-- data, so waypoints.lua stays a file the editor (scripts/waypoints.py) can read,
+-- rewrite and hand back without ever parsing Lua code.
+--
+-- Every clause is evaluated against a focus tile, which defaults to the
+-- waypoint's own live tx/ty/level — so "the door I am standing on" needs no
+-- coordinates at all, and `at` moves the focus when a waypoint depends on some
+-- other square. The clause vocabulary is documented in waypoints.lua, next to the
+-- chains that use it.
+-- ===========================================================================
+WP = {}
+
+WP.PRED = {
+  -- The shape nearly every state test takes, because the game rewrites a tile out
+  -- of its class once the thing is done: a locked door leaves 0xF0-0xFF when
+  -- opened, a chest leaves 0x58-0x5D when looted, a push-block leaves 0x70-0x7F
+  -- when shoved. An unreadable tile (nil — not in a dungeon) counts as outside.
+  tile_outside = function(s, wp, c, tx, ty, level)
+    local a = tile_attr_at(s, tx * 8, ty * 8, level)
+    return a == nil or a < c[2] or a > c[3]
+  end,
+  tile_inside = function(s, wp, c, tx, ty, level)
+    local a = tile_attr_at(s, tx * 8, ty * 8, level)
+    return a ~= nil and a >= c[2] and a <= c[3]
+  end,
+  -- {"at", tx, ty, level, clause}: the same clause about a different tile.
+  at = function(s, wp, c) return WP.test(s, wp, c[5], c[2], c[3], c[4] or 0) end,
+  ["not"] = function(s, wp, c, tx, ty, level) return not WP.test(s, wp, c[2], tx, ty, level) end,
+  any = function(s, wp, c, tx, ty, level)
+    for i = 2, #c do if WP.test(s, wp, c[i], tx, ty, level) then return true end end
+    return false
+  end,
+  all = function(s, wp, c, tx, ty, level)
+    for i = 2, #c do if not WP.test(s, wp, c[i], tx, ty, level) then return false end end
+    return true
+  end,
+  -- Small keys for the current dungeon ($7EF36F). Covers the window after Link has
+  -- the key but before he spends it at the door, so a gate keyed on a real game
+  -- signal re-arms itself rather than latching on a hand-set flag.
+  keys = function(s, wp, c)
+    local v = mem.u8(0x7EF36F)
+    return v ~= nil and v >= (c[2] or 1)
+  end,
+  -- A tracked push sprite at its end stop: the Movable Mantle latches sprite_G
+  -- ($7E0ED0 + slot) to 0x90 when fully shoved (zelda3 Sprite_EE_MovableMantle).
+  pushed = function(s, wp, c)
+    return wp.slot ~= nil and mem.u8(0x7E0ED0 + wp.slot) == (c[2] or 0x90)
+  end,
+  -- Save/WRAM bytes, for the progress the tiles cannot report.
+  byte = function(s, wp, c)
+    local v = mem.u8(c[2])
+    return v ~= nil and v >= (c[3] or 1) and v <= (c[4] or 0xFF)
+  end,
+  bit = function(s, wp, c)
+    local v = mem.u8(c[2])
+    return v ~= nil and (v & c[3]) ~= 0
+  end,
 }
 
--- The courtyard crossing after Uncle, as an ordered waypoint sequence: with the
--- sword in hand Link leaves the uncle room back out to the courtyard, cuts through
--- the two bushes, then enters the castle proper by the door just south of him. The
--- guide leads to each in turn (advancing by proximity), rather than straight at the
--- door — the intended path goes through the bushes, and routing direct would skip
--- them. Coords are world tiles read live from the game; the rooms beyond the door
--- are in the dungeon graph, which routes on to Zelda's cell.
--- The final waypoint carries a `room`, marking it a dungeon point: once through
--- the door Link is inside the castle (room 0x61), and the in-room pathfinder leads
--- him to it. Reaching it retires the chain and hands off to the room-graph route,
--- which carries on through the castle to Zelda's cell.
--- A gate on a waypoint that lies past a locked door: the driver treats the
--- waypoint (and, being later in the chain, the ones after it) as not-yet-eligible
--- until Link can actually pass the door — either he holds a small key to open it,
--- or it is already open. Room 0x71 is open enough on the lower floor that the
--- pathfinder can reach the far waypoint without ever crossing the door, so a pure
--- collision block is not enough; the guide must be told the dependency. The door
--- tile at (dtx,dty,dlvl) reads 0xF0-0xFF while shut and is rewritten out of that
--- range once opened (see IMPASSABLE), so its live value reports the door's state;
--- the key count covers the window after Link has the key but before he spends it
--- at the door. Keyed by a real game signal, not a hand-set flag, so it re-opens on
--- its own. Small keys for the current dungeon live at $7EF36F.
-local CUR_DUNGEON_KEYS = 0x7EF36F
-local function past_locked_door(dtx, dty, dlvl)
-  return function(s)
-    if mem.u8(CUR_DUNGEON_KEYS) > 0 then return true end
-    local a = tile_attr_at(s, dtx * 8, dty * 8, dlvl)
-    return a == nil or a < 0xF0 or a > 0xFF
-  end
+-- Evaluates one clause. An absent or unrecognised clause reads as true, so a typo
+-- in waypoints.lua can never wedge the guide by gating a waypoint shut forever —
+-- it degrades to an ungated waypoint, which is the pre-gate behaviour.
+function WP.test(s, wp, c, tx, ty, level)
+  if type(c) ~= "table" then return true end
+  local f = WP.PRED[c[1]]
+  if f == nil then return true end
+  if tx == nil then tx, ty, level = wp.tx, wp.ty, wp.level or 0 end
+  return f(s, wp, c, tx, ty, level) and true or false
 end
 
-local COURTYARD = {
-  { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
-  { tx = 256, ty = 225, say = "Go to the castle." },
-  { tx = 335, ty = 379, room = 0x55, level = 0 }, -- sewer room where the uncle is met
-  { tx = 72, ty = 415, room = 0x61, say = "Find Zelda." },
-  { tx = 47, ty = 392, room = 0x60, level = 1 },
-  { tx = 57, ty = 335, room = 0x50, level = 1 },
-  { tx = 95, ty = 11, room = 0x01, level = 1 },
-  { tx = 159, ty = 472, room = 0x72, level = 0 }, -- south-door exit (upper floor, after the guard/key/chest)
-  { tx = 153, ty = 491, room = 0x72, level = 0 }, -- mouth of the layer-swap stairs
-  { tx = 149, ty = 507, room = 0x72, level = 1 }, -- lower floor, reached down those stairs
-  { tx = 129, ty = 560, room = 0x82, level = 1 },
-  { tx = 79, ty = 518, room = 0x81, level = 1 },
-  { tx = 88, ty = 495, room = 0x71, level = 1 }, -- lower-floor anchor by the chest, where the route to the next room (0x70) and its key-soldier begins
-  { tx = 79, ty = 486, room = 0x71, level = 0, gate = function(s) return mem.u8(0x7EF36F) > 0 end, done = function(s, wp) local a = tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level or 0); return a == nil or a < 0xF0 or a > 0xFF end }, -- the locked door itself, up on the UPPER floor (2x2 at 79-80,485-486). Reached by a clean straight climb up the swap stair and north — no floor-flip back to L1, so no wall-cross. gate: only a target once Link holds a key to open it; done: clears once the door's tile stops reading as locked (0xF0-0xFF).
-  { tx = 84, ty = 455, room = 0x71, level = 1, gate = function(s) local a = tile_attr_at(s, 79 * 8, 486 * 8, 0); return a == nil or a < 0xF0 or a > 0xFF end }, -- floor-1 door out of 0x71. gate: not a target until the locked door above (79,486) is actually OPEN — so Link is led to unlock that door first rather than aimed here early (which forces the pathfinder up-and-back through the wall). Once the door is open the way to here is clear.
-  { tx = 10, ty = 452, room = 0x70, level = 0 }, -- into room 0x70
-  { tx = 44, ty = 518, room = 0x80, say = "Free Princess Zelda." }, -- her cell, down the stairs from 0x70 — the rescue
-}
+function WP.compile(c)
+  return function(s, wp) return WP.test(s, wp, c) end
+end
 
--- The escort back out: once Zelda is freed the return trip leads up through the
--- castle to the hidden north passage and out to the Sanctuary. Authored room by
--- room by playing it (the room-graph heuristic just heads for the nearest exit,
--- which does not know the hidden passage). Wired to the "sanct" goal; grows as the
--- route is walked.
-local SANCTUARY = {
-  { tx = 10, ty = 516, room = 0x80, level = 0 }, -- up out of Zelda's cell room, the start of the climb
-  { tx = 20, ty = 452, room = 0x70, level = 0 }, -- back up in 0x70, starting the climb out
-  { tx = 79, ty = 503, room = 0x71, level = 1 }, -- up into 0x71 (the boomerang chest room), lower floor
-  { tx = 124, ty = 524, room = 0x81, level = 0 }, -- up into 0x81 (the guardroom above 0x71)
-  { tx = 134, ty = 512, room = 0x82, level = 0 }, -- up into 0x82, upper floor
-  { tx = 159, ty = 455, room = 0x72, level = 0 }, -- up into 0x72, upper floor
-  { tx = 119, ty = 15, room = 0x01, level = 1 }, -- up into 0x01, lower floor
-  { tx = 151, ty = 369, room = 0x52, level = 0, via = true }, -- UP over the right-side ledge (via = mandatory): the escape climbs the stairs and drops back down here to dodge the soldiers on the lower-floor line.
-  { tx = 143, ty = 375, room = 0x52, level = 1 }, -- down the stair to 0x52's lower floor, continuing the escape
-  { tx = 136, ty = 415, room = 0x62, level = 1 }, -- south into 0x62, lower floor (on the open floor east of the wall)
-  { tx = 95, ty = 389, room = 0x61, level = 0 }, -- west into 0x61, upper floor
-  { tx = 91, ty = 326, room = 0x51, level = 0, track = 0xEE, track_dx = -2, track_dy = 2, push = 6,
-    done = function(s, wp) return wp.slot ~= nil and mem.u8(0x7E0ED0 + wp.slot) == 0x90 end }, -- the throne-room Movable Mantle (sprite 0xEE): a push waypoint. Tracks the mantle's live sprite, offset (-2,+2) onto its left/push side; push = 6 (face east) to shove it. done: the mantle latches sprite_G ($7E0ED0+slot) to 0x90 at its end stop (zelda3 Sprite_EE_MovableMantle), so the tone stops and the chain advances once fully pushed. tx/ty are the fallback until the sprite loads. Zelda's dialogue narrates the push.
-  { tx = 117, ty = 260, room = 0x41, level = 0 }, -- north through the opened passage into 0x41, upper floor
-  { tx = 159, ty = 261, room = 0x42, level = 0 }, -- east into 0x42, upper floor
-  { tx = 176, ty = 218, room = 0x32, level = 0, done = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return not (a >= 0x58 and a <= 0x5D) end }, -- north into 0x32 to the chest (2x2 at 176-177,218-219). done: the chest's own tile stops reading as a chest tile (0x58-0x5D) once opened — a direct signal, unlike the $7EF000 chest-opened bit which is not set for this room.
-  { tx = 159, ty = 197, room = 0x32, level = 0, gate = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return a < 0xF0 or a > 0xFF or mem.u8(0x7EF36F) > 0 end }, -- the locked door north (2x2 at 159-160,197-198). gate: an OPEN door (tile no longer 0xF0-0xFF) is always a target so the guide leads Link through it; a still-locked door is a target only once he holds a small key ($7EF36F), else the guide stays on the chest (its key) rather than a door he cannot open.
-  { tx = 131, ty = 175, room = 0x22, level = 0 }, -- north into 0x22, upper floor
-  { tx = 111, ty = 133, room = 0x21, level = 0, gate = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return a < 0xF0 or a > 0xFF or mem.u8(0x7EF36F) > 0 end }, -- west into 0x21, then the locked door north (2x2 at 111-112,133-134). Same open-or-keyed gate as 0x32: an open door is always a target; a locked one only once Link holds a key (the key-holder rat here drops it).
-  { tx = 111, ty = 76, room = 0x11, level = 0, push = 0,
-    done = function(s, wp) local a = mem.u8((wp.level == 1 and 0x7F3000 or 0x7F2000) + (wp.ty & 63) * 64 + (wp.tx & 63)); return a < 0x70 or a > 0x7F end }, -- north into 0x11 to the dungeon push-block (tile 0x76 at 111-112,76-77). A TILE push obstacle (no sprite to track), so just push = 0 (face north) drives the alignment tone. done: once shoved, its tile stops reading as a push-block (0x70-0x7F) — so the tone goes silent when the block can move no further.
-  { tx = 111, ty = 68, room = 0x11, level = 0, gate = function(s) local a = mem.u8(0x7F2000 + (76 & 63) * 64 + (111 & 63)); return a < 0x70 or a > 0x7F end }, -- north through where the block was, further into 0x11. Gated on the push-block (111,76) being SHOVED: the way north is a dead end until then (the pathfinder can slip around the block on the open floor beside it, so a collision block alone would not hold the guide back — the block's pushed state is the real gate).
-}
+-- Compiles a chain's declarative gate/done clauses into the closures the driver
+-- calls, in place, and hands the chain back.
+function WP.chain(list)
+  for _, wp in ipairs(list) do
+    if type(wp.gate) == "table" then wp.gate = WP.compile(wp.gate) end
+    if type(wp.done) == "table" then wp.done = WP.compile(wp.done) end
+  end
+  return list
+end
+
+-- The authored chains themselves live in waypoints.lua, loaded ahead of this
+-- script by the manifest. Each carries its own prose: what the chain is for, and
+-- why each waypoint sits where it does.
+local UNCLE_APPROACH = WP.chain(WAYPOINTS.UNCLE_APPROACH)
+local COURTYARD = WP.chain(WAYPOINTS.COURTYARD)
+local SANCTUARY = WP.chain(WAYPOINTS.SANCTUARY)
 
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
 -- world-tile waypoints. The overworld guide homes on the active one

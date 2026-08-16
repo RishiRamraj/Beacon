@@ -156,6 +156,14 @@ the rest, but a data module normally touches none of it. There is no `require` a
 filesystem access; the host loads exactly the files the manifest names, from the
 plugin's directory (or, for a built-in, compiled in).
 
+The budget is the usual reason to split, but not the only one. Because the sandbox has
+no filesystem access, a module is also the only way a plugin can *read* authored data,
+which makes it the natural home for anything a person or a tool edits: the reference
+plugin's `waypoints.lua` holds hand-mapped guide routes under a `WAYPOINTS` global,
+and an editor rewrites that file directly. Data meant to be edited should stay data —
+`waypoints.lua` states a route's conditions as clauses (`{"keys"}`) that the script
+compiles into predicates, rather than as Lua functions the editor would have to parse.
+
 ---
 
 ## Host API reference
