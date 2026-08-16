@@ -127,6 +127,9 @@ settings — without taking over the window.
 beacon rom.sfc --control        # window runs; agent attaches over the socket
 ```
 
+Several clients can attach at once, so an agent assisting you and a tool of your
+own (`scripts/waypoints.py`, below) can both be connected while you play.
+
 The tools are self-describing (`tools/list`); highlights: `get_state`,
 `read_memory`, `step`, `set_buttons`, `run_command`, `save_state` / `load_state`,
 `list_actions`, `bind` / `unbind`, `set_setting`, `get_map` (the plugin's map as a
