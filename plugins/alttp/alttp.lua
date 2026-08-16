@@ -3023,11 +3023,58 @@ SWEEP = {
 SWEEP.PROBE = 15   -- frames between re-collections; a sprite scan plus a tile scan
 SWEEP.KEYS = { [228] = true, [229] = true } -- small key / big key sprite drops
 
--- A tile target is finished when its tile stops reading as a chest — the game
--- rewrites an opened chest's tile out of the chest range, so this needs no flag.
+-- A tile target is finished when its tile stops answering to the class that found
+-- it — the game rewrites the tile once the errand is done (an opened chest leaves
+-- the chest range, a lifted pot stops being a pot), so this needs no flag of its
+-- own. The class travels with the waypoint as `is`, since a sweep's targets all
+-- came from one.
 function SWEEP.tile_done(s, wp)
-  local a = tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level)
-  return a == nil or not CHEST_TILES[a]
+  return not wp.is(tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level))
+end
+
+function SWEEP.is_chest(attr)
+  return attr ~= nil and CHEST_TILES[attr] ~= nil
+end
+
+-- A dungeon's manipulable objects all read as attr 0x70-0x7F, so the tile alone
+-- cannot say whether a thing is a pot to lift, a block to push, or a hammer peg.
+-- What tells them apart is the room's replacement-state slot that the tile's low
+-- nibble indexes: sixteen 16-bit entries at $7E0500, one per manipulable object
+-- the room drew. The game sets 0x1111 for a pot (RoomDraw_SinglePot), 0 for a
+-- pushable block, 0x4040 for a hammer peg, and lifts only what masks to 0x1010
+-- (Dungeon_LiftAndReplaceLiftable) — so that mask is the test, read exactly as the
+-- game's own lift check reads it. A lifted pot's slot stops matching, which is
+-- what retires its waypoint.
+MANIP_STATE = 0x7E0500
+function SWEEP.is_pot(attr)
+  if attr == nil or attr < 0x70 or attr > 0x7F then return false end
+  local st = mem.u16(MANIP_STATE + (attr & 0x0F) * 2)
+  return st ~= nil and (st & 0xF0F0) == 0x1010
+end
+
+-- Every tile of a class in the room window, as one target per cluster. The things
+-- worth sweeping are drawn 2x2 (a chest, a pot), so a tile is taken only when its
+-- west and north neighbours are not the same class — one object, one waypoint,
+-- rather than four stacked on each other.
+function SWEEP.tile_targets(s, is, name)
+  local out = {}
+  local level = mem.u8(LOWER_LEVEL)
+  local ox, oy = SWEEP.window(s)
+  local otx, oty = ox >> 3, oy >> 3
+  for y = 0, 63 do
+    for x = 0, 63 do
+      if is(tile_attr_at(s, (otx + x) * 8, (oty + y) * 8, level)) then
+        local w = x > 0 and tile_attr_at(s, (otx + x - 1) * 8, (oty + y) * 8, level) or nil
+        local n = y > 0 and tile_attr_at(s, (otx + x) * 8, (oty + y - 1) * 8, level) or nil
+        if not is(w) and not is(n) then
+          out[#out + 1] = { tx = otx + x, ty = oty + y, level = level, name = name,
+            is = is, id = name:sub(1, 1) .. (otx + x) .. "." .. (oty + y),
+            done = SWEEP.tile_done }
+        end
+      end
+    end
+  end
+  return out
 end
 
 -- A sprite target is gone when its slot is free or has been reused by something
@@ -3060,23 +3107,9 @@ end
 -- on the upper floor and a re-arm on the way down reads as helpful or as a bug is a
 -- question for a real two-floor room.
 function SWEEP.loot(s)
-  local out = {}
+  local out = SWEEP.tile_targets(s, SWEEP.is_chest, "chest")
   local level = mem.u8(LOWER_LEVEL)
   local ox, oy = SWEEP.window(s)
-  local otx, oty = ox >> 3, oy >> 3
-  for y = 0, 63 do
-    for x = 0, 63 do
-      local a = tile_attr_at(s, (otx + x) * 8, (oty + y) * 8, level)
-      if a and CHEST_TILES[a] then
-        local w = x > 0 and tile_attr_at(s, (otx + x - 1) * 8, (oty + y) * 8, level)
-        local n = y > 0 and tile_attr_at(s, (otx + x) * 8, (oty + y - 1) * 8, level)
-        if not (w and CHEST_TILES[w]) and not (n and CHEST_TILES[n]) then
-          out[#out + 1] = { tx = otx + x, ty = oty + y, level = level, name = "chest",
-            id = "c" .. (otx + x) .. "." .. (oty + y), done = SWEEP.tile_done }
-        end
-      end
-    end
-  end
   for _, sp in ipairs(sprites()) do
     if (REF.item_types[sp.kind] or SWEEP.KEYS[sp.kind])
         and sp.x >= ox and sp.x < ox + 512 and sp.y >= oy and sp.y < oy + 512 then
@@ -3108,11 +3141,20 @@ function SWEEP.kill(s)
   return out
 end
 
+-- Every pot still standing. Pots hide the room's small change — hearts, rupees,
+-- the odd key — but a player who cannot see them has no way to know a room holds
+-- any, which is exactly the sort of thing sighted players get for free.
+function SWEEP.lift(s)
+  return SWEEP.tile_targets(s, SWEEP.is_pot, "pot")
+end
+
 SWEEP.MODES = {
   loot = { collect = SWEEP.loot, on = "Loot sweep on.",
     noun = "item", nouns = "items", verb = "to collect.", clear = "Room swept." },
   kill = { collect = SWEEP.kill, on = "Enemy sweep on.",
     noun = "enemy", nouns = "enemies", verb = "to defeat.", clear = "Room clear." },
+  lift = { collect = SWEEP.lift, on = "Pot sweep on.",
+    noun = "pot", nouns = "pots", verb = "to lift.", clear = "Nothing left to lift." },
 }
 
 -- The outstanding target set's identity: what has to change before the chain is
@@ -3180,10 +3222,17 @@ function SWEEP.refresh(s)
     end
     return
   end
+  -- Copied rather than used directly, because the chain is mutated as it is walked
+  -- (a sprite waypoint's position follows its sprite, the driver marks arrivals)
+  -- and the collector should be free to hand back the same table twice. The copy is
+  -- wholesale: listing the fields by hand meant a collector could add one — the tile
+  -- class a `done` predicate needs, say — and have it silently dropped here.
   local chain = { sweep = true }
   for i, t in ipairs(list) do
-    chain[i] = { tx = t.tx, ty = t.ty, level = t.level, room = s.dungeon_room,
-      slot = t.slot, kind = t.kind, name = t.name, id = t.id, done = t.done }
+    local wp = {}
+    for k, v in pairs(t) do wp[k] = v end
+    wp.room = s.dungeon_room -- what makes it a dungeon waypoint to the driver
+    chain[i] = wp
   end
   SWEEP.sort(s, chain)
   SWEEP.chain = chain
@@ -3228,7 +3277,7 @@ end
 -- The order one key cycles through: off, loot, enemies, off again. A single
 -- binding reaches both modes, which is what the ten-custom-command budget allows —
 -- and SWEEP.set names a mode directly for anything driving the plugin over MCP.
-SWEEP.CYCLE = { "loot", "kill" }
+SWEEP.CYCLE = { "loot", "kill", "lift" }
 
 function SWEEP.cycle()
   local at = 0
