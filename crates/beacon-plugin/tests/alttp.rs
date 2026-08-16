@@ -2670,3 +2670,81 @@ fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
         "chains arrive whole, prose intact, clauses compiled to closures"
     );
 }
+
+/// Frames between sweep re-collections (SWEEP.PROBE), plus one to land past it.
+const SWEEP_PROBE_FRAMES: u64 = 16;
+
+/// Paints a 2x2 manipulable object at `tile` using object slot `slot`, and sets
+/// that slot's replacement state — which is what says whether it is a pot.
+fn manip_object(ram: &mut [u8], tile: (u16, u16), slot: u8, state: u16) {
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    for dy in 0..2u32 {
+        for dx in 0..2u32 {
+            let (tx, ty) = (tile.0 as u32 + dx, tile.1 as u32 + dy);
+            set(0x7F2000 + (ty & 63) * 64 + (tx & 63), 0x70 | slot);
+        }
+    }
+    set(0x7E0500 + slot as u32 * 2, (state & 0xFF) as u8);
+    set(0x7E0500 + slot as u32 * 2 + 1, (state >> 8) as u8);
+}
+
+#[test]
+fn alttp_a_pot_sweep_finds_pots_and_leaves_the_pushable_block_alone() {
+    // Both are attr 0x70-0x7F: the tile cannot tell them apart, only the room's
+    // replacement-state slot can. RoomDraw_SinglePot writes 0x1111 for a pot and
+    // DrawObjects_PushableBlock writes 0 for a block, and the game lifts only what
+    // masks to 0x1010 — so a sweep that read the tile alone would send the player
+    // to heave at a block that does not lift.
+    let r = Registry::builtin();
+    let mut ram = sweep_room((10, 10), 0x55);
+    manip_object(&mut ram, (20, 20), 0x1, 0x1111); // a pot
+    manip_object(&mut ram, (30, 30), 0x2, 0x0000); // a pushable block
+    manip_object(&mut ram, (40, 40), 0x3, 0x4040); // a hammer peg
+    manip_object(&mut ram, (16, 16), 0x4, 0x1111); // a nearer pot
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    // off -> loot -> kill -> pots
+    p.command("sweep", &ram);
+    p.command("sweep", &ram);
+    let spoken = p.command("sweep", &ram);
+    assert!(
+        spoken.iter().any(|i| i.text.contains("Pot sweep on")),
+        "the third press reaches the pot sweep: {spoken:?}"
+    );
+    p.on_frame(&ram, 2);
+
+    assert_eq!(
+        p.eval(
+            r#"
+              local out = {}
+              for _, wp in ipairs(SWEEP.chain or {}) do
+                out[#out + 1] = wp.name .. "@" .. wp.tx .. "," .. wp.ty
+              end
+              return #out .. "|" .. table.concat(out, " ")
+            "#,
+            &ram
+        )
+        .unwrap(),
+        "2|pot@16,16 pot@20,20",
+        "both pots, one waypoint each despite the 2x2, nearest first; no block, no peg"
+    );
+
+    // Lifting a pot clears its slot's pot state, and its waypoint retires with it.
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0500 + 0x4 * 2, 0x00);
+        set(0x7E0500 + 0x4 * 2 + 1, 0x00);
+    }
+    // Targets are re-collected on a timer, not every frame, so run past it.
+    for f in 3..3 + SWEEP_PROBE_FRAMES {
+        p.on_frame(&ram, f);
+    }
+    assert_eq!(
+        p.eval("return tostring(SWEEP.chain and #SWEEP.chain)", &ram)
+            .unwrap(),
+        "1",
+        "the lifted pot's waypoint is dropped, the other stays"
+    );
+}
