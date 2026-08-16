@@ -3054,7 +3054,11 @@ end
 -- drops. Chests are tiles, not sprites, and each occupies a 2x2 block — only its
 -- top-left tile is taken, so one chest is one waypoint rather than four. Tiles are
 -- read off the floor Link is on (the collision table only describes one at a time),
--- so a two-floor room is swept a floor at a time; sprites are room-wide.
+-- so a two-floor room is swept a floor at a time; sprites are room-wide. That last
+-- part is reasoned from how the table works, not yet watched happening: the sweeps
+-- have been verified live in a single-floor room (0x72) only. Whether "Room swept"
+-- on the upper floor and a re-arm on the way down reads as helpful or as a bug is a
+-- question for a real two-floor room.
 function SWEEP.loot(s)
   local out = {}
   local level = mem.u8(LOWER_LEVEL)
