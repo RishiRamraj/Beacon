@@ -313,9 +313,18 @@ class Session:
         self.why = ""
         try:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            # A timeout rather than a blocking wait: a socket that accepts but
+            # never answers (an older Beacon serving one client at a time, with
+            # something else already attached) would otherwise hang here forever
+            # with nothing to explain it.
+            s.settimeout(5.0)
             s.connect(path)
             self.io = s.makefile("rw", encoding="utf-8", newline="\n")
             self.rpc("initialize")
+        except socket.timeout:
+            self.io = None
+            self.why = (f"{path} accepted but did not answer — another client may"
+                        " be attached to this session")
         except OSError as e:
             self.io = None
             self.why = f"no session at {path} ({e.strerror})"

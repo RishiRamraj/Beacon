@@ -173,8 +173,15 @@ pub(crate) fn connect_bridge() -> std::io::Result<()> {
 /// This is the attach-to-a-running-session transport: the windowed app keeps the
 /// session on its own thread and drains this each event-loop wake, so an agent
 /// can pause, inspect, and adjust a live playthrough without the socket ever
-/// touching the session directly. One client at a time; when it disconnects the
-/// next is accepted.
+/// touching the session directly.
+///
+/// Each client gets its own thread, so several can attach at once — an agent
+/// assisting the player while a tool of the player's own edits the plugin, say.
+/// Served serially one at a time instead, a second client would connect, be
+/// queued behind the first, and hang with no reply and no way to tell why.
+/// Concurrency here is safe because a connection never touches the session: every
+/// call goes down the same channel and is run, one at a time, by whichever thread
+/// owns the session.
 pub(crate) fn serve_socket(path: &Path) -> std::io::Result<Receiver<Request>> {
     use std::os::unix::net::UnixListener;
 
@@ -190,12 +197,15 @@ pub(crate) fn serve_socket(path: &Path) -> std::io::Result<Receiver<Request>> {
                 continue;
             };
             let handler = ChannelHandler { tx: tx.clone() };
-            let info = ServerInfo {
-                name: "beacon".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            };
-            // Blocks until the client disconnects, then loops to the next.
-            let _ = beacon_mcp::serve(reader, stream, info, &handler);
+            std::thread::spawn(move || {
+                let info = ServerInfo {
+                    name: "beacon".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                };
+                // Ends when this client disconnects; the accept loop is already
+                // back waiting for the next one.
+                let _ = beacon_mcp::serve(reader, stream, info, &handler);
+            });
         }
     });
     Ok(rx)
@@ -567,4 +577,59 @@ fn tool_defs() -> Vec<ToolDef> {
         ToolDef::new("config_clear", "Clear the selected action's bindings.", none()),
         ToolDef::new("config_close", "Close the input configuration and resume.", none()),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    /// Two clients attached at once both get served.
+    ///
+    /// Served one at a time, the second client's `initialize` would sit in the
+    /// accept backlog unanswered until the first disconnected — which is exactly
+    /// what a player hits running the waypoint editor while an agent is attached.
+    #[test]
+    fn the_control_socket_serves_several_clients_at_once() {
+        let dir = std::env::temp_dir().join(format!("beacon-sock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("control.sock");
+        let rx = serve_socket(&path).unwrap();
+
+        // Nothing drains the request channel here, so hold a client that has
+        // issued no tool call: `initialize` is answered by the protocol layer.
+        let mut first = connect(&path);
+        assert!(handshake(&mut first).contains("protocolVersion"));
+
+        // The second client attaches while the first is still connected.
+        let mut second = connect(&path);
+        assert!(
+            handshake(&mut second).contains("protocolVersion"),
+            "a second client must be served while the first is still attached"
+        );
+
+        drop(rx);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn connect(path: &Path) -> BufReader<UnixStream> {
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(path) {
+                s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                return BufReader::new(s);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("could not connect to {}", path.display());
+    }
+
+    fn handshake(conn: &mut BufReader<UnixStream>) -> String {
+        conn.get_mut()
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n")
+            .unwrap();
+        let mut line = String::new();
+        conn.read_line(&mut line).expect("no reply from the socket");
+        line
+    }
 }
