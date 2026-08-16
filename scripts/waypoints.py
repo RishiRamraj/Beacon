@@ -55,6 +55,17 @@ ADDR = {
     "floor": 0x7E00EE,
 }
 
+# The game modules a position can be read from, and the common ones it cannot, so
+# a refusal can say what the game is busy doing instead. From the disassembly's
+# $7E0010 dispatch table.
+MODULES = {
+    0x05: "entering a dungeon", 0x06: "a menu", 0x07: "in a dungeon",
+    0x09: "on the overworld", 0x0B: "a whirlpool", 0x0E: "a text box or menu",
+    0x0F: "closing a dungeon map", 0x11: "falling into a dungeon",
+    0x12: "dying", 0x13: "the death menu", 0x14: "the file select screen",
+    0x15: "loading a file", 0x17: "the map", 0x19: "the triforce room",
+}
+
 # The order fields are written in: position, then identity, then speech, then
 # behaviour, then conditions. `note` is written last, on its own line.
 FIELD_ORDER = [
@@ -431,9 +442,24 @@ class Editor:
         return "  ".join(bits)
 
     def live(self):
+        """Link's position, but only from a frame where it means something.
+
+        The module byte ($7E0010) is 0x07 in a dungeon and 0x09 on the overworld;
+        every other value is the game doing something else — a death sequence, a
+        menu, a transition — and during those the position is stale or meaningless
+        even though it still reads. Refusing is the whole point: taking the read
+        anyway once silently turned a dungeon waypoint into an overworld one,
+        because the room is only trusted when the module says the room is what is
+        on screen.
+        """
         pos, err = self.session.position()
         if pos is None:
             raise LuaError(err or "no live session")
+        if pos["module"] not in (0x07, 0x09):
+            raise LuaError(
+                f"the game is not in play (module 0x{pos['module']:02X}"
+                f" — {MODULES.get(pos['module'], 'not walking around')});"
+                " get Link back on his feet and try again")
         return pos
 
     def place(self, wp, pos):
@@ -557,6 +583,20 @@ class Editor:
         if not self.session.io:
             raise LuaError(self.session.why)
         out = []
+        # A dungeon's tile grid holds one room at a time, so a clause about a
+        # waypoint in some other room reads whatever tile happens to sit at those
+        # coordinates in the room on screen — a confident, meaningless answer. The
+        # chain driver only ever tests a waypoint in its own room; say so here
+        # rather than let the number be believed.
+        pos, _ = self.session.position()
+        room = wp.fields.get("room")
+        if pos and room is not None:
+            if pos["module"] != 0x07:
+                out.append("(not in a dungeon right now — no room's tiles are loaded,"
+                           " so tile clauses answer from whatever is there)")
+            elif pos["room"] != room.value:
+                out.append(f"(Link is in room 0x{pos['room']:02X}, not {fmt(room, True)}"
+                           " — these read the wrong room's tiles)")
         for key in ("gate", "done"):
             if key not in wp.fields:
                 out.append(f"{key}: (none)")
