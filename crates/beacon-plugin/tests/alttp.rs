@@ -2905,19 +2905,30 @@ fn alttp_facing_a_pit_blips_once_and_says_nothing() {
         .find(|b| b.id == "hazard")
         .expect("a hazard tone sounds");
     assert!(
-        hazard.pitch < 1.0 && hazard.tremolo >= 4.0,
-        "low and urgent: {hazard:?}"
+        hazard.ping,
+        "a sharp attack-decay strike, not a swell: {hazard:?}"
+    );
+    assert!(hazard.tremolo >= 6.0, "and a quick one: {hazard:?}");
+    // Above every object tone (0.7 to 2.0) and above the guide's sonar (3.0 to 3.4), so
+    // there is nothing in the vocabulary it can be mistaken for.
+    assert!(
+        hazard.pitch > 3.4,
+        "pitched clear of everything else: {hazard:?}"
     );
     assert!(
         hazard.dy > 0.0,
         "panned south, where the pit is: {hazard:?}"
     );
 
-    // It persists rather than firing once: the edge is still there next frame.
-    p.on_frame(&ram, 2);
+    // And it stops on its own while Link is still facing the pit — the property a
+    // sustained tone could not have, and the reason it does not bury the other tones
+    // while he edges along a ledge.
+    for f in 2..12 {
+        p.on_frame(&ram, f);
+    }
     assert!(
-        p.beacons().iter().any(|b| b.id == "hazard"),
-        "the tone holds while Link keeps facing it"
+        !p.beacons().iter().any(|b| b.id == "hazard"),
+        "the blip is brief: it does not hold while he keeps facing it"
     );
 }
 

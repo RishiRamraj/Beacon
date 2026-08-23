@@ -683,7 +683,11 @@ end
 -- strike, so facing a pit produces a single crisp blip. Being brief also separates it
 -- from the enemy-weapon tone it used to sit next to in pitch — a one-shot and a
 -- continuous drone cannot be confused however close their frequencies are.
-HAZARD.TONE = { pitch = 0.9, tremolo = 8.0, volume = 0.8 }
+-- Pitched above everything else in the vocabulary. The object tones run 0.7 to 2.0 and
+-- the guide's sonar sits at 3.0-3.4; putting the hazard at 4.0 leaves it nothing to be
+-- confused with, and high-and-sharp reads as a notification demanding attention where
+-- low-and-slow reads as a thing sitting in the room.
+HAZARD.TONE = { pitch = 4.0, tremolo = 8.0, volume = 0.8 }
 HAZARD.BLIP = 8 -- frames it sounds for, about a sixth of a second
 
 -- The world pixel one tile ahead of Link, by facing. Shared reach with the bush
