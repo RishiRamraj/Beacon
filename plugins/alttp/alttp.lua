@@ -310,9 +310,20 @@ end
 -- off from each other, yet at 144 pixels a guard in the far pit lands inside the radius
 -- and holds the room uncleared, or gets picked as the nearest enemy from behind a wall
 -- Link cannot cross. The chamber has the wall in it; the radius does not.
-local function nearest_pending_enemy(s)
+-- Does a sprite at (sx, sy) count toward clearing the room Link is in? An authored
+-- chamber first, since it can be finer than anything the game states; then the bound
+-- the room's own kill tag implies; then a plain radius for a room with no tag at all.
+-- Global so every caller shares one answer.
+function enemy_counts(s, sx, sy)
   local box = room_chamber(s)
+  if box ~= nil then return in_chamber(box, sx, sy) end
   local scope = kill_room(s)
+  if scope == "room" then return true end
+  if scope == "screen" then return on_kill_screen(sx, sy) end
+  return math.abs(sx - s.x) <= ENEMY_ONSCREEN and math.abs(sy - s.y) <= ENEMY_ONSCREEN
+end
+
+local function nearest_pending_enemy(s)
   local best, bd
   for i = 0, 15 do
     local st = mem.u8(SPRITE.state + i)
@@ -323,18 +334,7 @@ local function nearest_pending_enemy(s)
         and (mem.u8(SPRITE.hp + i) or 0) > 0 then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
-      local counts
-      if box ~= nil then
-        counts = in_chamber(box, sx, sy)                  -- authored: finer than the game's
-      elseif scope == "room" then
-        counts = true                                    -- room-wide, as the tag means
-      elseif scope == "screen" then
-        counts = on_kill_screen(sx, sy)                   -- the 256x256 the tag checks
-      else
-        counts = math.abs(sx - s.x) <= ENEMY_ONSCREEN     -- no tag: a plain radius
-          and math.abs(sy - s.y) <= ENEMY_ONSCREEN
-      end
-      if counts then
+      if enemy_counts(s, sx, sy) then
         local d = math.abs(sx - s.x) + math.abs(sy - s.y)
         if bd == nil or d < bd then best, bd = { sx, sy }, d end
       end
@@ -3233,6 +3233,10 @@ local CHEST_ROOMS = { [0x72] = true, [0x71] = true }
 -- random one, when the key is what he is here for. The nearest live match, as {x, y}, or
 -- nil. Global (not local) to stay under the chunk's 200-local cap and to let MCP inspect
 -- it, like the PUSH movable-object helpers.
+-- The enemy still carrying a key, bounded exactly like the room-clear tally is. It
+-- used to scan every slot unbounded, which in room 0x71 meant targeting the guard in
+-- the far pit through the wall between them: the guide aimed at a soldier Link could
+-- not reach and then sat on that goal.
 function key_holder(s)
   local best, bd
   for i = 0, 15 do
@@ -3241,8 +3245,10 @@ function key_holder(s)
         and mem.u8(SPRITE.die + i) ~= 0 then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
-      local d = math.abs(sx - s.x) + math.abs(sy - s.y)
-      if bd == nil or d < bd then best, bd = { sx, sy }, d end
+      if enemy_counts(s, sx, sy) then
+        local d = math.abs(sx - s.x) + math.abs(sy - s.y)
+        if bd == nil or d < bd then best, bd = { sx, sy }, d end
+      end
     end
   end
   return best
@@ -3578,7 +3584,16 @@ local ROOM_OBJECTIVES = {
     -- folds in the overlord spawners. Counting enemies here as well only added ways to be
     -- wrong: going quiet in the frames where a room's sprites are mid-spawn, and
     -- re-arming on a respawn after the room was already officially clear.
-    active = function(s) return kill_room(s) ~= nil end,
+    -- The tag says the room is still gating; a countable enemy says there is something
+    -- to fight FROM HERE. Both are needed. Room 0x71 is why: its tag stays set while its
+    -- other pit is uncleared, but from Link's pit there is nothing to reach, and
+    -- announcing "defeat all enemies" with no target left the guide saying it forever
+    -- and never advancing. Termination is still the tag's job — an enemy that dies while
+    -- the tag stands means the room is not finished, it just has nothing here.
+    active = function(s)
+      return kill_room(s) ~= nil
+        and (nearest_pending_enemy(s) ~= nil or overlords_pending())
+    end,
     target = function(s)
       local e = nearest_pending_enemy(s)
       if e then return walkable_near(s, e[1], e[2]) end
@@ -3682,10 +3697,10 @@ local function room_aim(s)
       -- Active with nowhere to walk (overlord spawners hold a room open but have no
       -- position): still the objective, and still worth stating.
       if tx == nil then return o end
-      if pathfind_goal ~= nil
+      if pathfind_active and pathfind_goal ~= nil
         and math.abs(pathfind_goal[1] - (tx >> 3)) + math.abs(pathfind_goal[2] - (ty >> 3)) < 2
       then
-        return o -- already leading there; leave the route alone
+        return o -- already leading there, and the route is live: leave it alone
       end
       if route_set_goal(s, tx, ty) then return o end
     end
