@@ -2119,7 +2119,12 @@ fn alttp_escape_room_0x71_chest_is_a_routing_objective() {
         set(0x7EF3C5, 2);
         set(0x7E040C, 0x02);
         set(0x7E00A0, 0x71); // room 0x71
-        set(0x7E00AE, 0x08); // header kill tag (a real kill-room)
+                             // Room 0x71 is a genuine kill-room (header tag 0x08), but this frame is the
+                             // state AFTER its fight: the game zeroes a satisfied kill tag itself, and the
+                             // guide now reads the tag rather than counting corpses, so a cleared room is a
+                             // room whose tag is zero. Leaving 0x08 set here would model a room that is
+                             // still gating, and the fight would rightly outrank the chest.
+        set(0x7E00AE, 0x00);
         set(0x7F2000 + chest_y * 64 + chest_x, 0x58); // an unopened chest tile
         ram
     };
@@ -3419,5 +3424,106 @@ fn alttp_a_chamber_stops_an_enemy_counting_from_behind_a_wall() {
         goal((105, 499)),
         "nil",
         "a guard in the other pit is not counted, so nothing is aimed at it"
+    );
+}
+
+// ── The unauthored fallback ─────────────────────────────────────────────────
+// Rooms nobody has mapped still work, from the room's own header tag. The tag says
+// the room gates on a fight, says over what area, and says when it is satisfied —
+// the game zeroes it — so the fallback asks the game rather than guessing.
+
+#[test]
+fn alttp_the_fallback_bounds_the_fight_the_way_the_tag_does() {
+    // Tag 0x0A goes through RoomTag_RoomTrigger, which waits on
+    // Sprite_CheckIfRoomIsClear: every sprite slot, no bounds. Tag 0x08 goes through
+    // RoomTag_QuadrantTrigger, which waits on Sprite_CheckIfScreenIsClear: only what
+    // is within 256x256 of the scroll origin. A far enemy therefore counts under one
+    // tag and not the other, and neither is a radius.
+    let r = Registry::builtin();
+    let goal = |tag: u8, enemy: (u16, u16)| -> String {
+        // Scroll origin at (0,0), so the kill screen is world pixels 0..255.
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x55); // a room with no authored chambers
+            set(0x7E00AE, tag);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3C5, 2);
+        }
+        sprite_slot(&mut ram, 0, 66, enemy, 4);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.command("advance", &ram);
+        p.on_frame(&ram, 2);
+        p.eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &ram,
+        )
+        .unwrap()
+    };
+
+    // With the scroll origin at 0, the kill screen is world pixels 0..255 — tiles 0..31.
+    // Tile 28 is pixel 228, inside it; tile 40 is pixel 324, outside.
+    assert_eq!(
+        goal(0x08, (28, 20)),
+        "28,20",
+        "on-screen: counted under a screen tag"
+    );
+    assert_eq!(
+        goal(0x08, (40, 20)),
+        "nil",
+        "off-screen: not counted under a screen tag"
+    );
+    assert_eq!(
+        goal(0x0A, (40, 20)),
+        "40,20",
+        "the same enemy counts under a room tag"
+    );
+}
+
+#[test]
+fn alttp_the_fallback_stops_when_the_game_zeroes_the_tag() {
+    // Every kill tag reaches RoomTag_OperateChestReveal or Dung_TagRoutine_TrapdoorsUp,
+    // both of which zero it, so the tag is the room's own "still gating" flag. Reading
+    // it rather than counting sprites means the guide cannot go quiet while a room's
+    // enemies are mid-spawn, nor re-arm on a respawn after the room is done with.
+    let r = Registry::builtin();
+    let says_fight = |tag: u8, enemy: bool| -> bool {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x55);
+            set(0x7E00AE, tag);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3C5, 2);
+        }
+        if enemy {
+            sprite_slot(&mut ram, 0, 66, (40, 20), 4);
+        }
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.command("advance", &ram);
+        p.on_frame(&ram, 2)
+            .iter()
+            .any(|i| i.text.contains("Defeat all enemies"))
+    };
+
+    assert!(
+        says_fight(0x08, true),
+        "tag set with an enemy: the room gates"
+    );
+    assert!(
+        says_fight(0x08, false),
+        "tag still set with no sprite loaded: the room gates, because the game says so"
+    );
+    assert!(
+        !says_fight(0x00, true),
+        "no tag: not a kill room, whatever is standing there"
     );
 }
