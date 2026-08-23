@@ -2866,6 +2866,32 @@ fn faced_tile(link: (u16, u16), dir: u8) -> (u16, u16) {
     ((ax >> 3) as u16, (ay >> 3) as u16)
 }
 
+/// The `i`th tile the pit scan probes ahead of Link, by the plugin's own arithmetic:
+/// x + 8 is his centre column and y + 12 his feet, then i steps of 8 pixels in the
+/// facing direction. Computed rather than guessed, because the row it walks is not the
+/// row Link's tile is on.
+fn scanned_tile(link: (u16, u16), dir: u8, i: i32) -> (u16, u16) {
+    let (x, y) = ((link.0 * 8 + 4) as i32, (link.1 * 8 + 4) as i32);
+    let dx = if dir == 4 {
+        -8
+    } else if dir == 6 {
+        8
+    } else {
+        0
+    };
+    let dy = if dir == 0 {
+        -8
+    } else if dir == 2 {
+        8
+    } else {
+        0
+    };
+    (
+        ((x + 8 + dx * i) >> 3) as u16,
+        ((y + 12 + dy * i) >> 3) as u16,
+    )
+}
+
 /// A dungeon frame with Link at `link` facing `dir` (0 north, 2 south, 4 west,
 /// 6 east) and the given tiles painted on the upper floor.
 fn facing_frame(link: (u16, u16), dir: u8, tiles: &[(u16, u16, u8)]) -> Vec<u8> {
@@ -3723,4 +3749,56 @@ fn alttp_an_enemy_on_the_other_floor_is_not_something_link_can_fight() {
         "26,20",
         "floor 2 is the transient the explosion path sets: counted"
     );
+}
+
+#[test]
+fn alttp_a_pit_is_flagged_from_several_tiles_off_but_not_through_a_wall() {
+    // One tile of look-ahead gave about a frame of warning at walking speed. The scan
+    // reaches further now, so the blip lands a couple of steps before the edge — and
+    // stops at anything solid, since a pit behind a wall is not a step Link can take.
+    let r = Registry::builtin();
+    let sounds = |pit_tiles_ahead: u16, wall_at: Option<u16>| -> bool {
+        // Facing east from (20,20), painting on the tiles the scan actually probes.
+        let pit = scanned_tile((20, 20), 6, pit_tiles_ahead as i32);
+        let mut tiles = vec![(pit.0, pit.1, 0x20u8)];
+        if let Some(w) = wall_at {
+            let wall = scanned_tile((20, 20), 6, w as i32);
+            tiles.push((wall.0, wall.1, 0x01));
+        }
+        let ram = facing_frame((20, 20), 6, &tiles);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.beacons().iter().any(|b| b.id == "hazard")
+    };
+
+    assert!(sounds(1, None), "a pit one tile ahead sounds");
+    assert!(sounds(4, None), "and one four tiles ahead does too");
+    assert!(!sounds(20, None), "one far across the room does not");
+    // A wall between Link and the pit stops the scan.
+    assert!(
+        !sounds(4, Some(2)),
+        "a pit behind a wall is not a step he can take, so it is not flagged"
+    );
+    assert!(sounds(4, Some(6)), "a wall beyond the pit does not hide it");
+}
+
+#[test]
+fn alttp_the_blip_pans_further_the_further_off_the_pit_is() {
+    // It is positioned on the pit rather than on Link, so how far ahead the edge lies is
+    // audible in the offset instead of needing to be described.
+    let r = Registry::builtin();
+    let offset = |ahead: u16| -> f32 {
+        let pit = scanned_tile((20, 20), 6, ahead as i32);
+        let ram = facing_frame((20, 20), 6, &[(pit.0, pit.1, 0x20)]);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.beacons()
+            .iter()
+            .find(|b| b.id == "hazard")
+            .expect("sounding")
+            .dx
+    };
+    assert!(offset(4) > offset(1), "further pit, wider offset");
 }
