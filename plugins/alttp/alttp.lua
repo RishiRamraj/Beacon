@@ -234,9 +234,10 @@ end
 --   kill   true, or a WP clause: is this room a kill-room right now? Some rooms set
 --          no clear-tag of their own and still gate on a fight, because a guard
 --          drops the key for the locked way out.
---   giant  count enemies across the whole room rather than one screen, for a
---          key-holder waiting at the far side.
---   region debug-overlay only: the fighting pits, as world-tile boxes.
+--   chambers the room's fighting chambers, as world-tile boxes. A dungeon "room" is
+--          one 64-tile block, but the parts that gate progress are smaller chambers
+--          walled off inside it, so a room can hold several. Bounds the enemy tally
+--          when one covers Link, and outlines the pit on the debug map.
 local function room_cfg(room)
   return ROOMS and ROOMS[room] or nil
 end
@@ -257,24 +258,47 @@ end
 -- screen and must not hold the room "uncleared" forever. Kept generous (a bit
 -- past the 256x224 screen) so an on-screen enemy near a room edge still counts.
 local ENEMY_ONSCREEN = 144
--- A giant kill-room counts enemies across the whole 512-pixel room, so a key-holder
--- waiting at the far side still registers from anywhere in the room.
-local ENEMY_INROOM = 512
 
-local function nearest_pending_enemy(s)
+-- The mapped fighting chamber Link is standing in, or nil if the room maps none or
+-- none covers him (a corridor between two pits, say).
+local function room_chamber(s)
   local cfg = room_cfg(s.dungeon_room)
-  local reach = (cfg and cfg.giant) and ENEMY_INROOM or ENEMY_ONSCREEN
+  local reg = cfg and cfg.chambers
+  if reg == nil then return nil end
+  local ltx, lty = s.x >> 3, s.y >> 3
+  for _, b in ipairs(reg) do
+    if ltx >= b.w and ltx <= b.e and lty >= b.n and lty <= b.s then return b end
+  end
+  return nil
+end
+
+local function in_chamber(b, sx, sy)
+  local tx, ty = sx >> 3, sy >> 3
+  return tx >= b.w and tx <= b.e and ty >= b.n and ty <= b.s
+end
+
+-- Where a chamber is mapped and Link is in it, that chamber IS the fighting area:
+-- an enemy counts only if it shares the chamber. A radius round Link is the fallback,
+-- and it is a crude stand-in for the same idea — room 0x71's two guard pits are walled
+-- off from each other, yet at 144 pixels a guard in the far pit lands inside the radius
+-- and holds the room uncleared, or gets picked as the nearest enemy from behind a wall
+-- Link cannot cross. The chamber has the wall in it; the radius does not.
+local function nearest_pending_enemy(s)
+  local box = room_chamber(s)
   local best, bd
   for i = 0, 15 do
     local st = mem.u8(SPRITE.state + i)
     -- hp 0 is dead or inert (or a bystander NPC like caged Zelda) — never a pending
-    -- enemy, so it can't hold a room "uncleared", especially a giant kill-room whose
-    -- wide reach would otherwise sweep such a sprite in from across the room.
+    -- enemy, so it can't hold a room "uncleared", especially a whole-room chamber whose
+    -- reach would otherwise sweep such a sprite in from across the room.
     if st ~= nil and st ~= 0 and (mem.u8(SPRITE_FLAGS4 + i) & 0x40) == 0
         and (mem.u8(SPRITE.hp + i) or 0) > 0 then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
-      if math.abs(sx - s.x) <= reach and math.abs(sy - s.y) <= reach then
+      local counts = box ~= nil and in_chamber(box, sx, sy)
+        or (box == nil and math.abs(sx - s.x) <= ENEMY_ONSCREEN
+            and math.abs(sy - s.y) <= ENEMY_ONSCREEN)
+      if counts then
         local d = math.abs(sx - s.x) + math.abs(sy - s.y)
         if bd == nil or d < bd then best, bd = { sx, sy }, d end
       end
@@ -4103,13 +4127,13 @@ function on_draw(canvas)
     -- dungeon, where the room and its waypoints live.
     if s.module == 0x07 then
       -- A kill-room's boundary, in a distinct red (never the pink of the nav route).
-      -- When the room's fighting pit is mapped (ROOMS[room].region), draw a 1px rectangle on
+      -- When the room's chambers are mapped (ROOMS[room].chambers), draw a 1px rectangle on
       -- its tile bounds so the border hugs the real pit instead of framing the whole
       -- screen. Rooms with no mapped pit fall back to a frame outside the playfield.
       if kill_room(s) then
         local kc = 0xE83838
         local cfg = room_cfg(s.dungeon_room)
-        local reg = cfg and cfg.region
+        local reg = cfg and cfg.chambers
         if reg then
           for _, b in ipairs(reg) do
             local x0, y0 = plot(b.w * 8, b.n * 8)             -- NW corner

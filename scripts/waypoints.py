@@ -320,11 +320,11 @@ def dump_rooms(tbl):
         if not cfg.fields:
             continue # every rule cleared: drop the entry rather than leave a husk
         out.append(f"{key} = {{")
-        for field in ("kill", "giant", "region"):
+        for field in ("kill", "chambers"):
             if field in cfg.fields:
                 out.append(f"  {field} = " + fmt(cfg.fields[field]) + ",")
         for k, v in cfg.fields.items():  # anything the tool does not know about
-            if k not in ("kill", "giant", "region", "note"):
+            if k not in ("kill", "chambers", "note"):
                 out.append(f"  {k} = " + fmt(v) + ",")
         if cfg.fields.get("note"):
             out.append("  note = " + fmt(cfg.fields["note"]) + ",")
@@ -536,10 +536,8 @@ class Editor:
         bits = [key.strip("[]")]
         if "kill" in f:
             bits.append("kill " + ("always" if f["kill"] is True else fmt(f["kill"])))
-        if f.get("giant") is True:
-            bits.append("giant")
-        if "region" in f:
-            bits.append(f"{len(f['region'].items)} region box(es)")
+        if "chambers" in f:
+            bits.append(f"{len(f['chambers'].items)} chamber(s)")
         return "  ".join(bits) if len(bits) > 1 else bits[0] + "  (nothing set)"
 
     def summary(self, n, wp):
@@ -709,8 +707,8 @@ class Editor:
     def cmd_room(self, arg):
         key, cfg = self.room_key(arg)
         out = [self.room_summary(key, cfg)]
-        if cfg.fields.get("region"):
-            for box in cfg.fields["region"].items:
+        if cfg.fields.get("chambers"):
+            for box in cfg.fields["chambers"].items:
                 b = box.fields
                 out.append(f"   box n={fmt(b.get('n'))} e={fmt(b.get('e'))}"
                            f" s={fmt(b.get('s'))} w={fmt(b.get('w'))}")
@@ -731,17 +729,32 @@ class Editor:
         self.dirty = True
         return f"{key.strip('[]')}: kill = " + fmt(cfg.fields["kill"])
 
-    def cmd_giant(self, arg):
-        """giant [ROOM] on|off — count enemies room-wide rather than on screen."""
+    def cmd_chamber(self, arg):
+        """chamber [ROOM] room|off — the fighting chamber that bounds the enemy tally.
+
+        `room` covers the whole 64-tile room, computed from its id, which is what a
+        single-chamber room wants. A smaller one needs four edges, and standing in the
+        middle of a chamber says nothing about where they are, so those are hand-edited.
+        """
         room, _, value = self.room_split(arg)
         key, cfg = self.room_key(room)
-        if value.strip() in ("off", "false", "no", ""):
-            cfg.fields.pop("giant", None)
+        n = self.room_number(room)
+        value = value.strip()
+        if value in ("off", "none", ""):
+            cfg.fields.pop("chambers", None)
             self.dirty = True
-            return f"{key.strip('[]')}: counts enemies on screen"
-        cfg.fields["giant"] = True
+            return f"{key.strip('[]')}: no chambers; the tally falls back to a radius"
+        if value != "room":
+            raise LuaError("chamber [ROOM] room|off - only whole-room chambers so far;"
+                           " hand-edit waypoints.lua for a smaller one")
+        # A dungeon room id is its position in a 16x16 grid of 64-tile blocks.
+        w, top = (n & 0x0F) * 64, (n >> 4) * 64
+        box = Table(fields={"n": Num(top), "e": Num(w + 63), "s": Num(top + 63),
+                            "w": Num(w)})
+        cfg.fields["chambers"] = Table(items=[box])
         self.dirty = True
-        return f"{key.strip('[]')}: counts enemies across the whole room"
+        return (f"{key.strip('[]')}: one chamber covering the whole room"
+                f" ({w},{top} to {w + 63},{top + 63})")
 
     def cmd_roomnote(self, arg):
         room, _, text = self.room_split(arg)
@@ -826,7 +839,7 @@ class Editor:
         "here": cmd_here, "add": cmd_add, "move": cmd_move, "del": cmd_del,
         "set": cmd_set, "test": cmd_test,
         "rooms": cmd_rooms, "room": cmd_room,
-        "kill": cmd_kill, "giant": cmd_giant, "roomnote": cmd_roomnote,
+        "kill": cmd_kill, "chamber": cmd_chamber, "roomnote": cmd_roomnote,
         "save": cmd_save, "reload": cmd_reload,
         "quit": cmd_quit, "exit": cmd_quit,
     }
@@ -866,7 +879,7 @@ test N                 run N's gate and done against the live frame
 rooms                  every room with authored rules
 room [ROOM]            one room in full (default: the room you are standing in)
 kill [ROOM] V          true, off, or a clause — is the room gated on a fight?
-giant [ROOM] on|off    count enemies room-wide rather than just on screen
+chamber [ROOM] room    the chamber bounding the enemy tally (or off)
 roomnote [ROOM] TEXT   why this room is configured as it is
 save                   write the file
 reload                 save, then reload the plugin in the running session
