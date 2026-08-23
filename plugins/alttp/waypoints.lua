@@ -91,7 +91,7 @@ COURTYARD = {
   { tx = 10, ty = 452, room = 0x70, level = 0,
     note = "Into room 0x70, once it is quiet." },
   { room = 0x80, kind = "clear", via = true,
-    note = "Zelda's cell room, and the enemy in the far east holds the big key, so the whole room is one fight. ROOMS[0x80].giant is what makes its enemies count from across the room rather than just on screen, so the guide leads east to that one instead of going quiet when the nearer guards fall." },
+    note = "Zelda's cell room, and the enemy in the far east holds the big key, so the whole room is one fight. The room sets no kill tag of its own, so this step is what says the fight is the whole room; reachability then removes its walls, which is how the far-east holder still counts while nothing counts through a wall." },
   { tx = 44, ty = 518, room = 0x80,
     note = "Her cell, down the stairs from 0x70 — the rescue." },
 },
@@ -138,25 +138,6 @@ SANCTUARY = {
     note = "North into 0x11 to the dungeon push-block (tile 0x76 at 111-112,76-77). A TILE push obstacle with no sprite to track, so push = 0 to face north is all that drives the alignment tone. done: once shoved, its tile stops reading as a push-block, so the tone goes silent when the block can move no further." },
   { tx = 111, ty = 68, room = 0x11, level = 0, gate = {"at", 111, 76, 0, {"tile_outside", 0x70, 0x7F}},
     note = "North through where the block was, further into 0x11. Gated on the push-block at (111,76) being SHOVED: the way north is a dead end until then, and the pathfinder can slip around the block on the open floor beside it, so a collision block alone would not hold the guide back — the block's pushed state is the real gate." },
-},
-
-}
-
-ROOMS = {
-
-[0x71] = {
-  chambers = {{n = 491, e = 90, s = 506, w = 69}, {n = 487, e = 122, s = 506, w = 101}},
-  note = "Not a forced kill-room — it carries its own clear-tag. Two guard pits side by side, every edge on a green ledge wall, walled off from each other: an enemy in one pit cannot be reached from the other, which is why an objective has to be checked for reachability before the guide commits to it. Its chambers bound the enemy tally: a guard in the far pit does not count from the near one, and cannot be targeted through the wall between them.",
-},
-
-[0x72] = {
-  chambers = {{n = 458, e = 166, s = 474, w = 153}},
-  note = "Its fight is a `clear` step in the COURTYARD chain, gated on the chest being shut. What stays here is the chamber: one walled fighting floor, regular walls rather than green ledges, so the box hugs the dark floor inside (cols 153-166, rows 458-474).",
-},
-
-[0x80] = {
-  chambers = {{n = 512, e = 63, s = 575, w = 0}},
-  note = "The jail-cell room, and its fight is a `clear` waypoint in the COURTYARD chain. Its chamber is the whole room — room 0x80 sits at tile column 0, row 8 — which is how the far-east big-key holder still counts from anywhere in it. That used to be a `giant` flag widening a radius; saying the chamber is the room says the same thing without a second mechanism.",
 },
 
 }
