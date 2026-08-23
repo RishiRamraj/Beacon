@@ -653,15 +653,17 @@ end
 -- A pit is the one obstacle that punishes you for walking into it instead of
 -- stopping you, so the router treating it as impassable is not enough: a player
 -- who cannot see the floor needs to know the edge is there before he steps off it.
--- Same shape as the bush cue — read the tile Link faces, speak once, re-arm when
--- he faces something else — with two deliberate differences.
+-- Same trigger as the bush cue — read the tile Link faces — but a tone rather than a
+-- word, and no words at all. Speech is the one channel everything else competes for,
+-- and "Pit." is both slower to arrive than the danger it describes and gone the
+-- instant it is spoken. A tone is continuous: it is there for as long as the edge is,
+-- it says WHERE by panning as Link turns, and it costs nothing that was going to be
+-- said about the room. Low and fast-pulsing, the vocabulary the enemy-weapon beacon
+-- already uses for "this will hurt you", positioned on the faced tile so sweeping
+-- reads the edge out.
 --
--- It is not gated on the guide. A bush cue is routing advice, useful only while
--- being led somewhere; a pit is a hazard whether or not the guide is on, and
--- staying quiet about it because navigation happens to be off would be the wrong
--- silence. And it carries a danger tone: low and fast-pulsing, the vocabulary the
--- enemy-weapon beacon already uses for "this will hurt you", positioned on the
--- faced tile so sweeping the stick reads the edge out as it pans.
+-- It is not gated on the guide either. A bush cue is routing advice, useful only while
+-- being led somewhere; a pit is a hazard whether or not the guide is on.
 --
 -- Dungeon only. The overworld gives entrance holes the same pit attribute — the
 -- castle intro drop among them — and they are places you are meant to fall into,
@@ -670,7 +672,7 @@ end
 -- Tile classes are the game's own (zelda3 tile_detect.c TileBehavior_Pit): 0x20,
 -- plus the 0xB0-0xBD variants dungeons use for holes with a set destination.
 -- Everything hangs off one table to spare the main chunk's local budget.
-HAZARD = { said = false }
+HAZARD = {}
 HAZARD.PIT = {}
 do
   HAZARD.PIT[0x20] = true
@@ -687,7 +689,6 @@ function HAZARD.ahead(s)
 end
 
 function HAZARD.clear()
-  HAZARD.said = false
   beacon.clear("hazard")
 end
 
@@ -698,13 +699,6 @@ function HAZARD.update(s)
   if a == nil or not HAZARD.PIT[a] then HAZARD.clear(); return end
   beacon.set("hazard", { x = ax - s.x, y = ay - s.y, pitch = HAZARD.TONE.pitch,
     tremolo = HAZARD.TONE.tremolo, volume = HAZARD.TONE.volume })
-  if not HAZARD.said then
-    -- Critical so it cuts through whatever else is queued: by the time a
-    -- description of the room finishes, Link has already stepped in. Its own
-    -- category keeps it in a separate rate-limit bucket from combat chatter.
-    say("Pit.", { priority = "critical", category = "hazard" })
-    HAZARD.said = true
-  end
 end
 
 -- ===========================================================================

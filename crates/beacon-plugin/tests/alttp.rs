@@ -2883,51 +2883,46 @@ fn facing_frame(link: (u16, u16), dir: u8, tiles: &[(u16, u16, u8)]) -> Vec<u8> 
 }
 
 #[test]
-fn alttp_facing_a_pit_warns_once_and_sounds_a_danger_tone() {
-    // Link at (20,20) facing south, with a pit on the tile he would step into.
+fn alttp_facing_a_pit_sounds_a_danger_tone_and_says_nothing() {
+    // A tone, not a word. Speech is the channel everything else competes for, and "Pit."
+    // arrives slower than the danger and is gone once spoken; a tone lasts as long as the
+    // edge does and pans to say where it is.
     let r = Registry::builtin();
     let pit_at = faced_tile((20, 20), 2);
     let ram = facing_frame((20, 20), 2, &[(pit_at.0, pit_at.1, 0x20)]);
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     p.on_frame(&ram, 0);
     let out = p.on_frame(&ram, 1);
+
     assert!(
-        out.iter().any(|i| i.text.contains("Pit")),
-        "the pit ahead is called out: {:?}",
+        !out.iter().any(|i| i.text.to_lowercase().contains("pit")),
+        "nothing is spoken: {:?}",
         out.iter().map(|i| &i.text).collect::<Vec<_>>()
     );
-    // Critical, so it is heard at verbosity 0 where navigation chatter is gated off.
-    assert!(
-        out.iter()
-            .any(|i| i.text.contains("Pit") && format!("{:?}", i.priority) == "Critical"),
-        "a hazard outranks the verbosity gate"
-    );
-    // A danger tone sits on the faced tile, low and fast-pulsing.
     let b = p.beacons();
     let hazard = b
         .iter()
         .find(|b| b.id == "hazard")
-        .expect("a hazard beacon sounds");
+        .expect("a hazard tone sounds");
     assert!(
         hazard.pitch < 1.0 && hazard.tremolo >= 4.0,
         "low and urgent: {hazard:?}"
     );
     assert!(
         hazard.dy > 0.0,
-        "positioned south, where the pit is: {hazard:?}"
+        "panned south, where the pit is: {hazard:?}"
     );
 
-    // Said once: standing still facing the same pit does not repeat it.
-    let again = p.on_frame(&ram, 2);
+    // It persists rather than firing once: the edge is still there next frame.
+    p.on_frame(&ram, 2);
     assert!(
-        !again.iter().any(|i| i.text.contains("Pit")),
-        "not repeated while still facing it: {:?}",
-        again.iter().map(|i| &i.text).collect::<Vec<_>>()
+        p.beacons().iter().any(|b| b.id == "hazard"),
+        "the tone holds while Link keeps facing it"
     );
 }
 
 #[test]
-fn alttp_turning_away_from_a_pit_clears_the_warning_and_re_arms_it() {
+fn alttp_turning_away_from_a_pit_stops_the_tone_and_facing_back_starts_it() {
     let r = Registry::builtin();
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     let pit_at = faced_tile((20, 20), 2);
@@ -2936,62 +2931,52 @@ fn alttp_turning_away_from_a_pit_clears_the_warning_and_re_arms_it() {
     let away = facing_frame((20, 20), 0, &[(pit_at.0, pit_at.1, 0x20)]);
     p.on_frame(&pit, 0);
     p.on_frame(&pit, 1);
+    assert!(
+        p.beacons().iter().any(|b| b.id == "hazard"),
+        "facing it: sounding"
+    );
 
     p.on_frame(&away, 2);
     assert!(
         !p.beacons().iter().any(|b| b.id == "hazard"),
         "facing open ground, the tone stops"
     );
-    // Facing back re-arms the warning: it is about the step you are about to take.
-    let back = p.on_frame(&pit, 3);
+    p.on_frame(&pit, 3);
     assert!(
-        back.iter().any(|i| i.text.contains("Pit")),
-        "turning back onto it warns again: {:?}",
-        back.iter().map(|i| &i.text).collect::<Vec<_>>()
+        p.beacons().iter().any(|b| b.id == "hazard"),
+        "turning back onto it sounds again: it is about the step he is about to take"
     );
 }
 
 #[test]
-fn alttp_the_pit_warning_covers_the_dungeon_hole_variants_but_not_the_overworld() {
+fn alttp_the_pit_tone_covers_the_dungeon_hole_variants_but_not_the_overworld() {
     // TileBehavior_Pit is 0x20 plus the 0xB0-0xBD holes-with-a-destination.
     let r = Registry::builtin();
-    for attr in [0x20u8, 0xB0, 0xBD] {
+    let sounds = |attr: u8, overworld: bool| -> bool {
         let e = faced_tile((20, 20), 6);
-        let ram = facing_frame((20, 20), 6, &[(e.0, e.1, attr)]);
+        let mut ram = facing_frame((20, 20), 6, &[(e.0, e.1, attr)]);
+        if overworld {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0010, 0x09); // overworld
+            set(0x7E001B, 0x00); // outdoors
+        }
         let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
         p.on_frame(&ram, 0);
-        let out = p.on_frame(&ram, 1);
-        assert!(
-            out.iter().any(|i| i.text.contains("Pit")),
-            "attr 0x{attr:02X} is a pit"
-        );
-    }
-    // 0xBE is past the class and must not warn.
-    let e = faced_tile((20, 20), 6);
-    let ram = facing_frame((20, 20), 6, &[(e.0, e.1, 0xBE)]);
-    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    p.on_frame(&ram, 0);
-    assert!(
-        !p.on_frame(&ram, 1).iter().any(|i| i.text.contains("Pit")),
-        "0xBE is not a pit"
-    );
+        p.on_frame(&ram, 1);
+        p.beacons().iter().any(|b| b.id == "hazard")
+    };
 
-    // The overworld gives entrance holes the same attribute and they are meant to be
-    // fallen into, so the cue is dungeon-only.
-    let mut ow = facing_frame((20, 20), 6, &[(e.0, e.1, 0x20)]);
-    {
-        let mut set = |addr: u32, v: u8| ow[wram_offset(addr).unwrap()] = v;
-        set(0x7E0010, 0x09); // overworld
-        set(0x7E001B, 0x00); // outdoors
+    for attr in [0x20u8, 0xB0, 0xBD] {
+        assert!(sounds(attr, false), "attr 0x{attr:02X} is a pit");
     }
-    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    p.on_frame(&ow, 0);
+    assert!(!sounds(0xBE, false), "0xBE is past the class and is not");
+    // The overworld gives entrance holes the same attribute and they are meant to be
+    // fallen into, so the tone is dungeon-only.
     assert!(
-        !p.on_frame(&ow, 1).iter().any(|i| i.text.contains("Pit")),
-        "no pit warnings on the overworld, where the same tile is a doorway"
+        !sounds(0x20, true),
+        "no pit tone on the overworld, where the same tile is a doorway"
     );
 }
-
 #[test]
 fn alttp_an_unreachable_objective_falls_through_to_one_the_guide_can_reach() {
     // Room 0x71's two guard pits are walled off from each other. With the key-holder
