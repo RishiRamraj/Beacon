@@ -145,18 +145,18 @@ SANCTUARY = {
 ROOMS = {
 
 [0x71] = {
-  region = {{n = 491, e = 90, s = 506, w = 69}, {n = 487, e = 122, s = 506, w = 101}},
-  note = "Not a forced kill-room — it carries its own clear-tag. Two guard pits side by side, every edge on a green ledge wall, walled off from each other: an enemy in one pit cannot be reached from the other, which is why an objective has to be checked for reachability before the guide commits to it. Boxes are the debug overlay only.",
+  chambers = {{n = 491, e = 90, s = 506, w = 69}, {n = 487, e = 122, s = 506, w = 101}},
+  note = "Not a forced kill-room — it carries its own clear-tag. Two guard pits side by side, every edge on a green ledge wall, walled off from each other: an enemy in one pit cannot be reached from the other, which is why an objective has to be checked for reachability before the guide commits to it. Its chambers bound the enemy tally: a guard in the far pit does not count from the near one, and cannot be targeted through the wall between them.",
 },
 
 [0x72] = {
-  region = {{n = 458, e = 166, s = 474, w = 153}},
-  note = "Its fight is a `clear` step in the COURTYARD chain, gated on the chest being shut. What stays here is the pit: one walled fighting chamber, regular walls rather than green ledges, so the box hugs the dark floor inside (cols 153-166, rows 458-474).",
+  chambers = {{n = 458, e = 166, s = 474, w = 153}},
+  note = "Its fight is a `clear` step in the COURTYARD chain, gated on the chest being shut. What stays here is the chamber: one walled fighting floor, regular walls rather than green ledges, so the box hugs the dark floor inside (cols 153-166, rows 458-474).",
 },
 
 [0x80] = {
-  giant = true,
-  note = "The jail-cell room. Its fight is a `clear` waypoint in the COURTYARD chain, where it belongs — a step in the route. What stays here is room-scoped: giant means enemies count across the whole 512-pixel room rather than one screen, so the far-east big-key holder still registers from anywhere in it.",
+  chambers = {{n = 512, e = 63, s = 575, w = 0}},
+  note = "The jail-cell room, and its fight is a `clear` waypoint in the COURTYARD chain. Its chamber is the whole room — room 0x80 sits at tile column 0, row 8 — which is how the far-east big-key holder still counts from anywhere in it. That used to be a `giant` flag widening a radius; saying the chamber is the room says the same thing without a second mechanism.",
 },
 
 }

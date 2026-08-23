@@ -3045,8 +3045,8 @@ fn alttp_room_rules_come_from_the_waypoints_module() {
               -- authored fight so the fallback objectives know to stand aside.
               return table.concat({
                 tostring(ROOMS[0x70]),               -- nothing room-scoped left
-                tostring(ROOMS[0x80].giant),         -- counts enemies room-wide
-                #ROOMS[0x71].region,                 -- two walled guard pits
+                #ROOMS[0x80].chambers,               -- one chamber: the whole room
+                #ROOMS[0x71].chambers,               -- two walled guard pits
                 type(ROOMS[0x72].note),
                 tostring(WP.fights[0x70]),           -- authored fight: 0x70, 0x72, 0x80
                 tostring(WP.fights[0x72]),
@@ -3057,7 +3057,7 @@ fn alttp_room_rules_come_from_the_waypoints_module() {
             &ram
         )
         .unwrap(),
-        "nil|true|2|string|true|true|true|nil",
+        "nil|1|2|string|true|true|true|nil",
         "room rules keep what is room-scoped; fights are indexed steps"
     );
 }
@@ -3371,5 +3371,53 @@ fn alttp_an_authored_fight_still_speaks_when_no_chain_covers_the_room() {
         out.iter().any(|i| i.text.contains("Defeat all enemies")),
         "stating the requirement: {:?}",
         out.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn alttp_a_chamber_stops_an_enemy_counting_from_behind_a_wall() {
+    // Room 0x71's two guard pits are walled off from each other, and the west pit's
+    // mapped chamber ends at tile 90. A guard in the east pit is well inside the old
+    // 144-pixel radius, so it used to hold the room uncleared and could be picked as
+    // "nearest" from behind a wall Link cannot cross. The chamber has the wall in it.
+    let r = Registry::builtin();
+    let frame = || -> Vec<u8> {
+        let mut ram = dungeon_frame((77, 499), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x71);
+        set(0x7E00AE, 0x08); // clear-tagged, so the enemy objective is what speaks
+        set(0x7E00EE, 1);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3C5, 2); // past the castle chains: no authored fight here
+        ram
+    };
+    let goal = |enemy: (u16, u16)| -> String {
+        let mut ram = frame();
+        sprite_slot(&mut ram, 0, 66, enemy, 4);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.command("advance", &ram);
+        p.on_frame(&ram, 2);
+        p.eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &ram,
+        )
+        .unwrap()
+    };
+
+    // Link stands at 77,499 — inside the west pit (69..90 by 491..506).
+    assert_eq!(
+        goal((85, 499)),
+        "85,499",
+        "a guard sharing Link's chamber is the target"
+    );
+    // The east pit starts at tile 101. Within the old radius, outside the chamber.
+    assert_eq!(
+        goal((105, 499)),
+        "nil",
+        "a guard in the other pit is not counted, so nothing is aimed at it"
     );
 }
