@@ -649,83 +649,6 @@ local function bush_cue(s)
   end
 end
 
--- ── Hazards underfoot ───────────────────────────────────────────────────────
--- A pit is the one obstacle that punishes you for walking into it instead of
--- stopping you, so the router treating it as impassable is not enough: a player
--- who cannot see the floor needs to know the edge is there before he steps off it.
--- Same trigger as the bush cue — read the tile Link faces — but a tone rather than a
--- word, and no words at all. Speech is the one channel everything else competes for,
--- and "Pit." is both slower to arrive than the danger it describes and gone the
--- instant it is spoken. A tone is continuous: it is there for as long as the edge is,
--- it says WHERE by panning as Link turns, and it costs nothing that was going to be
--- said about the room. Low and fast-pulsing, the vocabulary the enemy-weapon beacon
--- already uses for "this will hurt you", positioned on the faced tile so sweeping
--- reads the edge out.
---
--- It is not gated on the guide either. A bush cue is routing advice, useful only while
--- being led somewhere; a pit is a hazard whether or not the guide is on.
---
--- Dungeon only. The overworld gives entrance holes the same pit attribute — the
--- castle intro drop among them — and they are places you are meant to fall into,
--- so warning there would cry wolf at every doorway.
---
--- Tile classes are the game's own (zelda3 tile_detect.c TileBehavior_Pit): 0x20,
--- plus the 0xB0-0xBD variants dungeons use for holes with a set destination.
--- Everything hangs off one table to spare the main chunk's local budget.
-HAZARD = { facing = false, ticks = 0 }
-HAZARD.PIT = {}
-do
-  HAZARD.PIT[0x20] = true
-  for a = 0xB0, 0xBD do HAZARD.PIT[a] = true end
-end
--- A sharp, quick notification rather than a sustained hum: `ping` makes each cycle an
--- attack-decay strike instead of a swell, and BLIP frames at this tremolo is about one
--- strike, so facing a pit produces a single crisp blip. Being brief also separates it
--- from the enemy-weapon tone it used to sit next to in pitch — a one-shot and a
--- continuous drone cannot be confused however close their frequencies are.
--- Pitched above everything else in the vocabulary. The object tones run 0.7 to 2.0 and
--- the guide's sonar sits at 3.0-3.4; putting the hazard at 4.0 leaves it nothing to be
--- confused with, and high-and-sharp reads as a notification demanding attention where
--- low-and-slow reads as a thing sitting in the room.
-HAZARD.TONE = { pitch = 4.0, tremolo = 8.0, volume = 0.8 }
-HAZARD.BLIP = 8 -- frames it sounds for, about a sixth of a second
-
--- The world pixel one tile ahead of Link, by facing. Shared reach with the bush
--- cue so both agree what "in front of" means.
-function HAZARD.ahead(s)
-  local dir = s.direction
-  return s.x + 8 + (dir == 4 and -12 or dir == 6 and 12 or 0),
-         s.y + 12 + (dir == 0 and -12 or dir == 2 and 12 or 0)
-end
-
-function HAZARD.clear()
-  HAZARD.facing = false
-  HAZARD.ticks = 0
-  beacon.clear("hazard")
-end
-
-function HAZARD.update(s)
-  if s == nil or s.module ~= 0x07 then HAZARD.clear(); return end
-  local ax, ay = HAZARD.ahead(s)
-  local a = tile_attr_at(s, ax, ay)
-  if a == nil or not HAZARD.PIT[a] then HAZARD.clear(); return end
-  -- Fires on turning ONTO the pit, not for as long as he faces it: a warning about a
-  -- step he is about to take has said its piece once he has heard it, and holding the
-  -- tone would bury the enemy and guide tones under it while he edges along a ledge.
-  -- Facing away re-arms it, so every fresh approach gets its own blip.
-  if not HAZARD.facing then
-    HAZARD.facing = true
-    HAZARD.ticks = HAZARD.BLIP
-  end
-  if HAZARD.ticks > 0 then
-    HAZARD.ticks = HAZARD.ticks - 1
-    -- Still positioned on the faced tile, so the blip pans and says which way the edge is.
-    beacon.set("hazard", { x = ax - s.x, y = ay - s.y, pitch = HAZARD.TONE.pitch,
-      tremolo = HAZARD.TONE.tremolo, ping = true, volume = HAZARD.TONE.volume })
-  else
-    beacon.clear("hazard")
-  end
-end
 
 -- ===========================================================================
 -- Full-overworld collision from ROM. The live $7E2000 table only holds the
@@ -954,6 +877,102 @@ function REACH.can(s, sx, sy)
   local tx, ty = sx >> 3, sy >> 3
   if tx < ox or tx >= ox + 64 or ty < oy or ty >= oy + 64 then return false end
   return REACH.set[(ty - oy) * 64 + (tx - ox)] == true
+end
+
+-- ── Hazards underfoot ───────────────────────────────────────────────────────
+-- A pit is the one obstacle that punishes you for walking into it instead of
+-- stopping you, so the router treating it as impassable is not enough: a player
+-- who cannot see the floor needs to know the edge is there before he steps off it.
+-- Same idea as the bush cue — look where Link is heading — but a tone rather than a
+-- word, and no words at all. Speech is the one channel everything else competes for,
+-- and "Pit." is both slower to arrive than the danger it describes and gone the
+-- instant it is spoken. A tone is continuous: it is there for as long as the edge is,
+-- it says WHERE by panning as Link turns, and it costs nothing that was going to be
+-- said about the room. Low and fast-pulsing, the vocabulary the enemy-weapon beacon
+-- already uses for "this will hurt you", positioned on the faced tile so sweeping
+-- reads the edge out.
+--
+-- It is not gated on the guide either. A bush cue is routing advice, useful only while
+-- being led somewhere; a pit is a hazard whether or not the guide is on.
+--
+-- Dungeon only. The overworld gives entrance holes the same pit attribute — the
+-- castle intro drop among them — and they are places you are meant to fall into,
+-- so warning there would cry wolf at every doorway.
+--
+-- Tile classes are the game's own (zelda3 tile_detect.c TileBehavior_Pit): 0x20,
+-- plus the 0xB0-0xBD variants dungeons use for holes with a set destination.
+-- Everything hangs off one table to spare the main chunk's local budget.
+HAZARD = { facing = false, ticks = 0 }
+HAZARD.PIT = {}
+do
+  HAZARD.PIT[0x20] = true
+  for a = 0xB0, 0xBD do HAZARD.PIT[a] = true end
+end
+-- A sharp, quick notification rather than a sustained hum: `ping` makes each cycle an
+-- attack-decay strike instead of a swell, and BLIP frames at this tremolo is about one
+-- strike, so facing a pit produces a single crisp blip. Being brief also separates it
+-- from the enemy-weapon tone it used to sit next to in pitch — a one-shot and a
+-- continuous drone cannot be confused however close their frequencies are.
+-- Pitched above everything else in the vocabulary. The object tones run 0.7 to 2.0 and
+-- the guide's sonar sits at 3.0-3.4; putting the hazard at 4.0 leaves it nothing to be
+-- confused with, and high-and-sharp reads as a notification demanding attention where
+-- low-and-slow reads as a thing sitting in the room.
+HAZARD.TONE = { pitch = 4.0, tremolo = 8.0, volume = 0.8 }
+HAZARD.BLIP = 8 -- frames it sounds for, about a sixth of a second
+
+-- The nearest pit within REACH tiles in the direction Link faces, as world pixels, or
+-- nil. Looking only at the tile immediately ahead gave about one frame of warning at
+-- walking speed, which is no warning at all; scanning further turns it into a couple of
+-- steps' notice.
+--
+-- The scan stops at anything solid, because a pit behind a wall is not a step Link can
+-- take and warning about it would cry wolf every time he walked along the far side of
+-- one. A pit is itself impassable, so it is tested for before the wall check.
+HAZARD.REACH = 5 -- tiles ahead, about two steps of warning
+
+function HAZARD.pit_ahead(s)
+  local dir = s.direction
+  local dx = (dir == 4 and -8) or (dir == 6 and 8) or 0
+  local dy = (dir == 0 and -8) or (dir == 2 and 8) or 0
+  if dx == 0 and dy == 0 then return nil end
+  local px, py = s.x + 8, s.y + 12
+  for i = 1, HAZARD.REACH do
+    local ax, ay = px + dx * i, py + dy * i
+    local a = tile_attr_at(s, ax, ay)
+    if a == nil then return nil end
+    if HAZARD.PIT[a] then return ax, ay end
+    if not tile_passable(s, ax >> 3, ay >> 3) then return nil end
+  end
+  return nil
+end
+
+function HAZARD.clear()
+  HAZARD.facing = false
+  HAZARD.ticks = 0
+  beacon.clear("hazard")
+end
+
+function HAZARD.update(s)
+  if s == nil or s.module ~= 0x07 then HAZARD.clear(); return end
+  local ax, ay = HAZARD.pit_ahead(s)
+  if ax == nil then HAZARD.clear(); return end
+  -- Fires on turning ONTO the pit, not for as long as he faces it: a warning about a
+  -- step he is about to take has said its piece once he has heard it, and holding the
+  -- tone would bury the enemy and guide tones under it while he edges along a ledge.
+  -- Facing away re-arms it, so every fresh approach gets its own blip.
+  if not HAZARD.facing then
+    HAZARD.facing = true
+    HAZARD.ticks = HAZARD.BLIP
+  end
+  if HAZARD.ticks > 0 then
+    HAZARD.ticks = HAZARD.ticks - 1
+    -- Positioned on the pit itself, so the blip pans toward it and its distance is
+    -- audible in the stereo offset rather than having to be described.
+    beacon.set("hazard", { x = ax - s.x, y = ay - s.y, pitch = HAZARD.TONE.pitch,
+      tremolo = HAZARD.TONE.tremolo, ping = true, volume = HAZARD.TONE.volume })
+  else
+    beacon.clear("hazard")
+  end
 end
 
 -- Every tile attribute Link physically collides with, taken from the game's own
