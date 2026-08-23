@@ -3310,6 +3310,11 @@ local nav_idle_sig = nil -- signature at which an "on but idle" re-aim was last 
 -- The "<room>:<objective>" we last announced, so a short-term room objective is
 -- stated once on entry rather than every frame while it is unmet.
 local room_obj_announced = nil
+-- Bookkeeping for the room objective, global so it costs the main chunk no locals.
+-- `said` is the spoken latch (one cue per objective per room), `lapse` counts frames
+-- with no target so a flicker is not mistaken for the objective being finished.
+ROOMOBJ = { room = nil, said = nil, lapse = 0 }
+ROOMOBJ.LAPSE = 30 -- half a second of no target before believing it is over
 
 -- Aim the guide at the current quest goal from wherever Link stands. One line now:
 -- the goal engine picks the first unmet goal and route_to puts it on Link's map,
@@ -3890,18 +3895,34 @@ nav_update = function(s)
   end
   -- room_aim both picks the objective and sets its route, so what gets announced is
   -- what the guide actually committed to leading Link toward.
+  -- Saying it again is a fresh room's business, not a fresh frame's.
+  if ROOMOBJ.room ~= s.dungeon_room then
+    ROOMOBJ.room, ROOMOBJ.said, ROOMOBJ.lapse = s.dungeon_room, nil, 0
+  end
   local ro = room_aim(s)
   if ro then
     local key = s.dungeon_room .. ":" .. ro.id
-    if room_obj_announced ~= key then
+    room_obj_announced = key
+    ROOMOBJ.lapse = 0
+    -- The spoken latch is separate from the active trace on purpose. They used to be one
+    -- field, so a single frame with no target cleared it and the next frame said the cue
+    -- again — "defeat all enemies" over and over. ROOMOBJ.said only resets when the room
+    -- does, so a lapse cannot buy a second announcement.
+    if ROOMOBJ.said ~= key then
       nav_say(ro.cue)
-      room_obj_announced = key
+      ROOMOBJ.said = key
     end
     return
   end
   if room_obj_announced ~= nil then
+    -- And one frame without a target is not the objective clearing. A moving enemy
+    -- crosses the reachable boundary, a sprite slot blinks as it dies or respawns; taking
+    -- that for "done" re-aimed the whole quest route each time it happened.
+    ROOMOBJ.lapse = ROOMOBJ.lapse + 1
+    if ROOMOBJ.lapse < ROOMOBJ.LAPSE then return end
     room_obj_announced = nil
-    nav_reaim(s, v) -- objective cleared: resume the quest goal
+    ROOMOBJ.lapse = 0
+    nav_reaim(s, v) -- objective genuinely cleared: resume the quest goal
   end
   -- Drive the waypoint chain. Two legs, by module:
   if nav_chain and in_play(s) then
