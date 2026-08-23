@@ -1995,7 +1995,7 @@ fn alttp_room_0x70_is_forced_to_a_kill_room() {
 }
 
 #[test]
-fn alttp_giant_kill_room_counts_the_far_enemy_and_ignores_hp0_bystanders() {
+fn alttp_room_0x80_counts_the_far_key_carrier_and_ignores_hp0_bystanders() {
     // Room 0x80 is a giant kill-room: the enemy tally reaches across the whole room
     // so the big-key holder waiting in the far east still counts (an ordinary room's
     // ~144px window would miss it). And hp-0 sprites never count, so the caged Zelda
@@ -2026,11 +2026,14 @@ fn alttp_giant_kill_room_counts_the_far_enemy_and_ignores_hp0_bystanders() {
         set(0x7E0D01, 0x34); // y -> tile 518
         set(0x7E0D21, 0x10);
         set(0x7E0E51, if enemy_alive { 16 } else { 0 });
+        // It is the big-key carrier, which is what room 0x80's authored step names:
+        // die_action non-zero marks a guard that still drops a key on death.
+        set(0x7E0CBA + 1, if enemy_alive { 0x02 } else { 0x00 });
         ram
     };
 
-    // Trooper alive in the far east: the giant reach catches it, so the room states
-    // its kill requirement even though Zelda (hp 0) sits nearer.
+    // Trooper alive in the far east: room 0x80's step is the whole room, bounded only by
+    // what Link can reach, so it catches the trooper even though Zelda (hp 0) sits nearer.
     let live = frame(true);
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     plugin.on_frame(&live, 0);
@@ -2039,8 +2042,10 @@ fn alttp_giant_kill_room_counts_the_far_enemy_and_ignores_hp0_bystanders() {
     let out = plugin.on_frame(&live, 2);
     let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
     assert!(
-        texts.iter().any(|t| t.contains("Defeat all enemies")),
-        "the far eastern enemy counts under the room-wide reach: {texts:?}"
+        texts
+            .iter()
+            .any(|t| t.contains("Defeat the enemy holding the key")),
+        "the far eastern key carrier is the step's target: {texts:?}"
     );
 
     // Trooper gone: only Zelda (hp 0) remains, and hp 0 never counts, so the kill
@@ -2053,7 +2058,7 @@ fn alttp_giant_kill_room_counts_the_far_enemy_and_ignores_hp0_bystanders() {
     let out2 = plugin2.on_frame(&clear, 2);
     let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
     assert!(
-        !texts2.iter().any(|t| t.contains("Defeat all enemies")),
+        !texts2.iter().any(|t| t.contains("Defeat")),
         "the hp-0 Zelda bystander does not hold the room uncleared: {texts2:?}"
     );
 }
@@ -3905,5 +3910,64 @@ fn alttp_the_auto_start_in_the_house_says_so_and_still_cues_the_beat() {
     assert!(
         texts.iter().any(|t| t.to_lowercase().contains("lantern")),
         "and the beat cue still arrives: {texts:?}"
+    );
+}
+
+#[test]
+fn alttp_a_via_step_holds_the_scan_even_after_it_briefly_read_as_done() {
+    // Reported in room 0x80: the guide went straight to Zelda's cell past a
+    // Ball-and-Chain Trooper carrying the key. Entering a room, its enemies have not
+    // spawned yet, so a `via` fight step reads done for a frame or two — and the done
+    // branch used to mark it ARRIVED, which is permanent. Once latched, `via` could never
+    // hold the scan again and the later same-room waypoint won every time.
+    let r = Registry::builtin();
+    let frame = |enemy: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((12, 529), (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x80);
+            set(0x7E00EE, 0);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3CC, 0);
+            set(0x7EF3C5, 0); // COURTYARD armed
+        }
+        if enemy {
+            // A key-carrying trooper, as the room really holds.
+            sprite_slot(&mut ram, 2, 106, (52, 530), 16);
+            ram[wram_offset(0x7E0CBA + 2).unwrap()] = 0x02; // die_action: drops a key
+        }
+        ram
+    };
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // Arrive with nothing spawned: the fight step reads done for these frames.
+    let empty = frame(false);
+    p.on_frame(&empty, 0);
+    p.on_frame(&empty, 1);
+    p.command("advance", &empty);
+    p.on_frame(&empty, 2);
+
+    // Now the trooper loads. The fight step must take the route back — after the
+    // driver's re-probe throttle expires, since it keeps following a still-valid route
+    // rather than re-picking every frame.
+    let live = frame(true);
+    for f in 3..20 {
+        p.on_frame(&live, f);
+    }
+    assert_eq!(
+        p.eval(PICKED, &live).unwrap(),
+        "80,nil,nil",
+        "the fight step holds the scan; it must not have latched as arrived"
+    );
+    assert_eq!(
+        p.eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &live
+        )
+        .unwrap(),
+        "52,530",
+        "and it leads to the enemy carrying the key, not on to the cell"
     );
 }
