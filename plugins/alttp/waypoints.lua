@@ -80,7 +80,7 @@ COURTYARD = {
     note = "Lower floor, reached down those stairs." },
   { tx = 129, ty = 560, room = 0x82, level = 1 },
   { tx = 79, ty = 518, room = 0x81, level = 1 },
-  { tx = 88, ty = 495, room = 0x71, level = 1,
+  { tx = 104, ty = 495, room = 0x71, level = 1,
     note = "Lower-floor anchor by the chest, where the route to the next room (0x70) and its key-carrying soldier begins." },
   { tx = 79, ty = 486, room = 0x71, level = 0, kind = "gate", gate = {"keys"},
     note = "The locked door itself, up on the UPPER floor (a 2x2 at 79-80,485-486), reached by a clean straight climb up the swap stair and north, with no floor-flip back to L1 and so no wall-cross. Room 0x71 is open enough on the lower floor that the pathfinder can reach the far waypoint without ever crossing this door, so a pure collision block is not enough and the guide has to be told the dependency. gate: only a target once Link holds a key to open it. done: clears once the door's own tile stops reading as locked." },
