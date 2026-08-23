@@ -479,6 +479,16 @@ fn alttp_an_unopened_chest_sounds_like_an_item_until_it_is_opened() {
 
 // A dungeon frame: Link at (link_tx, link_ty), a door tile at (door_tx,
 // door_ty), and wall tiles, all in the $7F2000 collision grid. No sprites.
+/// Which waypoint the guide is leading to, as "room,tx,ty" — its identity rather than
+/// its index. Chains get steps inserted and removed; a test that hardcodes a number
+/// breaks on every edit and says nothing about what went wrong, so these name the
+/// waypoint instead.
+const PICKED: &str = r#"
+  local wp = nav_chain and nav_chain[nav_chain_i]
+  if wp == nil then return "none" end
+  return string.format("%02X,%s,%s", wp.room or 0, tostring(wp.tx), tostring(wp.ty))
+"#;
+
 fn dungeon_frame(link: (u16, u16), door: (u16, u16), walls: &[(u16, u16)]) -> Vec<u8> {
     let mut ram = vec![0u8; 128 * 1024];
     {
@@ -1054,18 +1064,16 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "18,1",
+        armed, "19,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
     // Drive Link onto the first waypoint (282,225); a frame there advances to 2.
     let at_wp1 = frame(282 * 8, 225 * 8);
     plugin.on_frame(&at_wp1, 2);
-    let advanced = plugin
-        .eval("return tostring(nav_chain_i)", &at_wp1)
-        .unwrap();
+    let advanced = plugin.eval(PICKED, &at_wp1).unwrap();
     assert_eq!(
-        advanced, "2",
+        advanced, "00,256,225",
         "reaching waypoint 1 advances the chain to 2: {advanced}"
     );
 }
@@ -1126,8 +1134,8 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
     plugin.command("advance", &away); // engage -> arms chain at 1
     plugin.on_frame(&ow(282 * 8, 225 * 8), 2); // reach wp1 -> advance to 2
     assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &away).unwrap(),
-        "2",
+        plugin.eval(PICKED, &away).unwrap(),
+        "00,256,225",
         "reaching the bushes advances to the door"
     );
 
@@ -1140,7 +1148,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "18,2",
+        resumed, "19,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1184,7 +1192,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "18,2",
+        armed, "19,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1223,7 +1231,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "18,4",
+        "19,4",
         "the dungeon leg targets room 0x61's waypoint (index 4)"
     );
 
@@ -1241,10 +1249,8 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
     plugin.on_frame(&frame(0x60, 48, 415), 4); // enter room 0x60
     plugin.on_frame(&frame(0x60, 48, 415), 5);
     assert_eq!(
-        plugin
-            .eval("return tostring(nav_chain_i)", &frame(0x60, 48, 415))
-            .unwrap(),
-        "5",
+        plugin.eval(PICKED, &frame(0x60, 48, 415)).unwrap(),
+        "60,47,392",
         "in room 0x60 the chain leads to that room's waypoint (index 5)"
     );
 }
@@ -1286,8 +1292,8 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
     plugin.command("advance", &down);
     plugin.on_frame(&down, 2);
     assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &down).unwrap(),
-        "9",
+        plugin.eval(PICKED, &down).unwrap(),
+        "72,149,507",
         "a down-stair lets the guide cross to the lower-floor waypoint (index 10)"
     );
 
@@ -1300,8 +1306,8 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
     plugin2.command("advance", &up);
     plugin2.on_frame(&up, 2);
     assert_eq!(
-        plugin2.eval("return tostring(nav_chain_i)", &up).unwrap(),
-        "8",
+        plugin2.eval(PICKED, &up).unwrap(),
+        "72,159,472",
         "an up-stair is not a down path: the one-way drop is not routed through backwards"
     );
 }
@@ -1309,57 +1315,49 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
 #[test]
 fn alttp_a_down_staircase_is_walked_across_not_treated_as_a_wall() {
     // A down-STAIRCASE (0x3D-0x3F) is an in-room stair Link simply walks down, whose far
-    // end may be the SAME floor (e.g. 0x55's exit pocket) — so unlike a swap-layer stair
-    // the pathfinder MAY walk across it. Room 0x72, Link upstairs, split by a wall band
-    // with a single gap; the upper waypoint 9 sits past it. A down-staircase in the gap
-    // is crossed to it (index 9), exactly as plain floor would be; a solid wall there is
-    // not, so the guide holds at the near waypoint (index 8).
+    // end may be on the SAME floor (0x55's exit pocket, say) — so unlike a swap-layer
+    // stair the pathfinder MAY walk across it, exactly as it would plain floor. A solid
+    // wall in the same gap is not crossed.
+    //
+    // Painted from scratch rather than aimed at an authored waypoint: this used to route
+    // to COURTYARD's layer-swap-stairs waypoint, and when that waypoint was deleted the
+    // only 0x72 point past the wall was on the other floor, so both gap types behaved
+    // the same and the test quietly stopped distinguishing them. A door of its own
+    // cannot be renumbered or removed out from under it.
     let r = Registry::builtin();
 
     let frame = |gap: u8| -> Vec<u8> {
-        let mut ram = dungeon_frame((159, 470), (0, 0), &[]);
+        // Link north of a wall band; the door he is guided to is south of it, so the
+        // only way through is the gap.
+        let mut ram = dungeon_frame((159, 470), (159, 500), &[]);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E00A0, 0x72);
         set(0x7E00EE, 0); // upper floor
-        set(0x7EF34A, 1); // Lamp
-        set(0x7EF359, 1); // sword
-        set(0x7EF3CC, 0); // Zelda not following
-        set(0x7EF3C5, 0); // Zelda beat -> courtyard chain armed
-        set(0x7EF0E5, 0x80); // room 0x72 chest opened -> no kill sub-goal in the way
-                             // A wall band across the upper floor at grid row 33, one gap at col 31.
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        // A wall band across the upper floor at grid row 33, with one gap at col 31.
         for tx in 0..64u32 {
             set(0x7F2000 + 33 * 64 + tx, 0x01);
         }
-        set(0x7F2000 + 33 * 64 + 31, gap); // the gap: a down-staircase, or a solid wall
-        set(0x7F3000 + 33 * 64 + 31, 0x01); // lower floor blocked: no valid hop down here
+        set(0x7F2000 + 33 * 64 + 31, gap);
         ram
     };
 
-    // A down-staircase in the gap: walked across to the far upper waypoint (9).
-    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    let stair = frame(0x3E);
-    plugin.on_frame(&stair, 0);
-    plugin.on_frame(&stair, 1);
-    plugin.command("advance", &stair);
-    plugin.on_frame(&stair, 2);
-    assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &stair).unwrap(),
-        "8",
-        "a down-staircase in the gap is walked across to the far waypoint (index 8)"
-    );
+    let crosses = |gap: u8| -> bool {
+        let ram = frame(gap);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.command("pathfind", &ram); // guide to the nearest door
+        p.on_frame(&ram, 2);
+        p.eval("return tostring(pathfind_active)", &ram).unwrap() == "true"
+    };
 
-    // A solid wall in the gap: cannot pass, so the guide holds at the near one (index 8).
-    let mut plugin2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    let wall = frame(0x01);
-    plugin2.on_frame(&wall, 0);
-    plugin2.on_frame(&wall, 1);
-    plugin2.command("advance", &wall);
-    plugin2.on_frame(&wall, 2);
-    assert_eq!(
-        plugin2.eval("return tostring(nav_chain_i)", &wall).unwrap(),
-        "8",
-        "a solid wall in the gap is not crossed: the guide holds at the near waypoint"
+    assert!(
+        crosses(0x3D),
+        "a down-staircase in the gap is walked across"
     );
+    assert!(!crosses(0x01), "a solid wall in the gap is not");
 }
 
 #[test]
@@ -1400,8 +1398,8 @@ fn alttp_an_overlay_mask_hole_is_a_one_way_drop_to_the_lower_floor() {
     plugin.command("advance", &hole);
     plugin.on_frame(&hole, 2);
     assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &hole).unwrap(),
-        "9",
+        plugin.eval(PICKED, &hole).unwrap(),
+        "72,149,507",
         "an overlay-mask hole drops Link to the lower-floor waypoint (index 10)"
     );
 
@@ -1414,11 +1412,9 @@ fn alttp_an_overlay_mask_hole_is_a_one_way_drop_to_the_lower_floor() {
     plugin2.command("advance", &solid);
     plugin2.on_frame(&solid, 2);
     assert_eq!(
-        plugin2
-            .eval("return tostring(nav_chain_i)", &solid)
-            .unwrap(),
-        "8",
-        "with no floor crossing the lower-floor waypoint stays unreachable (index 8)"
+        plugin2.eval(PICKED, &solid).unwrap(),
+        "72,159,472",
+        "with no floor crossing the lower-floor waypoint stays unreachable (index 9)"
     );
 }
 
@@ -1469,8 +1465,8 @@ fn alttp_a_ledge_drop_lands_across_a_walled_barrier() {
     plugin.command("advance", &f);
     plugin.on_frame(&f, 2);
     assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &f).unwrap(),
-        "9",
+        plugin.eval(PICKED, &f).unwrap(),
+        "72,149,507",
         "the fall scans across the hole to the open floor and reaches the lower waypoint (10)"
     );
 
@@ -1483,9 +1479,9 @@ fn alttp_a_ledge_drop_lands_across_a_walled_barrier() {
     plugin2.command("advance", &f2);
     plugin2.on_frame(&f2, 2);
     assert_eq!(
-        plugin2.eval("return tostring(nav_chain_i)", &f2).unwrap(),
-        "8",
-        "with every lower tile under the hole walled the drop cannot land (index 8)"
+        plugin2.eval(PICKED, &f2).unwrap(),
+        "72,159,472",
+        "with every lower tile under the hole walled the drop cannot land (index 9)"
     );
 }
 
@@ -1586,8 +1582,8 @@ fn alttp_a_closed_locked_door_blocks_the_route() {
     plugin.command("advance", &open);
     plugin.on_frame(&open, 2);
     assert_eq!(
-        plugin.eval("return tostring(nav_chain_i)", &open).unwrap(),
-        "9",
+        plugin.eval(PICKED, &open).unwrap(),
+        "72,149,507",
         "an open landing lets the guide cross to the lower-floor waypoint"
     );
 
@@ -1600,10 +1596,8 @@ fn alttp_a_closed_locked_door_blocks_the_route() {
     plugin2.command("advance", &locked);
     plugin2.on_frame(&locked, 2);
     assert_eq!(
-        plugin2
-            .eval("return tostring(nav_chain_i)", &locked)
-            .unwrap(),
-        "8",
+        plugin2.eval(PICKED, &locked).unwrap(),
+        "72,159,472",
         "a closed locked door blocks the route: the guide does not lead through it"
     );
 }
@@ -1642,25 +1636,25 @@ fn alttp_locked_door_gate_holds_the_route_until_the_door_is_open() {
         p.on_frame(ram, 1);
         p.command("advance", ram);
         p.on_frame(ram, 2);
-        p.eval("return tostring(nav_chain_i)", ram).unwrap()
+        p.eval(PICKED, ram).unwrap()
     };
 
     // Keyless, door shut: holds at the chest anchor (13).
     assert_eq!(
         arm(&frame(0, false)),
-        "12",
+        "71,88,495",
         "keyless, the guide holds at the chest anchor"
     );
     // Keyed but the door still shut: still holds — a key alone no longer opens the exit.
     assert_eq!(
         arm(&frame(1, false)),
-        "12",
+        "71,88,495",
         "with a key but the door still shut, the guide still holds at the anchor"
     );
     // Door open: the exit past the door opens up (15).
     assert_eq!(
         arm(&frame(1, true)),
-        "14",
+        "71,84,455",
         "with the door open the route continues to the exit past it"
     );
 }
@@ -2651,20 +2645,20 @@ fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
               return table.concat({
                 #WAYPOINTS.UNCLE_APPROACH, #c, #sanct,
                 type(c.note),                 -- the chain's own prose
-                type(c[13].note),             -- the locked door's rationale
-                type(c[13].gate),             -- ...compiled from a clause
-                tostring(c[13].kind),         -- and its kind says what satisfies it
+                type(c[14].note),             -- the locked door's rationale
+                type(c[14].gate),             -- ...compiled from a clause
+                tostring(c[14].kind),         -- and its kind says what satisfies it
                 tostring(sanct[12].kind),     -- the Movable Mantle's push
                 type(c[1].gate),              -- an ungated waypoint stays ungated
                 -- A kind supplies the done its waypoint no longer spells out.
-                type(KIND.of(c[13]).done),
+                type(KIND.of(c[14]).done),
                 tostring(KIND.of(c[1]).done), -- a plain place has nothing to satisfy
               }, "|")
             "#,
             &ram
         )
         .unwrap(),
-        "3|18|20|string|string|function|gate|push|nil|function|nil",
+        "3|19|20|string|string|function|gate|push|nil|function|nil",
         "chains arrive whole, prose intact, clauses compiled to closures"
     );
 }
@@ -3046,20 +3040,25 @@ fn alttp_room_rules_come_from_the_waypoints_module() {
     assert_eq!(
         p.eval(
             r#"
+              -- The fights are chain steps now; ROOMS keeps only what is genuinely
+              -- room-scoped, and WP.fights is the index saying which rooms have an
+              -- authored fight so the fallback objectives know to stand aside.
               return table.concat({
-                tostring(ROOMS[0x70].kill),          -- always a kill-room
-                type(ROOMS[0x72].kill),              -- ...this one is conditional
+                tostring(ROOMS[0x70]),               -- nothing room-scoped left
                 tostring(ROOMS[0x80].giant),         -- counts enemies room-wide
-                tostring(ROOMS[0x71].kill),          -- carries its own clear-tag
                 #ROOMS[0x71].region,                 -- two walled guard pits
                 type(ROOMS[0x72].note),
+                tostring(WP.fights[0x70]),           -- authored fight: 0x70, 0x72, 0x80
+                tostring(WP.fights[0x72]),
+                tostring(WP.fights[0x80]),
+                tostring(WP.fights[0x71]),           -- 0x71 has none, so tags still speak
               }, "|")
             "#,
             &ram
         )
         .unwrap(),
-        "true|table|true|nil|2|string",
-        "rules arrive as data, prose intact"
+        "nil|true|2|string|true|true|true|nil",
+        "room rules keep what is room-scoped; fights are indexed steps"
     );
 }
 
@@ -3071,7 +3070,9 @@ fn alttp_the_chest_opened_clause_reads_the_rooms_permanent_bit() {
     let probe = r#"
         local s = { module = 0x07, dungeon_room = 0x72 }
         return tostring(WP.test(s, { room = 0x72 }, {"chest_opened"}))
-          .. "|" .. tostring(WP.test(s, { room = 0x72 }, ROOMS[0x72].kill))
+          -- 0x72's fight is a chain step gated on the chest being shut, so the clause
+          -- is read through that waypoint's own gate rather than a room rule.
+          .. "|" .. tostring(WP.test(s, { room = 0x72 }, {"not", {"chest_opened"}}))
           .. "|" .. tostring(WP.test(s, { room = 0x71 }, {"chest_opened"}))
     "#;
     let read = |opened: bool| -> String {
@@ -3256,7 +3257,7 @@ fn alttp_a_clear_waypoint_leads_to_the_enemies_and_holds_the_route_until_they_ar
         p.command("advance", ram);
         p.on_frame(ram, 2);
         (
-            p.eval("return tostring(nav_chain_i)", ram).unwrap(),
+            p.eval(PICKED, ram).unwrap(),
             p.eval(
                 "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
                 ram,
@@ -3268,7 +3269,10 @@ fn alttp_a_clear_waypoint_leads_to_the_enemies_and_holds_the_route_until_they_ar
     let mut live = frame();
     sprite_slot(&mut live, 0, 66, (30, 456), 4); // a Blue Soldier in the room
     let (i, goal) = arm(&live);
-    assert_eq!(i, "15", "the clear step is the target, not the exit at 16");
+    assert_eq!(
+        i, "70,nil,nil",
+        "the clear step is the target, not the room's exit"
+    );
     assert_eq!(
         goal, "30,456",
         "and it leads to the enemy, wherever it stands"
@@ -3277,7 +3281,10 @@ fn alttp_a_clear_waypoint_leads_to_the_enemies_and_holds_the_route_until_they_ar
     // With the room quiet the clear step retires itself and the exit takes over.
     let quiet = frame();
     let (i2, _) = arm(&quiet);
-    assert_eq!(i2, "16", "a cleared room hands on to the exit waypoint");
+    assert_eq!(
+        i2, "70,10,452",
+        "a cleared room hands on to the exit waypoint"
+    );
 }
 
 #[test]
@@ -3308,7 +3315,7 @@ fn alttp_a_clear_waypoint_takes_over_from_the_room_objective() {
             &ram
         )
         .unwrap(),
-        "15",
+        "16",
         "the chain's clear step is what the guide committed to"
     );
     // The objective did not also fire: room_obj_announced stays clear, so nothing
@@ -3317,5 +3324,52 @@ fn alttp_a_clear_waypoint_takes_over_from_the_room_objective() {
         p.eval("return tostring(room_obj_announced)", &ram).unwrap(),
         "nil",
         "no room objective overrode the chain's own step"
+    );
+}
+
+#[test]
+fn alttp_an_authored_fight_still_speaks_when_no_chain_covers_the_room() {
+    // The hole this closes. Room 0x70's fight is a step in COURTYARD, but COURTYARD's
+    // goal completes at progress 2, so a later backtrack into the room had no chain to
+    // consult and the guards blocking the passage went unmentioned. The errand index
+    // makes the step visible from any quest state, which is why the room needs no
+    // separate rule of its own.
+    let r = Registry::builtin();
+    let mut ram = dungeon_frame((20, 452), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x70);
+        set(0x7E00EE, 0);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3C5, 2); // Zelda delivered: neither castle chain is armed any more
+    }
+    sprite_slot(&mut ram, 0, 66, (30, 456), 4); // a guard is back
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram);
+    let out = p.on_frame(&ram, 2);
+
+    assert_eq!(
+        p.eval("return tostring(nav_chain)", &ram).unwrap(),
+        "nil",
+        "no chain is armed at this point in the quest"
+    );
+    assert_eq!(
+        p.eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &ram
+        )
+        .unwrap(),
+        "30,456",
+        "and the guide still leads to the guard, from the authored step alone"
+    );
+    assert!(
+        out.iter().any(|i| i.text.contains("Defeat all enemies")),
+        "stating the requirement: {:?}",
+        out.iter().map(|i| &i.text).collect::<Vec<_>>()
     );
 }

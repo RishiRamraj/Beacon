@@ -72,6 +72,8 @@ COURTYARD = {
   { tx = 47, ty = 392, room = 0x60, level = 1 },
   { tx = 57, ty = 335, room = 0x50, level = 1 },
   { tx = 95, ty = 11, room = 0x01, level = 1 },
+  { room = 0x72, kind = "clear", via = true, gate = {"not", {"chest_opened"}},
+    note = "Room 0x72's guard drops the key for its chest, so the fight comes first. Gated on the chest being shut, which is the room's old forced-kill rule stated as data: that bit is permanent, so once the chest is opened this step stops being eligible and a backtrack — which respawns the guard, the room having no clear-tag — never re-arms it." },
   { tx = 159, ty = 472, room = 0x72, level = 0,
     note = "South-door exit, upper floor, after the guard, the key and the chest." },
   { tx = 149, ty = 507, room = 0x72, level = 1,
@@ -142,24 +144,17 @@ SANCTUARY = {
 
 ROOMS = {
 
-[0x70] = {
-  kill = true,
-  note = "The forward trip through here is a `clear` waypoint in the COURTYARD chain, where the fight belongs — a step in the route, in order. This rule is the fallback for arriving any other way: the room sets no clear-tag of its own, so without it a backtrack into 0x70 would say nothing about the guards blocking the passage. When a chain does cover the room its step wins, so the fight is never driven twice.",
-},
-
 [0x71] = {
   region = {{n = 491, e = 90, s = 506, w = 69}, {n = 487, e = 122, s = 506, w = 101}},
   note = "Not a forced kill-room — it carries its own clear-tag. Two guard pits side by side, every edge on a green ledge wall, walled off from each other: an enemy in one pit cannot be reached from the other, which is why an objective has to be checked for reachability before the guide commits to it. Boxes are the debug overlay only.",
 },
 
 [0x72] = {
-  kill = {"not", {"chest_opened"}},
   region = {{n = 458, e = 166, s = 474, w = 153}},
-  note = "Forced to a kill-room only until its chest is opened. That bit is permanent, so a backtrack — which respawns the guard, the room having no clear-tag — never re-arms the sub-goal, and the room's reuse for the lower area is never a kill-room. One walled fighting chamber, regular walls rather than green ledges, so the box hugs the dark floor inside (cols 153-166, rows 458-474).",
+  note = "Its fight is a `clear` step in the COURTYARD chain, gated on the chest being shut. What stays here is the pit: one walled fighting chamber, regular walls rather than green ledges, so the box hugs the dark floor inside (cols 153-166, rows 458-474).",
 },
 
 [0x80] = {
-  kill = true,
   giant = true,
   note = "The jail-cell room. Its fight is a `clear` waypoint in the COURTYARD chain, where it belongs — a step in the route. What stays here is room-scoped: giant means enemies count across the whole 512-pixel room rather than one screen, so the far-east big-key holder still registers from anywhere in it.",
 },
