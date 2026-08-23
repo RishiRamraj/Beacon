@@ -1192,9 +1192,10 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
 #[test]
 fn alttp_zelda_chain_leads_through_the_castle_rooms() {
     // The courtyard chain continues past the door into the castle as dungeon
-    // waypoints, room by room: Find Zelda in room 0x61, then a silent point in
-    // room 0x60. The chain stays armed across rooms; reaching one advances to the
-    // next without a signature change.
+    // waypoints, room by room: one in room 0x61, then one in room 0x60. The chain
+    // stays armed across rooms; reaching one advances to the next without a
+    // signature change. The waypoints are silent — the guide tone leads, and the
+    // chain no longer narrates where it is setting off to.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -1211,37 +1212,31 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         ram
     };
 
-    // In room 0x61, a few tiles west of the Find Zelda waypoint (72,415): engaging
-    // arms the chain, and the driver leads to that waypoint, announcing "Find
-    // Zelda" as it sets off.
+    // In room 0x61, a few tiles west of that room's waypoint (72,415): engaging arms
+    // the chain and the driver leads to it.
     let approach = frame(0x61, 65, 415);
     plugin.on_frame(&approach, 0);
     plugin.on_frame(&approach, 1);
     plugin.command("advance", &approach); // engage -> chain armed
-    let out = plugin.on_frame(&approach, 2); // driver leads to the waypoint
+    plugin.on_frame(&approach, 2); // driver leads to the waypoint
     assert_eq!(
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
         "17,4",
-        "the dungeon leg targets the Find Zelda waypoint (index 4)"
-    );
-    assert!(
-        out.iter().any(|i| i.text.contains("Find Zelda")),
-        "announces the waypoint phrase: {:?}",
-        out.iter().map(|i| &i.text).collect::<Vec<_>>()
+        "the dungeon leg targets room 0x61's waypoint (index 4)"
     );
 
-    // Reaching Find Zelda records it and goes quiet — no room-graph hop. The chain
-    // stays armed; only when Link crosses into room 0x60 (its lower floor) does its
-    // waypoint (index 5) take over and lead to the silent point there.
-    plugin.on_frame(&frame(0x61, 72, 415), 3); // on Find Zelda -> recorded
+    // Reaching it records it — no room-graph hop. The chain stays armed; only when
+    // Link crosses into room 0x60 (its lower floor) does its waypoint (index 5) take
+    // over and lead to the point there.
+    plugin.on_frame(&frame(0x61, 72, 415), 3); // arrived -> recorded
     assert!(
         plugin
             .eval("return tostring(nav_chain)", &frame(0x61, 72, 415))
             .unwrap()
             .contains("table"),
-        "the chain stays armed after Find Zelda"
+        "the chain stays armed after arriving"
     );
     plugin.on_frame(&frame(0x60, 48, 415), 4); // enter room 0x60
     plugin.on_frame(&frame(0x60, 48, 415), 5);
@@ -2746,5 +2741,82 @@ fn alttp_a_pot_sweep_finds_pots_and_leaves_the_pushable_block_alone() {
             .unwrap(),
         "1",
         "the lifted pot's waypoint is dropped, the other stays"
+    );
+}
+
+// ── Map labels ──────────────────────────────────────────────────────────────
+// A 64-tile room is drawn 200 pixels across, so a tile is barely three pixels and
+// a two-digit label is eleven wide — labels crowd each other badly, and the route
+// numbers every tile of the path. LABELS keeps them apart or drops them.
+
+/// Places labels through LABELS against a stub canvas and reports what landed
+/// where, as "text@x,y" in draw order.
+const LABEL_PROBE: &str = r#"
+  local drawn = {}
+  local canvas = { text = function(self, x, y, s) drawn[#drawn + 1] = s .. "@" .. x .. "," .. y end }
+  LABELS.reset()
+  LABELS.number(canvas, POINTS)
+  return table.concat(drawn, " ")
+"#;
+
+fn place(points: &str) -> String {
+    let r = Registry::builtin();
+    let ram = vec![0u8; 128 * 1024];
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.eval(&format!("POINTS = {points}"), &ram).unwrap();
+    p.eval(LABEL_PROBE, &ram).unwrap()
+}
+
+#[test]
+fn alttp_a_crowded_map_label_moves_aside_or_is_dropped() {
+    // One label alone takes the spot a reader looks first: up and to the right.
+    assert_eq!(
+        place(r#"{ { 50, 50, text = "7", color = 0 } }"#),
+        "7@53,47",
+        "a lone label sits above and right of its marker"
+    );
+
+    // A second marker three pixels away — one tile — cannot use that spot, so it
+    // goes to the left of its own marker rather than printing over the first.
+    let two = place(r#"{ { 50, 50, text = "7", color = 0 }, { 53, 50, text = "8", color = 0 } }"#);
+    assert_eq!(two, "7@53,47 8@45,47", "the crowded label steps aside");
+
+    // Six markers on the same pixel exhaust the offsets: the ones that fit are
+    // drawn, the rest are dropped rather than smeared on top of each other.
+    let pile: Vec<String> = (0..8)
+        .map(|i| format!(r#"{{ 60, 60, text = "{i}", color = 0 }}"#))
+        .collect();
+    let drawn = place(&format!("{{ {} }}", pile.join(", ")));
+    let count = drawn.split_whitespace().count();
+    assert!(
+        count < 8,
+        "labels stacked on one point cannot all be drawn: {drawn}"
+    );
+    // Every label that was drawn is at a distinct position.
+    let mut spots: Vec<&str> = drawn
+        .split_whitespace()
+        .map(|d| d.split('@').nth(1).unwrap())
+        .collect();
+    let before = spots.len();
+    spots.sort_unstable();
+    spots.dedup();
+    assert_eq!(
+        spots.len(),
+        before,
+        "no two labels share a position: {drawn}"
+    );
+}
+
+#[test]
+fn alttp_the_active_label_wins_the_spot_it_wants() {
+    // The immediate goal is the one number that has to be readable, so it is placed
+    // before its neighbours even when it comes later in the list.
+    assert_eq!(
+        place(
+            r#"{ { 50, 50, text = "7", color = 0 },
+                 { 53, 50, text = "8", color = 0, first = true } }"#
+        ),
+        "8@56,47 7@42,47",
+        "the active label takes its preferred spot and the other steps aside"
     );
 }

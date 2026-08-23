@@ -3589,6 +3589,68 @@ on_command("guide_to_mark", function()
   mark_goto(1) -- speaks its own outcome
 end)
 
+-- Map label placement.
+--
+-- The playfield draws a 64-tile room 200 pixels across, so one tile is barely
+-- three pixels, while a two-digit number in the 5x7 font is eleven wide and seven
+-- tall — near four tiles by two. A label drawn at a fixed offset from its marker
+-- therefore lands on its neighbours', and since the route numbers every tile of
+-- the path, three pixels apart, the result is a smear that reads as nothing.
+--
+-- So every numbered label goes through here. It remembers what it has already put
+-- down this frame and walks a few offsets around the marker looking for clear
+-- space, drawing nothing rather than a pile. Skipping a label is the right failure:
+-- the marker is still there, and a number that cannot be read is worse than a gap,
+-- which at least thins the route's numbering into something legible.
+LABELS = { taken = {} }
+
+-- Offsets to try, as {dx, dy, anchor}: anchor 1 puts the label's left edge at dx,
+-- -1 its right edge, 0 centres it. Right-of-marker first, since that is where a
+-- reader looks, then left, then above and below.
+LABELS.SPOTS = {
+  { 3, -3, 1 }, { 3, 1, 1 }, { -3, -3, -1 }, { -3, 1, -1 }, { 0, -9, 0 }, { 0, 5, 0 },
+}
+
+function LABELS.reset()
+  LABELS.taken = {}
+end
+
+-- Draws `text` near (px, py) in the first free spot, returning true if it fit.
+function LABELS.put(canvas, px, py, text, color)
+  local w, h = #text * 6 - 1, 7
+  for _, o in ipairs(LABELS.SPOTS) do
+    local x = px + o[1]
+    if o[3] == -1 then x = x - w elseif o[3] == 0 then x = px + o[1] - w // 2 end
+    local y = py + o[2]
+    local clear = true
+    for _, r in ipairs(LABELS.taken) do
+      if x < r[1] + r[3] and r[1] < x + w and y < r[2] + r[4] and r[2] < y + h then
+        clear = false
+        break
+      end
+    end
+    if clear then
+      LABELS.taken[#LABELS.taken + 1] = { x, y, w, h }
+      canvas:text(x, y, text, color)
+      return true
+    end
+  end
+  return false
+end
+
+-- Draws a set of labels, those marked `first` ahead of the rest: the earliest
+-- caller keeps its spot, so the immediate goal is the number that survives a
+-- crowd. Each entry is {x, y, text = ..., color = ..., first = ...}.
+function LABELS.number(canvas, points)
+  for pass = 1, 2 do
+    for _, p in ipairs(points) do
+      if (p.first == true) == (pass == 1) then
+        LABELS.put(canvas, p[1], p[2], p.text, p.color)
+      end
+    end
+  end
+end
+
 -- Map mode: a schematic of what the plugin reads, for debugging and for sighted
 -- assistance. In a dungeon or on the overworld it draws the area's actual shape
 -- from the collision map; elsewhere it is just the position/sprite overlay.
@@ -3597,6 +3659,7 @@ end)
 function on_draw(canvas)
   local w, h = canvas.width, canvas.height
   canvas:clear(0x101828)
+  LABELS.reset()
 
   local s = prev
   if s == nil then
@@ -3790,14 +3853,17 @@ function on_draw(canvas)
       -- Cyan for the ordinary points, white for the active target, so the debug
       -- markers never read as the pink route or the orange dropped markers.
       if nav_chain then
+        local labels = {}
         for i, wp in ipairs(nav_chain) do
           if wp.room == s.dungeon_room and inwin(wp.tx * 8 + 4, wp.ty * 8 + 4) then
             local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
             local wc = (i == nav_chain_i) and 0xFFFFFF or 0x50D0F0
             canvas:rect(px - 1, py - 1, 3, 3, wc)
-            canvas:text(px + 3, py - 3, tostring(i), wc)
+            labels[#labels + 1] = { px, py, text = tostring(i), color = wc,
+              first = i == nav_chain_i }
           end
         end
+        LABELS.number(canvas, labels)
       end
 
       -- Direct-pathfind phases (e.g. escorting Zelda) have no chain, but the guide
@@ -3805,12 +3871,16 @@ function on_draw(canvas)
       -- corners too — in the route's own pink, the active one white — so the
       -- immediate target always carries a number, not just chain waypoints.
       if pathfind_active and pathfind_path then
+        local labels = {}
         for i, wt in ipairs(pathfind_path) do
           if inwin(wt[1] * 8 + 4, wt[2] * 8 + 4) then
             local px, py = plot(wt[1] * 8 + 4, wt[2] * 8 + 4)
-            canvas:text(px + 3, py - 3, tostring(i), (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
+            labels[#labels + 1] = { px, py, text = tostring(i),
+              color = (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0,
+              first = i == pathfind_wp }
           end
         end
+        LABELS.number(canvas, labels)
       end
     end
 

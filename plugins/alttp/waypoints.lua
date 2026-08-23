@@ -64,11 +64,11 @@ UNCLE_APPROACH = {
 
 COURTYARD = {
   note = "The courtyard crossing after Uncle. With the sword in hand Link leaves the uncle room back out to the courtyard, cuts through the two bushes, then enters the castle proper by the door just south of him. The guide leads to each waypoint in turn rather than straight at the door, because the intended path goes through the bushes and routing direct would skip them. Coordinates are world tiles read live from the game. From the first waypoint carrying a `room` the chain is inside the castle and the in-room pathfinder takes over, carrying on to Zelda's cell.",
-  { tx = 282, ty = 225, say = "Head to the bushes and slash through." },
-  { tx = 256, ty = 225, say = "Go to the castle." },
+  { tx = 282, ty = 225 },
+  { tx = 256, ty = 225 },
   { tx = 335, ty = 379, room = 0x55, level = 0,
     note = "The sewer room where the uncle is met." },
-  { tx = 72, ty = 415, room = 0x61, say = "Find Zelda." },
+  { tx = 72, ty = 415, room = 0x61 },
   { tx = 47, ty = 392, room = 0x60, level = 1 },
   { tx = 57, ty = 335, room = 0x50, level = 1 },
   { tx = 95, ty = 11, room = 0x01, level = 1 },
@@ -88,7 +88,7 @@ COURTYARD = {
     note = "Floor-1 door out of 0x71. gate: not a target until the locked door above (79,486) is actually OPEN, so Link is led to unlock that door first rather than aimed here early, which would force the pathfinder up-and-back through the wall. Once the door is open the way here is clear." },
   { tx = 10, ty = 452, room = 0x70, level = 0,
     note = "Into room 0x70." },
-  { tx = 44, ty = 518, room = 0x80, say = "Free Princess Zelda.",
+  { tx = 44, ty = 518, room = 0x80,
     note = "Her cell, down the stairs from 0x70 — the rescue." },
 },
 
