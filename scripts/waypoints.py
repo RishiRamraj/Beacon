@@ -69,8 +69,9 @@ MODULES = {
 # The order fields are written in: position, then identity, then speech, then
 # behaviour, then conditions. `note` is written last, on its own line.
 FIELD_ORDER = [
-    "tx", "ty", "room", "level", "say", "arrival", "cue", "via", "after_lift",
-    "push", "track", "track_dx", "track_dy", "gate", "done",
+    "tx", "ty", "room", "level", "kind", "say", "arrival", "cue", "via",
+    "after_lift", "push", "track", "track_dx", "track_dy", "carries", "latch",
+    "gate", "done",
 ]
 # Fields whose numbers read as hex, because the game's own documentation does.
 HEX_FIELDS = {"room", "track"}

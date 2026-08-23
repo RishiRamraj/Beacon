@@ -2545,6 +2545,115 @@ function WP.chain(list)
   return list
 end
 
+-- ===========================================================================
+-- Waypoint kinds.
+--
+-- A waypoint is a step in the route, and its kind says what satisfies it. Most are
+-- a place to stand, but a route is not only places: a room whose enemies must be
+-- cleared, the one enemy carrying the key, a chest to open, a locked door to
+-- unlock, a cabinet to shove — each is a step you take in order, and each used to
+-- be modelled somewhere else. Kill rooms were a keyed table consulted per frame,
+-- and the errands inside a room were a priority list that OVERRODE the chain. So
+-- "clear room 0x70, then leave by its west door" was two unrelated mechanisms with
+-- an override between them, when it is plainly two consecutive steps.
+--
+-- One list now, in route order. A kind supplies up to three things:
+--   target(s, wp)  where to lead, as world pixels, or nil if there is nowhere to
+--                  walk right now (a room held open by a spawner with no position).
+--                  Resolved every re-probe, so a kind can track something that moves.
+--   done(s, wp)    is the step satisfied? An authored `done` clause still wins, so
+--                  a waypoint can override its kind's default.
+--   cue            spoken once on arming, for a step whose requirement is not
+--                  obvious from a tone ("Defeat all enemies.").
+-- A waypoint with no kind is a place, which is why every existing chain keeps
+-- working untouched.
+-- ===========================================================================
+KIND = {}
+
+KIND.spot = {
+  target = function(s, wp) return walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level) end,
+}
+
+-- The room's enemies, all of them. tx/ty are optional here and only a fallback for
+-- the map: the step is about the room, and what to walk to is whichever enemy is
+-- nearest right now.
+KIND.clear = {
+  cue = "Defeat all enemies.",
+  target = function(s, wp)
+    local e = nearest_pending_enemy(s)
+    if e then return walkable_near(s, e[1], e[2]) end
+    if wp.tx then return walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level) end
+  end,
+  done = function(s, wp)
+    return nearest_pending_enemy(s) == nil and not overlords_pending()
+  end,
+}
+
+-- One particular enemy. `carries = "key"` picks the one that still drops a key on
+-- death, which is the case that matters: a guard flanking a locked door.
+KIND.enemy = {
+  cue = "Defeat the enemy holding the key.",
+  target = function(s, wp)
+    local e = wp.carries == "key" and key_holder(s) or nearest_pending_enemy(s)
+    if e then return walkable_near(s, e[1], e[2]) end
+  end,
+  done = function(s, wp)
+    if wp.carries == "key" then return key_holder(s) == nil end
+    return nearest_pending_enemy(s) == nil
+  end,
+}
+
+-- A chest, at its own tile. Done when the tile stops reading as a chest — the game
+-- rewrites it on opening, so no flag is needed.
+KIND.chest = {
+  cue = "Open the chest.",
+  target = KIND.spot.target,
+  done = function(s, wp)
+    local a = tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level)
+    return a == nil or not CHEST_TILES[a]
+  end,
+}
+
+-- A locked or flaggable door, at its own tile. Done once it stops reading as one.
+KIND.gate = {
+  target = KIND.spot.target,
+  done = function(s, wp)
+    local a = tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level)
+    return a == nil or a < 0xF0 or a > 0xFF
+  end,
+}
+
+-- Something to shove. A tracked sprite (the Movable Mantle) latches sprite_G at its
+-- end stop; a plain tile push-block simply stops reading as one.
+KIND.push = {
+  target = KIND.spot.target,
+  done = function(s, wp)
+    if wp.slot ~= nil then return mem.u8(0x7E0ED0 + wp.slot) == (wp.latch or 0x90) end
+    local a = tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level)
+    return a == nil or a < 0x70 or a > 0x7F
+  end,
+}
+
+-- A waypoint's kind, defaulting to a place to stand. An unknown kind reads as a
+-- place too rather than breaking the route, the same forgiveness an unknown clause
+-- gets: bad data should degrade, not wedge.
+function KIND.of(wp)
+  return (wp.kind and KIND[wp.kind]) or KIND.spot
+end
+
+-- Where to lead for this waypoint, as world pixels, or nil if nowhere yet.
+function KIND.target(s, wp)
+  return KIND.of(wp).target(s, wp)
+end
+
+-- Is this waypoint's errand carried out? An authored clause wins over the kind's
+-- own rule, so a waypoint can say something its kind does not know.
+function KIND.done(s, wp)
+  if wp.done then return wp.done(s, wp) and true or false end
+  local d = KIND.of(wp).done
+  return d ~= nil and d(s, wp) and true or false
+end
+
 -- The authored chains themselves live in waypoints.lua, loaded ahead of this
 -- script by the manifest. Each carries its own prose: what the chain is for, and
 -- why each waypoint sits where it does.
@@ -2750,13 +2859,16 @@ function chain_dungeon_leg(s)
     local pick, pgx, pgy, plevel
     for i, wp in ipairs(nav_chain) do
       if wp.room == s.dungeon_room and (wp.gate == nil or wp.gate(s, wp)) then
-        if wp.done and wp.done(s, wp) then
-          -- Its objective is already met (a chest looted, a block fully shoved):
-          -- count it reached and never target it again, so the guide advances past it.
+        if KIND.done(s, wp) then
+          -- Its errand is already carried out (a chest looted, a room cleared, a
+          -- block fully shoved): count it reached and never target it again, so the
+          -- guide advances past it.
           nav_chain.arrived = math.max(nav_chain.arrived or 0, i)
         else
-          local gx, gy = walkable_near(s, wp.tx * 8 + 4, wp.ty * 8 + 4, wp.level)
-          if plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then
+          -- Where to lead depends on the kind: a place resolves to its own tile, a
+          -- room-clear to whichever enemy is nearest this instant.
+          local gx, gy = KIND.target(s, wp)
+          if gx and plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then
             pick, pgx, pgy, plevel = i, gx, gy, wp.level
             if nav_chain.sweep then break end -- nearest-first: the first reachable errand wins
           end
@@ -2772,12 +2884,23 @@ function chain_dungeon_leg(s)
     if pick then
       nav_chain_i = pick
       local wp = nav_chain[pick]
-      if math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH and (wp.level or 0) == level then
+      -- Arrival is by proximity only for a waypoint that HAS a place: standing by a
+      -- chest or a door is arriving, and its `done` then retires it once opened. A
+      -- room-clear has no place of its own — its target is whichever enemy is nearest
+      -- — so nothing but `done` can retire it, and the guide keeps leading until the
+      -- room is quiet rather than falling silent next to the first enemy.
+      local reached = wp.tx ~= nil
+        and math.abs(ltx - wp.tx) + math.abs(lty - wp.ty) <= CHAIN_REACH
+        and (wp.level or 0) == level
+      if reached then
         nav_chain.arrived = math.max(nav_chain.arrived or 0, pick) -- clears any `via` gate at/behind here
         if wp.arrival and not chain_cued[pick] then nav_say(wp.arrival); chain_cued[pick] = true end
         pathfind_stop() -- arrived; go quiet until the next waypoint opens up
       else
-        if wp.say and not chain_said[pick] then nav_say(wp.say); chain_said[pick] = true end
+        -- The waypoint's own line if it has one, else the kind's: a step whose
+        -- requirement a tone cannot convey says so once ("Defeat all enemies.").
+        local line = wp.say or KIND.of(wp).cue
+        if line and not chain_said[pick] then nav_say(line); chain_said[pick] = true end
         route_set_goal(s, pgx, pgy, plevel)
       end
     end
@@ -3423,9 +3546,24 @@ local ROOM_OBJECTIVES = {
 -- route without replanning, so the common frame plans nothing. Only a target that
 -- has moved (or failed) costs a search, and a failed search used to buy nothing at
 -- all.
+-- Does the active chain already have a `clear` step for this room? Then the fight is
+-- a waypoint in the route and the chain drives it, in order, with everything that
+-- implies (the map numbers it, the editor can move it, `via` keeps the guide on it).
+-- The room-scoped objectives are the fallback for arriving somewhere no chain covers,
+-- so they yield here rather than override a step that already exists.
+local function chain_clears_room(room)
+  if nav_chain == nil then return false end
+  for _, wp in ipairs(nav_chain) do
+    if wp.kind == "clear" and wp.room == room then return true end
+  end
+  return false
+end
+
 local function room_aim(s)
   if s.module ~= 0x07 then return nil end
+  local charted = chain_clears_room(s.dungeon_room)
   for _, o in ipairs(ROOM_OBJECTIVES) do
+    if charted and (o.id == "kill" or o.id == "keyholder") then goto continue end
     if o.active(s) then
       local tx, ty = o.target(s)
       -- Active with nowhere to walk (overlord spawners hold a room open but have no
@@ -3438,6 +3576,7 @@ local function room_aim(s)
       end
       if route_set_goal(s, tx, ty) then return o end
     end
+    ::continue::
   end
   return nil
 end

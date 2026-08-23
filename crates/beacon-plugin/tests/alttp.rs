@@ -1054,7 +1054,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "16,1",
+        armed, "18,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -1140,7 +1140,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "16,2",
+        resumed, "18,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1184,7 +1184,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "16,2",
+        armed, "18,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1223,7 +1223,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "16,4",
+        "18,4",
         "the dungeon leg targets room 0x61's waypoint (index 4)"
     );
 
@@ -2653,15 +2653,18 @@ fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
                 type(c.note),                 -- the chain's own prose
                 type(c[13].note),             -- the locked door's rationale
                 type(c[13].gate),             -- ...compiled from a clause
-                type(c[13].done),
-                type(sanct[12].done),         -- the Movable Mantle's push
+                tostring(c[13].kind),         -- and its kind says what satisfies it
+                tostring(sanct[12].kind),     -- the Movable Mantle's push
                 type(c[1].gate),              -- an ungated waypoint stays ungated
+                -- A kind supplies the done its waypoint no longer spells out.
+                type(KIND.of(c[13]).done),
+                tostring(KIND.of(c[1]).done), -- a plain place has nothing to satisfy
               }, "|")
             "#,
             &ram
         )
         .unwrap(),
-        "3|16|20|string|string|function|function|function|nil",
+        "3|18|20|string|string|function|gate|push|nil|function|nil",
         "chains arrive whole, prose intact, clauses compiled to closures"
     );
 }
@@ -3219,5 +3222,100 @@ fn alttp_an_authored_waypoint_number_is_teal_and_a_generated_one_is_not() {
     assert!(
         !swept.is_empty() && swept.split(',').all(|c| c == "50D0F0"),
         "a generated number is not teal: {swept}"
+    );
+}
+
+// ── Waypoint kinds ──────────────────────────────────────────────────────────
+// A waypoint is a step in the route and its kind says what satisfies it: a place to
+// stand, a room to clear, an enemy, a chest, a gate, a cabinet to shove. One
+// ordered list, so a fight is a step rather than an override.
+
+#[test]
+fn alttp_a_clear_waypoint_leads_to_the_enemies_and_holds_the_route_until_they_are_down() {
+    // COURTYARD 15 is `clear` for room 0x70 and 16 is the room's exit. The clear step
+    // is `via`, so the guide must stay on the enemies rather than skipping to the exit
+    // — and must hand on to the exit the moment the room is quiet.
+    let r = Registry::builtin();
+    // Whether the room is still occupied is decided by the caller adding a sprite.
+    let frame = || -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 452), (0, 0), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x70);
+        set(0x7E00EE, 0);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3CC, 0);
+        set(0x7EF3C5, 0); // Zelda beat -> COURTYARD armed
+        ram
+    };
+    let arm = |ram: &Vec<u8>| -> (String, String) {
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(ram, 0);
+        p.on_frame(ram, 1);
+        p.command("advance", ram);
+        p.on_frame(ram, 2);
+        (
+            p.eval("return tostring(nav_chain_i)", ram).unwrap(),
+            p.eval(
+                "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+                ram,
+            )
+            .unwrap(),
+        )
+    };
+
+    let mut live = frame();
+    sprite_slot(&mut live, 0, 66, (30, 456), 4); // a Blue Soldier in the room
+    let (i, goal) = arm(&live);
+    assert_eq!(i, "15", "the clear step is the target, not the exit at 16");
+    assert_eq!(
+        goal, "30,456",
+        "and it leads to the enemy, wherever it stands"
+    );
+
+    // With the room quiet the clear step retires itself and the exit takes over.
+    let quiet = frame();
+    let (i2, _) = arm(&quiet);
+    assert_eq!(i2, "16", "a cleared room hands on to the exit waypoint");
+}
+
+#[test]
+fn alttp_a_clear_waypoint_takes_over_from_the_room_objective() {
+    // The room-scoped objectives are the fallback for rooms no chain covers. Where a
+    // chain has a clear step, that step drives — otherwise the same fight would be
+    // run twice, once in route order and once as an override.
+    let r = Registry::builtin();
+    let mut ram = dungeon_frame((20, 452), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x70);
+        set(0x7E00EE, 0);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3C5, 0);
+    }
+    sprite_slot(&mut ram, 0, 66, (30, 456), 4);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram);
+    p.on_frame(&ram, 2);
+    assert_eq!(
+        p.eval(
+            "return tostring(chain_clears_room and 'x' or nav_chain_i)",
+            &ram
+        )
+        .unwrap(),
+        "15",
+        "the chain's clear step is what the guide committed to"
+    );
+    // The objective did not also fire: room_obj_announced stays clear, so nothing
+    // overrode the chain.
+    assert_eq!(
+        p.eval("return tostring(room_obj_announced)", &ram).unwrap(),
+        "nil",
+        "no room objective overrode the chain's own step"
     );
 }
