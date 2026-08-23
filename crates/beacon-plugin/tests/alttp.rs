@@ -3802,3 +3802,51 @@ fn alttp_the_blip_pans_further_the_further_off_the_pit_is() {
     };
     assert!(offset(4) > offset(1), "further pit, wider offset");
 }
+
+#[test]
+fn alttp_a_room_objective_is_stated_once_however_much_its_target_flickers() {
+    // Reported as a room spamming "defeat all enemies". The spoken latch and the
+    // "an objective is active" trace were one field, so a single frame with no
+    // countable target cleared it and the next frame said the cue again. A moving enemy
+    // crossing the reachable boundary, or a sprite slot blinking as it dies, is enough.
+    let r = Registry::builtin();
+    let frame = |enemy: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x55);
+            set(0x7E00AE, 0x0A); // room-wide kill tag
+            set(0x7E00EE, 0);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3C5, 2);
+        }
+        if enemy {
+            sprite_slot(&mut ram, 0, 66, (26, 20), 4);
+        }
+        ram
+    };
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let live = frame(true);
+    let gone = frame(false);
+    p.on_frame(&live, 0);
+    p.on_frame(&live, 1);
+    p.command("advance", &live);
+
+    let mut said = 0;
+    for f in 2..20 {
+        // Alternate: the enemy is countable on even frames and not on odd ones.
+        let ram = if f % 2 == 0 { &live } else { &gone };
+        said += p
+            .on_frame(ram, f)
+            .iter()
+            .filter(|i| i.text.contains("Defeat all enemies"))
+            .count();
+    }
+    assert_eq!(
+        said, 1,
+        "stated once across nine appearances, not nine times"
+    );
+}
