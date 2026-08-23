@@ -3850,3 +3850,60 @@ fn alttp_a_room_objective_is_stated_once_however_much_its_target_flickers() {
         "stated once across nine appearances, not nine times"
     );
 }
+
+#[test]
+fn alttp_turning_navigation_on_says_so() {
+    // It always said "Navigation off." on the way off, and nothing on the way on, so the
+    // key gave no answer about which it had just done.
+    let r = Registry::builtin();
+    let ram = dungeon_frame((20, 20), (20, 6), &[]);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+
+    let on: Vec<String> = p
+        .command("advance", &ram)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        on.iter().any(|t| t.contains("Navigation on")),
+        "turning it on says so: {on:?}"
+    );
+    let off: Vec<String> = p
+        .command("advance", &ram)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        off.iter().any(|t| t.contains("Navigation off")),
+        "and off still does: {off:?}"
+    );
+}
+
+#[test]
+fn alttp_the_auto_start_in_the_house_says_so_and_still_cues_the_beat() {
+    // Navigation turns itself on at the opening, and that was silent — the player had no
+    // way to know it was on. Saying so must not cost the beat cue that follows it: the
+    // first attempt called nav_say from above its own declaration, which errored and took
+    // the whole frame's speech with it.
+    let r = Registry::builtin();
+    let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x04); // room 0x0104: Link's house
+        set(0x7E00A1, 0x01);
+        set(0x7EF34A, 0); // Lamp not taken yet
+    }
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    let texts: Vec<String> = p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("Navigation on")),
+        "the auto-start announces itself: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.to_lowercase().contains("lantern")),
+        "and the beat cue still arrives: {texts:?}"
+    );
+}

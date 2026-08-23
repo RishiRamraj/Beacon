@@ -2037,6 +2037,9 @@ function on_frame(frame)
     if not intro_nav_armed then
       intro_nav_armed = true
       nav_active = true
+      -- say, not nav_say: that wrapper is a file-local declared much further down, so
+      -- naming it here calls a nil global and takes the whole frame's speech with it.
+      say("Navigation on.", { priority = "navigation", category = "on-demand" })
     end
   else
     intro_nav_armed = false
@@ -4037,6 +4040,10 @@ on_command("advance", function()
     return
   end
   nav_active = true
+  -- Said before the re-aim so it lands ahead of whatever goal the re-aim announces:
+  -- "Navigation on. Rescue Princess Zelda." The off case always said so, and the
+  -- silence on the way on left the player pressing the key to find out which it did.
+  nav_say("Navigation on.")
   local v = read_progress()
   nav_sig = nav_signature(s, v)
   nav_reaim(s, v)
