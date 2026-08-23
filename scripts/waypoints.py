@@ -75,7 +75,7 @@ FIELD_ORDER = [
 ]
 # Fields whose numbers read as hex, because the game's own documentation does.
 HEX_FIELDS = {"room", "track"}
-TEXT_FIELDS = {"say", "arrival", "note"}
+TEXT_FIELDS = {"say", "arrival", "note", "kind"}
 FLAG_FIELDS = {"cue", "via", "after_lift"}
 
 
@@ -548,6 +548,8 @@ class Editor:
         else:
             where = f"overworld {where}"
         bits = [f"{n}: {where}"]
+        if "kind" in f:
+            bits.append(str(f["kind"]))
         for key in ("say", "arrival"):
             if key in f:
                 bits.append(f'{key} "{f[key]}"')
