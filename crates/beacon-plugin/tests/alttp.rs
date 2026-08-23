@@ -500,6 +500,14 @@ fn dungeon_frame(link: (u16, u16), door: (u16, u16), walls: &[(u16, u16)]) -> Ve
         set(0x7EF36D, 24);
         let lx = link.0 * 8 + 4;
         let ly = link.1 * 8 + 4;
+        // The camera, centred on Link as the game keeps it. Sprite_CheckIfScreenIsClear
+        // measures from these, so a frame that leaves them at zero puts the 256-pixel
+        // kill screen nowhere near the room and nothing counts.
+        let (sx, sy) = (lx.saturating_sub(128), ly.saturating_sub(128));
+        set(0x7E00E2, (sx & 0xFF) as u8);
+        set(0x7E00E3, (sx >> 8) as u8);
+        set(0x7E00E8, (sy & 0xFF) as u8);
+        set(0x7E00E9, (sy >> 8) as u8);
         set(0x7E0022, (lx & 0xFF) as u8);
         set(0x7E0023, (lx >> 8) as u8);
         set(0x7E0020, (ly & 0xFF) as u8);
@@ -3030,14 +3038,14 @@ fn alttp_an_unreachable_objective_falls_through_to_one_the_guide_can_reach() {
     );
 }
 
-// ── Room rules as data ──────────────────────────────────────────────────────
-// Which rooms gate progress on a fight is authored knowledge, mapped by playing,
-// so it lives in waypoints.lua beside the chains rather than in the script.
+// ── Room rules are gone ─────────────────────────────────────────────────────
+// There is no ROOMS table any more. What a room is like is either read from the game
+// (its kill tag) or worked out from its collision (which of it Link can reach), and
+// what to DO in a room is a waypoint. This asserts the table stays gone, because it
+// grew back twice: first holding kill rules, then chamber boxes.
 
 #[test]
-fn alttp_room_rules_come_from_the_waypoints_module() {
-    // ROOMS carries the rules and the prose explaining them; a rule is either `true`
-    // for always or a WP clause asked each time it is needed.
+fn alttp_there_are_no_hand_authored_room_rules_left() {
     let r = Registry::builtin();
     let ram = clause_frame(&[]);
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
@@ -3045,28 +3053,22 @@ fn alttp_room_rules_come_from_the_waypoints_module() {
     assert_eq!(
         p.eval(
             r#"
-              -- The fights are chain steps now; ROOMS keeps only what is genuinely
-              -- room-scoped, and WP.fights is the index saying which rooms have an
-              -- authored fight so the fallback objectives know to stand aside.
               return table.concat({
-                tostring(ROOMS[0x70]),               -- nothing room-scoped left
-                #ROOMS[0x80].chambers,               -- one chamber: the whole room
-                #ROOMS[0x71].chambers,               -- two walled guard pits
-                type(ROOMS[0x72].note),
-                tostring(WP.fights[0x70]),           -- authored fight: 0x70, 0x72, 0x80
-                tostring(WP.fights[0x72]),
+                tostring(ROOMS),              -- no room table at all
+                type(REACH.can),              -- reachability answers the wall question
+                tostring(WP.fights[0x70]),    -- and an authored fight says the area is
+                tostring(WP.fights[0x72]),    -- the room, for the rooms that set no tag
                 tostring(WP.fights[0x80]),
-                tostring(WP.fights[0x71]),           -- 0x71 has none, so tags still speak
+                tostring(WP.fights[0x71]),    -- 0x71 sets its own tag, so it needs none
               }, "|")
             "#,
             &ram
         )
         .unwrap(),
-        "nil|1|2|string|true|true|true|nil",
-        "room rules keep what is room-scoped; fights are indexed steps"
+        "nil|function|true|true|true|nil",
+        "rooms are read, not written down"
     );
 }
-
 #[test]
 fn alttp_the_chest_opened_clause_reads_the_rooms_permanent_bit() {
     // $7EF000 + room*2, bit 0x8000, set for good once the chest is opened. Room 0x72's
@@ -3262,11 +3264,6 @@ fn alttp_an_authored_waypoint_number_is_teal_and_a_generated_one_is_not() {
         "a generated number is not teal: {swept}"
     );
 }
-
-// ── Waypoint kinds ──────────────────────────────────────────────────────────
-// A waypoint is a step in the route and its kind says what satisfies it: a place to
-// stand, a room to clear, an enemy, a chest, a gate, a cabinet to shove. One
-// ordered list, so a fight is a step rather than an override.
 
 #[test]
 fn alttp_a_clear_waypoint_leads_to_the_enemies_and_holds_the_route_until_they_are_down() {
@@ -3613,4 +3610,68 @@ fn alttp_a_key_holder_across_a_wall_is_not_targeted_and_no_fight_is_claimed() {
         )
         .unwrap();
     assert_ne!(goal, "116,496", "and nothing is aimed through the wall");
+}
+
+// ── Reachability instead of authored chambers ───────────────────────────────
+// A chamber box was an approximation of "can Link walk there". A flood fill from his
+// tile answers it exactly, follows walls that are not rectangles, and needs nothing
+// written down — the walls are already in the collision data.
+
+#[test]
+fn alttp_an_enemy_behind_a_wall_does_not_count_without_any_authored_chamber() {
+    // Room 0x55, which has no ROOMS entry at all, split by a wall band with no gap.
+    // Room-scoped kill tag (0x0A), so the tag itself imposes no bound: only the fill
+    // separates the two halves.
+    let r = Registry::builtin();
+    let goal = |enemy: (u16, u16), gap: bool| -> String {
+        let mut ram = dungeon_frame((20, 20), (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x55);
+            set(0x7E00AE, 0x0A); // room-wide kill tag
+            set(0x7E00EE, 0);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3C5, 2);
+            // A wall right across the room at grid row 30, optionally with one gap.
+            for tx in 0..64u32 {
+                set(0x7F2000 + 30 * 64 + tx, 0x01);
+            }
+            if gap {
+                set(0x7F2000 + 30 * 64 + 31, 0x00);
+            }
+        }
+        sprite_slot(&mut ram, 0, 66, enemy, 4);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.command("advance", &ram);
+        p.on_frame(&ram, 2);
+        p.eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &ram,
+        )
+        .unwrap()
+    };
+
+    // Link is at tile 20; the wall is at row 30. An enemy on his side counts.
+    assert_eq!(
+        goal((26, 20), false),
+        "26,20",
+        "same side of the wall: counted"
+    );
+    // One on the far side does not, even though the tag is room-wide.
+    assert_eq!(
+        goal((26, 40), false),
+        "nil",
+        "walled off: not counted, with no chamber authored"
+    );
+    // Open a single gap and it becomes reachable, so it counts again — a rectangle
+    // could not express that, and a switch-operated wall gets it for free.
+    assert_eq!(
+        goal((26, 40), true),
+        "26,40",
+        "one gap in the wall is enough"
+    );
 }

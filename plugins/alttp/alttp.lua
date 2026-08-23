@@ -238,9 +238,6 @@ end
 --          one 64-tile block, but the parts that gate progress are smaller chambers
 --          walled off inside it, so a room can hold several. Bounds the enemy tally
 --          when one covers Link, and outlines the pit on the debug map.
-local function room_cfg(room)
-  return ROOMS and ROOMS[room] or nil
-end
 
 
 -- Is Link in a dungeon room gated on defeating enemies, and over what area?
@@ -288,21 +285,7 @@ local ENEMY_ONSCREEN = 144
 
 -- The mapped fighting chamber Link is standing in, or nil if the room maps none or
 -- none covers him (a corridor between two pits, say).
-local function room_chamber(s)
-  local cfg = room_cfg(s.dungeon_room)
-  local reg = cfg and cfg.chambers
-  if reg == nil then return nil end
-  local ltx, lty = s.x >> 3, s.y >> 3
-  for _, b in ipairs(reg) do
-    if ltx >= b.w and ltx <= b.e and lty >= b.n and lty <= b.s then return b end
-  end
-  return nil
-end
 
-local function in_chamber(b, sx, sy)
-  local tx, ty = sx >> 3, sy >> 3
-  return tx >= b.w and tx <= b.e and ty >= b.n and ty <= b.s
-end
 
 -- Where a chamber is mapped and Link is in it, that chamber IS the fighting area:
 -- an enemy counts only if it shares the chamber. A radius round Link is the fallback,
@@ -315,12 +298,23 @@ end
 -- the room's own kill tag implies; then a plain radius for a room with no tag at all.
 -- Global so every caller shares one answer.
 function enemy_counts(s, sx, sy)
-  local box = room_chamber(s)
-  if box ~= nil then return in_chamber(box, sx, sy) end
   local scope = kill_room(s)
-  if scope == "room" then return true end
-  if scope == "screen" then return on_kill_screen(sx, sy) end
-  return math.abs(sx - s.x) <= ENEMY_ONSCREEN and math.abs(sy - s.y) <= ENEMY_ONSCREEN
+  if scope == nil then
+    -- No tag to take an area from. But an authored `clear` step for this room is itself
+    -- the statement that the ROOM is the fight — rooms 0x70, 0x72 and 0x80 set no tag,
+    -- which is exactly why someone had to write their fights down — so the area is the
+    -- room and the fill removes its walls. That is what a whole-room chamber box used to
+    -- say by hand, and before that what the `giant` flag said by widening a radius.
+    if WP.fights[s.dungeon_room] then return REACH.can(s, sx, sy) end
+    -- Nothing says this room gates on a fight at all, so a plain radius stands.
+    return math.abs(sx - s.x) <= ENEMY_ONSCREEN and math.abs(sy - s.y) <= ENEMY_ONSCREEN
+  end
+  -- Two independent questions, and the answer needs both. The tag says over what AREA
+  -- the game checks — the whole room, or the 256x256 screen — and reachability says
+  -- which of that area Link can actually get to. Area alone counted enemies through
+  -- walls; reachability alone would count one the game does not require killing.
+  if scope == "screen" and not on_kill_screen(sx, sy) then return false end
+  return REACH.can(s, sx, sy)
 end
 
 local function nearest_pending_enemy(s)
@@ -857,6 +851,70 @@ local function tile_passable(s, wtx, wty, level)
   -- be blocked, or a lower-floor route past a stair's masked approach (e.g. 0x71) breaks.
   if s.module == 0x07 and attr == 0x1C and level == 0 then return false end
   return true
+end
+
+-- ===========================================================================
+-- Reachability: which of this room can Link actually walk to from where he stands?
+--
+-- A flood fill from his tile over passable ground, once, answering for all sixteen
+-- sprite slots at a stroke. It replaces the hand-authored chamber boxes that used to
+-- bound the enemy tally, and it is strictly better than a rectangle: it follows the
+-- room's real walls, so a chamber that is not rectangular works, and a wall that
+-- opens when a switch is hit stops being a wall on the next rebuild. Room 0x71's two
+-- guard pits are separated by green ledge tiles that are right there in the collision
+-- data — there was never a need to write their corners down.
+--
+-- Rebuilt only when it can have changed: a different room or floor, a different
+-- 512-pixel window, Link standing somewhere the current fill does not cover (which is
+-- exactly the moment he crosses into a new region), or the throttle expiring so a
+-- door that just opened is picked up. Walking about inside one region reuses it.
+--
+-- One caveat inherited from tile_passable: it counts a locked door as crossable while
+-- Link holds a key, because the router needs to plan through it. So holding a key can
+-- make the next chamber reachable, and its enemies start counting. That is arguable
+-- either way — he CAN get there — and it is the game's own notion of "can reach"
+-- rather than a wrong answer.
+-- ===========================================================================
+REACH = { set = nil, room = nil, level = nil, ox = nil, oy = nil, probe = 0 }
+REACH.PROBE = 15
+REACH.DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
+
+function REACH.build(s, level, ox, oy, seed)
+  local set, queue = { [seed] = true }, { seed }
+  local head = 1
+  while head <= #queue do
+    local i = queue[head]
+    head = head + 1
+    local lx, ly = i % 64, i // 64
+    for _, d in ipairs(REACH.DIRS) do
+      local nx, ny = lx + d[1], ly + d[2]
+      if nx >= 0 and nx < 64 and ny >= 0 and ny < 64 then
+        local j = ny * 64 + nx
+        if not set[j] and tile_passable(s, ox + nx, oy + ny, level) then
+          set[j] = true
+          queue[#queue + 1] = j
+        end
+      end
+    end
+  end
+  REACH.set, REACH.room, REACH.level, REACH.ox, REACH.oy = set, s.dungeon_room, level, ox, oy
+end
+
+-- Can Link reach the tile containing world pixel (sx, sy)?
+function REACH.can(s, sx, sy)
+  local level = mem.u8(LOWER_LEVEL)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local seed = ((s.y >> 3) - oy) * 64 + ((s.x >> 3) - ox)
+  REACH.probe = REACH.probe - 1
+  if REACH.set == nil or REACH.room ~= s.dungeon_room or REACH.level ~= level
+    or REACH.ox ~= ox or REACH.oy ~= oy or not REACH.set[seed] or REACH.probe <= 0
+  then
+    REACH.probe = REACH.PROBE
+    REACH.build(s, level, ox, oy, seed)
+  end
+  local tx, ty = sx >> 3, sy >> 3
+  if tx < ox or tx >= ox + 64 or ty < oy or ty >= oy + 64 then return false end
+  return REACH.set[(ty - oy) * 64 + (tx - ox)] == true
 end
 
 -- Every tile attribute Link physically collides with, taken from the game's own
@@ -4191,18 +4249,19 @@ function on_draw(canvas)
       -- When the room's chambers are mapped (ROOMS[room].chambers), draw a 1px rectangle on
       -- its tile bounds so the border hugs the real pit instead of framing the whole
       -- screen. Rooms with no mapped pit fall back to a frame outside the playfield.
-      if kill_room(s) then
+      -- Either the room's own tag says it gates on a fight, or an authored `clear` step
+      -- does. The overlay follows whatever bounds the tally, so it is drawn for both —
+      -- gating on the tag alone hid it in exactly the rooms someone had to map by hand.
+      if kill_room(s) or WP.fights[s.dungeon_room] then
         local kc = 0xE83838
-        local cfg = room_cfg(s.dungeon_room)
-        local reg = cfg and cfg.chambers
-        if reg then
-          for _, b in ipairs(reg) do
-            local x0, y0 = plot(b.w * 8, b.n * 8)             -- NW corner
-            local x1, y1 = plot((b.e + 1) * 8, (b.s + 1) * 8) -- SE corner (tile far edge)
-            canvas:line(x0, y0, x1, y0, kc) -- north
-            canvas:line(x0, y1, x1, y1, kc) -- south
-            canvas:line(x0, y0, x0, y1, kc) -- west
-            canvas:line(x1, y0, x1, y1, kc) -- east
+        -- The fighting area, as the tally actually sees it: every tile Link can reach
+        -- from where he stands, tinted. This used to outline an authored rectangle; the
+        -- rectangles are gone, and the fill is both the truth and a better picture of it
+        -- — a chamber that is not rectangular shows up as the shape it really is.
+        if REACH.set and REACH.room == s.dungeon_room then
+          for i in pairs(REACH.set) do
+            local px, py = plot((REACH.ox + i % 64) * 8, (REACH.oy + i // 64) * 8)
+            canvas:rect(px, py, 1, 1, kc)
           end
         else
           for t = 1, 2 do
