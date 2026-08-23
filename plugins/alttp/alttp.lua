@@ -241,21 +241,10 @@ local function room_cfg(room)
   return ROOMS and ROOMS[room] or nil
 end
 
--- Is this room forced to a kill-room by its own authored rule? `true` means always;
--- a clause is asked each time, so a rule keyed on real game state (0x72 stops being
--- a kill-room once its chest is opened) re-answers as that state changes.
-local function room_forces_kill(s)
-  local cfg = room_cfg(s.dungeon_room)
-  if cfg == nil or cfg.kill == nil then return false end
-  if cfg.kill == true then return true end
-  return WP.test(s, { room = s.dungeon_room }, cfg.kill)
-end
-
 
 -- Is Link in a dungeon room gated on defeating enemies?
 local function kill_room(s)
   if s.module ~= 0x07 then return false end
-  if room_forces_kill(s) then return true end
   return KILL_TAGS[mem.u8(KILL_HDR_TAG)] == true or KILL_TAGS[mem.u8(KILL_HDR_TAG + 1)] == true
 end
 
@@ -2661,6 +2650,38 @@ local UNCLE_APPROACH = WP.chain(WAYPOINTS.UNCLE_APPROACH)
 local COURTYARD = WP.chain(WAYPOINTS.COURTYARD)
 local SANCTUARY = WP.chain(WAYPOINTS.SANCTUARY)
 
+-- Every authored errand, indexed by the room it happens in.
+--
+-- A step that can be CLEARED — a room's enemies, a chest, a locked door, a block to
+-- shove — is worth doing whenever Link is standing in that room, whichever chain it
+-- was written in and whatever the quest is currently pointed at. Room 0x70 is the
+-- case: its fight is a step in COURTYARD, but COURTYARD's goal completes at progress
+-- 2, so a later backtrack into the room had no chain to consult and the guards
+-- blocking the passage went unmentioned. That was the hole I plugged with a separate
+-- room-scoped rule; indexing the errands closes it properly, because the step itself
+-- is what says the room gates on a fight.
+--
+-- A plain place is deliberately NOT indexed. An errand is worth doing on sight; a
+-- position is only meaningful inside the route it belongs to, and leading Link to one
+-- from a chain that is not running would drag him along a route he is not on. "Has
+-- something to satisfy" is exactly the line between the two.
+WP.errands = {}
+-- Rooms whose authored steps speak for the ENEMIES specifically. Kept apart from the
+-- errand index because a chest or a door says nothing about a fight: room 0x71 has an
+-- authored locked door and no authored fight, so the enemy objectives must still speak
+-- there or its guards go unmentioned.
+WP.fights = {}
+for _, list in ipairs({ UNCLE_APPROACH, COURTYARD, SANCTUARY }) do
+  for _, wp in ipairs(list) do
+    if wp.room and KIND.of(wp).done ~= nil then
+      WP.errands[wp.room] = WP.errands[wp.room] or {}
+      local into = WP.errands[wp.room]
+      into[#into + 1] = wp
+      if wp.kind == "clear" or wp.kind == "enemy" then WP.fights[wp.room] = true end
+    end
+  end
+end
+
 -- A visual waypoint chain for the current map: an ordered list of {tx, ty, say}
 -- world-tile waypoints. The overworld guide homes on the active one
 -- (nav_chain[nav_chain_i]) and the map renderer draws the whole remaining chain —
@@ -3546,22 +3567,47 @@ local ROOM_OBJECTIVES = {
 -- route without replanning, so the common frame plans nothing. Only a target that
 -- has moved (or failed) costs a search, and a failed search used to buy nothing at
 -- all.
--- Does the active chain already have a `clear` step for this room? Then the fight is
--- a waypoint in the route and the chain drives it, in order, with everything that
--- implies (the map numbers it, the editor can move it, `via` keeps the guide on it).
--- The room-scoped objectives are the fallback for arriving somewhere no chain covers,
--- so they yield here rather than override a step that already exists.
-local function chain_clears_room(room)
+-- Is there an authored errand for this room that is not carried out yet, and does the
+-- ARMED chain own it? Two questions, because they lead to different places: a step
+-- the armed chain owns is driven by the chain leg, in route order and with `via`
+-- honoured; one that only the errand index knows about (its chain has since completed)
+-- is driven directly, below. Either way an authored step exists, so the room-scoped
+-- objectives — the fallback for rooms nobody has mapped — must yield to it.
+local function chain_errand_here(s)
   if nav_chain == nil then return false end
   for _, wp in ipairs(nav_chain) do
-    if wp.kind == "clear" and wp.room == room then return true end
+    if wp.room == s.dungeon_room and KIND.of(wp).done ~= nil and not KIND.done(s, wp) then
+      return true
+    end
   end
   return false
 end
 
+-- The furthest uncleared errand for this room that the guide can actually reach, from
+-- any authored chain. Furthest rather than nearest, matching the chain leg's own pick
+-- policy: later steps supersede earlier ones, so the most recent uncleared one is the
+-- live errand.
+local function room_errand(s)
+  local list = WP.errands[s.dungeon_room]
+  if list == nil then return nil end
+  local ltx, lty = s.x >> 3, s.y >> 3
+  local pick, pgx, pgy
+  for _, wp in ipairs(list) do
+    if (wp.gate == nil or wp.gate(s, wp)) and not KIND.done(s, wp) then
+      local gx, gy = KIND.target(s, wp)
+      if gx and plan_path(s, ltx, lty, gx >> 3, gy >> 3, wp.level) then
+        pick, pgx, pgy = wp, gx, gy
+      end
+    end
+  end
+  return pick, pgx, pgy
+end
+
 local function room_aim(s)
   if s.module ~= 0x07 then return nil end
-  local charted = chain_clears_room(s.dungeon_room)
+  -- An authored step for this room says what the room needs; the objectives are only
+  -- for rooms nobody has mapped, so they stand aside where one exists.
+  local charted = WP.fights[s.dungeon_room] == true
   for _, o in ipairs(ROOM_OBJECTIVES) do
     if charted and (o.id == "kill" or o.id == "keyholder") then goto continue end
     if o.active(s) then
@@ -3623,6 +3669,27 @@ nav_update = function(s)
   -- entry, leading to whatever satisfies it, which retargets only when it moves a
   -- couple of tiles (once close, the combat beacon takes the final approach). When
   -- it clears, re-aim at the quest goal (now, e.g., with the doors open).
+  -- An authored errand in this room that the armed chain does not own — its chain has
+  -- since completed, so the chain leg will never look at it. Drive it here: standing in
+  -- a room whose fight still gates the way through, the guide should say so whatever
+  -- the quest has moved on to.
+  if s.module == 0x07 and not chain_errand_here(s) then
+    local wp, gx, gy = room_errand(s)
+    if wp then
+      local key = s.dungeon_room .. ":errand"
+      if room_obj_announced ~= key then
+        local line = wp.say or KIND.of(wp).cue
+        if line then nav_say(line) end
+        room_obj_announced = key
+      end
+      if pathfind_goal == nil
+        or math.abs(pathfind_goal[1] - (gx >> 3)) + math.abs(pathfind_goal[2] - (gy >> 3)) >= 2
+      then
+        route_set_goal(s, gx, gy, wp.level)
+      end
+      return
+    end
+  end
   -- room_aim both picks the objective and sets its route, so what gets announced is
   -- what the guide actually committed to leading Link toward.
   local ro = room_aim(s)
