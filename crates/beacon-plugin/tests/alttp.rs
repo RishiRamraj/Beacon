@@ -1054,7 +1054,7 @@ fn alttp_zelda_beat_arms_the_courtyard_chain_and_advances_by_proximity() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        armed, "17,1",
+        armed, "16,1",
         "Zelda beat arms the courtyard chain at index 1: {armed}"
     );
 
@@ -1140,7 +1140,7 @@ fn alttp_courtyard_chain_resumes_at_the_door_after_a_dungeon_trip() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &away)
         .unwrap();
     assert_eq!(
-        resumed, "17,2",
+        resumed, "16,2",
         "the chain resumes at the door, not back at the bushes: {resumed}"
     );
 }
@@ -1184,7 +1184,7 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
         .eval("return #nav_chain .. ',' .. nav_chain_i", &at_door)
         .unwrap();
     assert_eq!(
-        armed, "17,2",
+        armed, "16,2",
         "arms at the door Link is beside, not back at the bushes: {armed}"
     );
 }
@@ -1223,7 +1223,7 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
-        "17,4",
+        "16,4",
         "the dungeon leg targets room 0x61's waypoint (index 4)"
     );
 
@@ -1287,7 +1287,7 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
     plugin.on_frame(&down, 2);
     assert_eq!(
         plugin.eval("return tostring(nav_chain_i)", &down).unwrap(),
-        "10",
+        "9",
         "a down-stair lets the guide cross to the lower-floor waypoint (index 10)"
     );
 
@@ -1301,7 +1301,7 @@ fn alttp_routing_crosses_floors_through_the_layer_swap_stairs() {
     plugin2.on_frame(&up, 2);
     assert_eq!(
         plugin2.eval("return tostring(nav_chain_i)", &up).unwrap(),
-        "9",
+        "8",
         "an up-stair is not a down path: the one-way drop is not routed through backwards"
     );
 }
@@ -1344,8 +1344,8 @@ fn alttp_a_down_staircase_is_walked_across_not_treated_as_a_wall() {
     plugin.on_frame(&stair, 2);
     assert_eq!(
         plugin.eval("return tostring(nav_chain_i)", &stair).unwrap(),
-        "9",
-        "a down-staircase in the gap is walked across to the far waypoint (index 9)"
+        "8",
+        "a down-staircase in the gap is walked across to the far waypoint (index 8)"
     );
 
     // A solid wall in the gap: cannot pass, so the guide holds at the near one (index 8).
@@ -1401,7 +1401,7 @@ fn alttp_an_overlay_mask_hole_is_a_one_way_drop_to_the_lower_floor() {
     plugin.on_frame(&hole, 2);
     assert_eq!(
         plugin.eval("return tostring(nav_chain_i)", &hole).unwrap(),
-        "10",
+        "9",
         "an overlay-mask hole drops Link to the lower-floor waypoint (index 10)"
     );
 
@@ -1417,8 +1417,8 @@ fn alttp_an_overlay_mask_hole_is_a_one_way_drop_to_the_lower_floor() {
         plugin2
             .eval("return tostring(nav_chain_i)", &solid)
             .unwrap(),
-        "9",
-        "with no floor crossing the lower-floor waypoint stays unreachable (index 9)"
+        "8",
+        "with no floor crossing the lower-floor waypoint stays unreachable (index 8)"
     );
 }
 
@@ -1470,7 +1470,7 @@ fn alttp_a_ledge_drop_lands_across_a_walled_barrier() {
     plugin.on_frame(&f, 2);
     assert_eq!(
         plugin.eval("return tostring(nav_chain_i)", &f).unwrap(),
-        "10",
+        "9",
         "the fall scans across the hole to the open floor and reaches the lower waypoint (10)"
     );
 
@@ -1484,8 +1484,8 @@ fn alttp_a_ledge_drop_lands_across_a_walled_barrier() {
     plugin2.on_frame(&f2, 2);
     assert_eq!(
         plugin2.eval("return tostring(nav_chain_i)", &f2).unwrap(),
-        "9",
-        "with every lower tile under the hole walled the drop cannot land (index 9)"
+        "8",
+        "with every lower tile under the hole walled the drop cannot land (index 8)"
     );
 }
 
@@ -1587,7 +1587,7 @@ fn alttp_a_closed_locked_door_blocks_the_route() {
     plugin.on_frame(&open, 2);
     assert_eq!(
         plugin.eval("return tostring(nav_chain_i)", &open).unwrap(),
-        "10",
+        "9",
         "an open landing lets the guide cross to the lower-floor waypoint"
     );
 
@@ -1603,7 +1603,7 @@ fn alttp_a_closed_locked_door_blocks_the_route() {
         plugin2
             .eval("return tostring(nav_chain_i)", &locked)
             .unwrap(),
-        "9",
+        "8",
         "a closed locked door blocks the route: the guide does not lead through it"
     );
 }
@@ -1648,19 +1648,19 @@ fn alttp_locked_door_gate_holds_the_route_until_the_door_is_open() {
     // Keyless, door shut: holds at the chest anchor (13).
     assert_eq!(
         arm(&frame(0, false)),
-        "13",
+        "12",
         "keyless, the guide holds at the chest anchor"
     );
     // Keyed but the door still shut: still holds — a key alone no longer opens the exit.
     assert_eq!(
         arm(&frame(1, false)),
-        "13",
+        "12",
         "with a key but the door still shut, the guide still holds at the anchor"
     );
     // Door open: the exit past the door opens up (15).
     assert_eq!(
         arm(&frame(1, true)),
-        "15",
+        "14",
         "with the door open the route continues to the exit past it"
     );
 }
@@ -2651,9 +2651,9 @@ fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
               return table.concat({
                 #WAYPOINTS.UNCLE_APPROACH, #c, #sanct,
                 type(c.note),                 -- the chain's own prose
-                type(c[14].note),             -- the locked door's rationale
-                type(c[14].gate),             -- ...compiled from a clause
-                type(c[14].done),
+                type(c[13].note),             -- the locked door's rationale
+                type(c[13].gate),             -- ...compiled from a clause
+                type(c[13].done),
                 type(sanct[12].done),         -- the Movable Mantle's push
                 type(c[1].gate),              -- an ungated waypoint stays ungated
               }, "|")
@@ -2661,7 +2661,7 @@ fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
             &ram
         )
         .unwrap(),
-        "3|17|20|string|string|function|function|function|nil",
+        "3|16|20|string|string|function|function|function|nil",
         "chains arrive whole, prose intact, clauses compiled to closures"
     );
 }
@@ -2818,5 +2818,212 @@ fn alttp_the_active_label_wins_the_spot_it_wants() {
         ),
         "8@56,47 7@42,47",
         "the active label takes its preferred spot and the other steps aside"
+    );
+}
+
+// ── Hazards underfoot ───────────────────────────────────────────────────────
+// A pit does not stop you, it punishes you for walking in, so the router treating
+// it as impassable is not enough — the edge has to be announced before the step.
+
+/// The tile Link faces, by the same arithmetic the plugin uses (x + 8 is his centre
+/// column, y + 12 his feet, then one tile on in the facing direction). Computed
+/// rather than hardcoded so these tests state the geometry instead of guessing it.
+fn faced_tile(link: (u16, u16), dir: u8) -> (u16, u16) {
+    let (x, y) = ((link.0 * 8 + 4) as i32, (link.1 * 8 + 4) as i32);
+    let ax = x
+        + 8
+        + if dir == 4 {
+            -12
+        } else if dir == 6 {
+            12
+        } else {
+            0
+        };
+    let ay = y
+        + 12
+        + if dir == 0 {
+            -12
+        } else if dir == 2 {
+            12
+        } else {
+            0
+        };
+    ((ax >> 3) as u16, (ay >> 3) as u16)
+}
+
+/// A dungeon frame with Link at `link` facing `dir` (0 north, 2 south, 4 west,
+/// 6 east) and the given tiles painted on the upper floor.
+fn facing_frame(link: (u16, u16), dir: u8, tiles: &[(u16, u16, u8)]) -> Vec<u8> {
+    let mut ram = dungeon_frame(link, (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x55);
+        set(0x7E00EE, 0);
+        set(0x7E002F, dir);
+    }
+    for &(tx, ty, attr) in tiles {
+        ram[wram_offset(0x7F2000 + (ty as u32 & 63) * 64 + (tx as u32 & 63)).unwrap()] = attr;
+    }
+    ram
+}
+
+#[test]
+fn alttp_facing_a_pit_warns_once_and_sounds_a_danger_tone() {
+    // Link at (20,20) facing south, with a pit on the tile he would step into.
+    let r = Registry::builtin();
+    let pit_at = faced_tile((20, 20), 2);
+    let ram = facing_frame((20, 20), 2, &[(pit_at.0, pit_at.1, 0x20)]);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    let out = p.on_frame(&ram, 1);
+    assert!(
+        out.iter().any(|i| i.text.contains("Pit")),
+        "the pit ahead is called out: {:?}",
+        out.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+    // Critical, so it is heard at verbosity 0 where navigation chatter is gated off.
+    assert!(
+        out.iter()
+            .any(|i| i.text.contains("Pit") && format!("{:?}", i.priority) == "Critical"),
+        "a hazard outranks the verbosity gate"
+    );
+    // A danger tone sits on the faced tile, low and fast-pulsing.
+    let b = p.beacons();
+    let hazard = b
+        .iter()
+        .find(|b| b.id == "hazard")
+        .expect("a hazard beacon sounds");
+    assert!(
+        hazard.pitch < 1.0 && hazard.tremolo >= 4.0,
+        "low and urgent: {hazard:?}"
+    );
+    assert!(
+        hazard.dy > 0.0,
+        "positioned south, where the pit is: {hazard:?}"
+    );
+
+    // Said once: standing still facing the same pit does not repeat it.
+    let again = p.on_frame(&ram, 2);
+    assert!(
+        !again.iter().any(|i| i.text.contains("Pit")),
+        "not repeated while still facing it: {:?}",
+        again.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn alttp_turning_away_from_a_pit_clears_the_warning_and_re_arms_it() {
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let pit_at = faced_tile((20, 20), 2);
+    let pit = facing_frame((20, 20), 2, &[(pit_at.0, pit_at.1, 0x20)]);
+    // Same pit tile, but facing north — what he would step into is open floor.
+    let away = facing_frame((20, 20), 0, &[(pit_at.0, pit_at.1, 0x20)]);
+    p.on_frame(&pit, 0);
+    p.on_frame(&pit, 1);
+
+    p.on_frame(&away, 2);
+    assert!(
+        !p.beacons().iter().any(|b| b.id == "hazard"),
+        "facing open ground, the tone stops"
+    );
+    // Facing back re-arms the warning: it is about the step you are about to take.
+    let back = p.on_frame(&pit, 3);
+    assert!(
+        back.iter().any(|i| i.text.contains("Pit")),
+        "turning back onto it warns again: {:?}",
+        back.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn alttp_the_pit_warning_covers_the_dungeon_hole_variants_but_not_the_overworld() {
+    // TileBehavior_Pit is 0x20 plus the 0xB0-0xBD holes-with-a-destination.
+    let r = Registry::builtin();
+    for attr in [0x20u8, 0xB0, 0xBD] {
+        let e = faced_tile((20, 20), 6);
+        let ram = facing_frame((20, 20), 6, &[(e.0, e.1, attr)]);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        let out = p.on_frame(&ram, 1);
+        assert!(
+            out.iter().any(|i| i.text.contains("Pit")),
+            "attr 0x{attr:02X} is a pit"
+        );
+    }
+    // 0xBE is past the class and must not warn.
+    let e = faced_tile((20, 20), 6);
+    let ram = facing_frame((20, 20), 6, &[(e.0, e.1, 0xBE)]);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    assert!(
+        !p.on_frame(&ram, 1).iter().any(|i| i.text.contains("Pit")),
+        "0xBE is not a pit"
+    );
+
+    // The overworld gives entrance holes the same attribute and they are meant to be
+    // fallen into, so the cue is dungeon-only.
+    let mut ow = facing_frame((20, 20), 6, &[(e.0, e.1, 0x20)]);
+    {
+        let mut set = |addr: u32, v: u8| ow[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // overworld
+        set(0x7E001B, 0x00); // outdoors
+    }
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ow, 0);
+    assert!(
+        !p.on_frame(&ow, 1).iter().any(|i| i.text.contains("Pit")),
+        "no pit warnings on the overworld, where the same tile is a doorway"
+    );
+}
+
+#[test]
+fn alttp_an_unreachable_objective_falls_through_to_one_the_guide_can_reach() {
+    // Room 0x71's two guard pits are walled off from each other. With the key-holder
+    // in the far pit and Link in the near one, `keyholder` outranks `kill` but cannot
+    // be routed to; committing to it left the guide silent with an enemy five tiles
+    // away. It must fall through to the reachable one.
+    let r = Registry::builtin();
+    // Link at 77,499 puts the room window at tiles 64-127 by 460-523, so the wall has
+    // to span the full window height or the router simply walks around its end.
+    let wall: Vec<(u16, u16)> = (460..524).map(|y| (100u16, y as u16)).collect();
+    let mut ram = dungeon_frame((77, 499), (0, 0), &wall);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x71); // Boomerang Chest Room: kill-tagged, two pits
+        set(0x7E00AE, 0x08); // a clear-tag in KILL_TAGS
+        set(0x7E00EE, 0); // upper floor, the grid dungeon_frame paints the wall on
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3C5, 0);
+    }
+    // Near enemy, this side of the wall. Far enemy beyond it, carrying the key.
+    sprite_slot(&mut ram, 0, 66, (81, 496), 4); // Blue Soldier, reachable
+    sprite_slot(&mut ram, 1, 66, (116, 496), 6); // Green Soldier, walled off
+                                                 // die_action ($7E0CBA) non-zero marks a guard that still drops its key. Only the
+                                                 // far one, so key_holder can pick nothing but the unreachable enemy.
+    ram[wram_offset(0x7E0CBA + 1).unwrap()] = 0x0B;
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram);
+    p.on_frame(&ram, 2);
+
+    let goal = p
+        .eval(
+            "return pathfind_goal and (pathfind_goal[1] .. ',' .. pathfind_goal[2]) or 'nil'",
+            &ram,
+        )
+        .unwrap();
+    assert_eq!(
+        p.eval("return tostring(pathfind_active)", &ram).unwrap(),
+        "true",
+        "the guide is routing somewhere rather than stalling (goal {goal})"
+    );
+    assert_eq!(
+        goal, "81,496",
+        "it aims at the reachable enemy, not the walled-off key-holder at 116,496"
     );
 }
