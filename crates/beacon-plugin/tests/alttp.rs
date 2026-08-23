@@ -3027,3 +3027,67 @@ fn alttp_an_unreachable_objective_falls_through_to_one_the_guide_can_reach() {
         "it aims at the reachable enemy, not the walled-off key-holder at 116,496"
     );
 }
+
+// ── Room rules as data ──────────────────────────────────────────────────────
+// Which rooms gate progress on a fight is authored knowledge, mapped by playing,
+// so it lives in waypoints.lua beside the chains rather than in the script.
+
+#[test]
+fn alttp_room_rules_come_from_the_waypoints_module() {
+    // ROOMS carries the rules and the prose explaining them; a rule is either `true`
+    // for always or a WP clause asked each time it is needed.
+    let r = Registry::builtin();
+    let ram = clause_frame(&[]);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    assert_eq!(
+        p.eval(
+            r#"
+              return table.concat({
+                tostring(ROOMS[0x70].kill),          -- always a kill-room
+                type(ROOMS[0x72].kill),              -- ...this one is conditional
+                tostring(ROOMS[0x80].giant),         -- counts enemies room-wide
+                tostring(ROOMS[0x71].kill),          -- carries its own clear-tag
+                #ROOMS[0x71].region,                 -- two walled guard pits
+                type(ROOMS[0x72].note),
+              }, "|")
+            "#,
+            &ram
+        )
+        .unwrap(),
+        "true|table|true|nil|2|string",
+        "rules arrive as data, prose intact"
+    );
+}
+
+#[test]
+fn alttp_the_chest_opened_clause_reads_the_rooms_permanent_bit() {
+    // $7EF000 + room*2, bit 0x8000, set for good once the chest is opened. Room 0x72's
+    // kill rule is the negation, which is what stops a backtrack re-arming the fight.
+    let r = Registry::builtin();
+    let probe = r#"
+        local s = { module = 0x07, dungeon_room = 0x72 }
+        return tostring(WP.test(s, { room = 0x72 }, {"chest_opened"}))
+          .. "|" .. tostring(WP.test(s, { room = 0x72 }, ROOMS[0x72].kill))
+          .. "|" .. tostring(WP.test(s, { room = 0x71 }, {"chest_opened"}))
+    "#;
+    let read = |opened: bool| -> String {
+        let mut ram = clause_frame(&[]);
+        if opened {
+            ram[wram_offset(0x7EF000 + 0x72 * 2 + 1).unwrap()] = 0x80;
+        }
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.eval(probe, &ram).unwrap()
+    };
+    assert_eq!(
+        read(false),
+        "false|true|false",
+        "chest shut: 0x72 is a kill-room, and 0x71's own bit is untouched"
+    );
+    assert_eq!(
+        read(true),
+        "true|false|false",
+        "chest opened: the kill rule goes quiet, and only 0x72's bit moved"
+    );
+}

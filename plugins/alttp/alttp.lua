@@ -225,63 +225,37 @@ local function room_chest_opened(room)
   return (mem.u16(0x7EF000 + room * 2) & 0x8000) ~= 0
 end
 
--- Rooms to treat as kill-rooms even though the game sets no clear-tag on them: a
--- guard there drops a small key for the locked exit, so the guide should lead Link
--- to defeat it first. Keyed by dungeon room id; the value is a predicate `(s) ->
--- bool` for whether the room is a kill-room right now, so each room states its own
--- rule as data rather than a shared type/field ladder. Only matters while enemies
--- are live — the objective also requires a pending enemy.
-local FORCE_KILL_ROOMS = {
-  -- 0x72: forced-kill only until its chest is opened. That bit is permanent, so a
-  -- backtrack (which respawns the guard, since the room has no clear-tag) never
-  -- re-arms the sub-goal, and the room's reuse for the lower area is never a
-  -- kill-room.
-  [0x72] = function(s) return not room_chest_opened(s.dungeon_room) end,
-  -- 0x70: two guards flank the way through; the eastern one drops the key for the
-  -- locked door out, so the first objective is to defeat them. No clear-tag, so force
-  -- it. Always on: the kill objective self-clears once no counting enemy remains, and
-  -- the escape runs one-way forward, so a backtrack re-arm never arises in practice.
-  [0x70] = function(_) return true end,
-  -- 0x80: the jail-cell room. The enemy in the far east holds the big key, so the
-  -- whole room is one kill objective — a "giant" kill-room (see GIANT_KILL_ROOMS)
-  -- whose enemies count across the whole screen, not just the near ones, so the
-  -- guide leads Link east to that enemy instead of dropping the objective once the
-  -- nearer guards fall. No clear-tag, so force it; the escape is one-way forward.
-  [0x80] = function(_) return true end,
-}
+-- Per-room authored knowledge — which rooms gate progress on a fight, which count
+-- their enemies room-wide, and where their fighting pits are — lives in
+-- waypoints.lua under ROOMS, beside the chains, for the same reason: it is mapped
+-- by playing, not derived, so it belongs in the file a person (and the editor) can
+-- change without touching this script. Read here, never written.
+--
+--   kill   true, or a WP clause: is this room a kill-room right now? Some rooms set
+--          no clear-tag of their own and still gate on a fight, because a guard
+--          drops the key for the locked way out.
+--   giant  count enemies across the whole room rather than one screen, for a
+--          key-holder waiting at the far side.
+--   region debug-overlay only: the fighting pits, as world-tile boxes.
+local function room_cfg(room)
+  return ROOMS and ROOMS[room] or nil
+end
 
--- Kill-rooms whose fighting area is the whole room, not just what is on screen.
--- In an ordinary kill-room the enemy tally only counts sprites within ~one screen
--- of Link (ENEMY_ONSCREEN), so a sprite loaded from an adjacent room can't hold the
--- room "uncleared" forever. A giant kill-room deliberately spans the whole 512-pixel
--- room: a key-holder waiting at the far side must still count from across it, so the
--- tally uses a room-sized reach (ENEMY_INROOM) here. Keyed by dungeon room id.
-local GIANT_KILL_ROOMS = { [0x80] = true }
+-- Is this room forced to a kill-room by its own authored rule? `true` means always;
+-- a clause is asked each time, so a rule keyed on real game state (0x72 stops being
+-- a kill-room once its chest is opened) re-answers as that state changes.
+local function room_forces_kill(s)
+  local cfg = room_cfg(s.dungeon_room)
+  if cfg == nil or cfg.kill == nil then return false end
+  if cfg.kill == true then return true end
+  return WP.test(s, { room = s.dungeon_room }, cfg.kill)
+end
 
--- Debug map only: the tile bounds of a kill-room's fighting pits, in world tiles,
--- each drawn as a 1px rectangle. A dungeon room is one 64-tile block, but the parts
--- that actually gate progress are smaller chambers walled off by green ledge tiles;
--- a room can hold several such pits, so each room maps to a LIST of boxes and the
--- overlay outlines them all. Edges (n/e/s/w = north/east/south/west) are read off
--- the green walls so an outline hugs its pit rather than framing the whole screen.
---   0x71: two guard pits side by side, every edge on a green ledge wall.
---   0x72: one walled fighting chamber (regular walls, not green ledges); the outline
---         hugs the dark floor inside — cols 153-166, rows 458-474.
-local KILL_REGION = {
-  [0x71] = {
-    { n = 491, e = 90,  s = 506, w = 69 },  -- west pit
-    { n = 487, e = 122, s = 506, w = 101 }, -- east pit
-  },
-  [0x72] = {
-    { n = 458, e = 166, s = 474, w = 153 }, -- the central chamber floor
-  },
-}
 
 -- Is Link in a dungeon room gated on defeating enemies?
 local function kill_room(s)
   if s.module ~= 0x07 then return false end
-  local fk = FORCE_KILL_ROOMS[s.dungeon_room]
-  if fk and fk(s) then return true end
+  if room_forces_kill(s) then return true end
   return KILL_TAGS[mem.u8(KILL_HDR_TAG)] == true or KILL_TAGS[mem.u8(KILL_HDR_TAG + 1)] == true
 end
 
@@ -299,7 +273,8 @@ local ENEMY_ONSCREEN = 144
 local ENEMY_INROOM = 512
 
 local function nearest_pending_enemy(s)
-  local reach = GIANT_KILL_ROOMS[s.dungeon_room] and ENEMY_INROOM or ENEMY_ONSCREEN
+  local cfg = room_cfg(s.dungeon_room)
+  local reach = (cfg and cfg.giant) and ENEMY_INROOM or ENEMY_ONSCREEN
   local best, bd
   for i = 0, 15 do
     local st = mem.u8(SPRITE.state + i)
@@ -2521,6 +2496,16 @@ WP.PRED = {
   pushed = function(s, wp, c)
     return wp.slot ~= nil and mem.u8(0x7E0ED0 + wp.slot) == (c[2] or 0x90)
   end,
+  -- Has a room's chest been opened? Per-room permanent progress lives at
+  -- $7EF000 + room*2, one u16 each, bit 0x8000 flipping when the chest is opened
+  -- and never clearing. Defaults to the subject's own room, so a room rule needs no
+  -- argument; pass one to ask about a different room.
+  chest_opened = function(s, wp, c)
+    local room = c[2] or (wp and wp.room) or s.dungeon_room
+    if room == nil then return false end
+    local v = mem.u16(0x7EF000 + room * 2)
+    return v ~= nil and (v & 0x8000) ~= 0
+  end,
   -- Save/WRAM bytes, for the progress the tiles cannot report.
   byte = function(s, wp, c)
     local v = mem.u8(c[2])
@@ -2539,7 +2524,10 @@ function WP.test(s, wp, c, tx, ty, level)
   if type(c) ~= "table" then return true end
   local f = WP.PRED[c[1]]
   if f == nil then return true end
-  if tx == nil then tx, ty, level = wp.tx, wp.ty, wp.level or 0 end
+  -- A room rule's subject is a room, not a tile, so it carries no position; default
+  -- to the origin rather than nil so a tile clause misused there reads a tile
+  -- instead of erroring.
+  if tx == nil then tx, ty, level = wp.tx or 0, wp.ty or 0, wp.level or 0 end
   return f(s, wp, c, tx, ty, level) and true or false
 end
 
@@ -3905,12 +3893,13 @@ function on_draw(canvas)
     -- dungeon, where the room and its waypoints live.
     if s.module == 0x07 then
       -- A kill-room's boundary, in a distinct red (never the pink of the nav route).
-      -- When the room's fighting pit is mapped (KILL_REGION), draw a 1px rectangle on
+      -- When the room's fighting pit is mapped (ROOMS[room].region), draw a 1px rectangle on
       -- its tile bounds so the border hugs the real pit instead of framing the whole
       -- screen. Rooms with no mapped pit fall back to a frame outside the playfield.
       if kill_room(s) then
         local kc = 0xE83838
-        local reg = KILL_REGION[s.dungeon_room]
+        local cfg = room_cfg(s.dungeon_room)
+        local reg = cfg and cfg.region
         if reg then
           for _, b in ipairs(reg) do
             local x0, y0 = plot(b.w * 8, b.n * 8)             -- NW corner

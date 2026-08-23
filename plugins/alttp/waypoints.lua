@@ -135,3 +135,29 @@ SANCTUARY = {
 },
 
 }
+
+ROOMS = {
+
+[0x70] = {
+  kill = true,
+  note = "Two guards flank the way through and the eastern one drops the key for the locked door out, so the first objective is to defeat them. The room sets no clear-tag of its own, hence the forced rule. Always on: the kill objective self-clears once no counting enemy remains, and the escape runs one-way forward, so a backtrack re-arm never arises in practice.",
+},
+
+[0x71] = {
+  region = {{n = 491, e = 90, s = 506, w = 69}, {n = 487, e = 122, s = 506, w = 101}},
+  note = "Not a forced kill-room — it carries its own clear-tag. Two guard pits side by side, every edge on a green ledge wall, walled off from each other: an enemy in one pit cannot be reached from the other, which is why an objective has to be checked for reachability before the guide commits to it. Boxes are the debug overlay only.",
+},
+
+[0x72] = {
+  kill = {"not", {"chest_opened"}},
+  region = {{n = 458, e = 166, s = 474, w = 153}},
+  note = "Forced to a kill-room only until its chest is opened. That bit is permanent, so a backtrack — which respawns the guard, the room having no clear-tag — never re-arms the sub-goal, and the room's reuse for the lower area is never a kill-room. One walled fighting chamber, regular walls rather than green ledges, so the box hugs the dark floor inside (cols 153-166, rows 458-474).",
+},
+
+[0x80] = {
+  kill = true,
+  giant = true,
+  note = "The jail-cell room. The enemy in the far east holds the big key, so the whole room is one kill objective: giant, meaning enemies count across the whole 512-pixel room rather than one screen, so the guide leads Link east to that enemy instead of dropping the objective once the nearer guards fall. No clear-tag, so the kill rule is forced; the escape is one-way forward.",
+},
+
+}
