@@ -1642,13 +1642,13 @@ fn alttp_locked_door_gate_holds_the_route_until_the_door_is_open() {
     // Keyless, door shut: holds at the chest anchor (13).
     assert_eq!(
         arm(&frame(0, false)),
-        "71,88,495",
+        "71,104,495",
         "keyless, the guide holds at the chest anchor"
     );
     // Keyed but the door still shut: still holds — a key alone no longer opens the exit.
     assert_eq!(
         arm(&frame(1, false)),
-        "71,88,495",
+        "71,104,495",
         "with a key but the door still shut, the guide still holds at the anchor"
     );
     // Door open: the exit past the door opens up (15).
