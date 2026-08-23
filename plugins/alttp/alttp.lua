@@ -243,10 +243,37 @@ local function room_cfg(room)
 end
 
 
--- Is Link in a dungeon room gated on defeating enemies?
+-- Is Link in a dungeon room gated on defeating enemies, and over what area?
+--
+-- Returns "room" or "screen", or nil. The tag says which, and the distinction is the
+-- game's own: RoomTag_RoomTrigger (0x0A, 0x32) waits on Sprite_CheckIfRoomIsClear,
+-- which walks every sprite slot with no bounds at all, while every other kill tag goes
+-- through RoomTag_QuadrantTrigger or RoomTag_KillRoomBlock and waits on
+-- Sprite_CheckIfScreenIsClear, which counts only sprites within 256x256 of the scroll
+-- origin. Both then require Sprite_CheckIfOverlordsClear, so a spawner holding the room
+-- open needs no separate test here.
+--
+-- Worth having exactly right, because the tag is what opens the door: agreeing with the
+-- game about "clear" is the difference between going quiet when the room does and going
+-- quiet a fight too early.
+-- Globals, not locals: the main chunk is at its 200-local ceiling, so anything new
+-- here hangs off the global namespace instead (the same reason SWEEP and WP do).
+KILL_ROOMWIDE = { [0x0A] = true, [0x32] = true }
 local function kill_room(s)
-  if s.module ~= 0x07 then return false end
-  return KILL_TAGS[mem.u8(KILL_HDR_TAG)] == true or KILL_TAGS[mem.u8(KILL_HDR_TAG + 1)] == true
+  if s.module ~= 0x07 then return nil end
+  for i = 0, 1 do
+    local t = mem.u8(KILL_HDR_TAG + i)
+    if KILL_TAGS[t] then return KILL_ROOMWIDE[t] and "room" or "screen" end
+  end
+  return nil
+end
+
+-- The 256x256 window the game's own screen-clear check uses, as world pixels: the
+-- scroll origin is BG2HOFS_copy2/BG2VOFS_copy2 ($7E00E2 / $7E00E8).
+function on_kill_screen(sx, sy)
+  local ox, oy = mem.u16(0x7E00E2), mem.u16(0x7E00E8)
+  if ox == nil or oy == nil then return false end
+  return (sx - ox) >= 0 and (sx - ox) < 256 and (sy - oy) >= 0 and (sy - oy) < 256
 end
 
 -- The nearest live enemy still counting toward the room clear (state set, and not
@@ -285,6 +312,7 @@ end
 -- Link cannot cross. The chamber has the wall in it; the radius does not.
 local function nearest_pending_enemy(s)
   local box = room_chamber(s)
+  local scope = kill_room(s)
   local best, bd
   for i = 0, 15 do
     local st = mem.u8(SPRITE.state + i)
@@ -295,9 +323,17 @@ local function nearest_pending_enemy(s)
         and (mem.u8(SPRITE.hp + i) or 0) > 0 then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
-      local counts = box ~= nil and in_chamber(box, sx, sy)
-        or (box == nil and math.abs(sx - s.x) <= ENEMY_ONSCREEN
-            and math.abs(sy - s.y) <= ENEMY_ONSCREEN)
+      local counts
+      if box ~= nil then
+        counts = in_chamber(box, sx, sy)                  -- authored: finer than the game's
+      elseif scope == "room" then
+        counts = true                                    -- room-wide, as the tag means
+      elseif scope == "screen" then
+        counts = on_kill_screen(sx, sy)                   -- the 256x256 the tag checks
+      else
+        counts = math.abs(sx - s.x) <= ENEMY_ONSCREEN     -- no tag: a plain radius
+          and math.abs(sy - s.y) <= ENEMY_ONSCREEN
+      end
       if counts then
         local d = math.abs(sx - s.x) + math.abs(sy - s.y)
         if bd == nil or d < bd then best, bd = { sx, sy }, d end
@@ -3533,9 +3569,13 @@ local ROOM_OBJECTIVES = {
     end },
   { id = "kill",
     cue = "Defeat all enemies.",
-    active = function(s)
-      return kill_room(s) and (nearest_pending_enemy(s) ~= nil or overlords_pending())
-    end,
+    -- While the tag is set the room is still gating, full stop: the game zeroes it
+    -- itself once its own clear check passes (every kill tag reaches
+    -- RoomTag_OperateChestReveal or Dung_TagRoutine_TrapdoorsUp), and that check already
+    -- folds in the overlord spawners. Counting enemies here as well only added ways to be
+    -- wrong: going quiet in the frames where a room's sprites are mid-spawn, and
+    -- re-arming on a respawn after the room was already officially clear.
+    active = function(s) return kill_room(s) ~= nil end,
     target = function(s)
       local e = nearest_pending_enemy(s)
       if e then return walkable_near(s, e[1], e[2]) end
