@@ -3517,7 +3517,7 @@ fn alttp_the_fallback_bounds_the_fight_the_way_the_tag_does() {
 }
 
 #[test]
-fn alttp_the_fallback_stops_when_the_game_zeroes_the_tag() {
+fn alttp_the_fallback_needs_both_a_tag_and_something_to_fight() {
     // Every kill tag reaches RoomTag_OperateChestReveal or Dung_TagRoutine_TrapdoorsUp,
     // both of which zero it, so the tag is the room's own "still gating" flag. Reading
     // it rather than counting sprites means the guide cannot go quiet while a room's
@@ -3535,7 +3535,8 @@ fn alttp_the_fallback_stops_when_the_game_zeroes_the_tag() {
             set(0x7EF3C5, 2);
         }
         if enemy {
-            sprite_slot(&mut ram, 0, 66, (40, 20), 4);
+            // Tile 28 is world pixel 228 — inside the 256-pixel kill screen.
+            sprite_slot(&mut ram, 0, 66, (28, 20), 4);
         }
         let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
         p.on_frame(&ram, 0);
@@ -3550,12 +3551,66 @@ fn alttp_the_fallback_stops_when_the_game_zeroes_the_tag() {
         says_fight(0x08, true),
         "tag set with an enemy: the room gates"
     );
+    // The tag alone is not enough to CLAIM a fight. A room can be gating with nothing
+    // Link can reach from where he stands — its enemies in another chamber, or the game
+    // yet to run the tag routine for his quadrant — and announcing a fight with no
+    // target left the guide repeating it forever with no way to advance. The tag governs
+    // when a fight is over; a countable enemy governs whether there is one to point at.
     assert!(
-        says_fight(0x08, false),
-        "tag still set with no sprite loaded: the room gates, because the game says so"
+        !says_fight(0x08, false),
+        "tag set but nothing countable here: no fight is claimed"
     );
     assert!(
         !says_fight(0x00, true),
         "no tag: not a kill room, whatever is standing there"
     );
+}
+
+#[test]
+fn alttp_a_key_holder_across_a_wall_is_not_targeted_and_no_fight_is_claimed() {
+    // Reported live in room 0x71: the last guard is in the east pit, Link is in the
+    // west one, and the room's tag stays set because the room is not finished. The
+    // guide announced "Defeat all enemies", aimed at the guard through the wall, and
+    // then never moved — the goal was unreachable so nothing refreshed it, and the
+    // objective re-claimed itself every frame.
+    let r = Registry::builtin();
+    let mut ram = dungeon_frame((90, 495), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x71);
+        set(0x7E00AE, 0x08); // still gating: its other pit is not clear
+        set(0x7E00EE, 1);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3C5, 0);
+    }
+    // The only live enemy is in the east pit (chamber 101..122), carrying the key.
+    sprite_slot(&mut ram, 1, 66, (116, 496), 6);
+    ram[wram_offset(0x7E0CBA + 1).unwrap()] = 0x0B; // die_action: drops a key
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram);
+    let out = p.on_frame(&ram, 2);
+
+    assert_eq!(
+        p.eval("return tostring(key_holder({ x = 726, y = 3960, module = 0x07, dungeon_room = 0x71 }))", &ram)
+            .unwrap(),
+        "nil",
+        "the key-holder in the other pit is out of Link's chamber, so not a target"
+    );
+    assert!(
+        !out.iter().any(|i| i.text.contains("Defeat")),
+        "no fight is claimed when there is nothing here to fight: {:?}",
+        out.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+    let goal = p
+        .eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &ram,
+        )
+        .unwrap();
+    assert_ne!(goal, "116,496", "and nothing is aimed through the wall");
 }
