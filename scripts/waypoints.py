@@ -223,6 +223,25 @@ class Parser:
                 return tbl
             start = self.pos
             key = None
+            # `[0x72] = {...}`: a bracketed key, as the room table uses. Kept under its
+            # source text, brackets and all, so writing it back is `[0x72] = ...` again
+            # and a room written in hex stays hex.
+            if self.peek() == "[":
+                self.pos += 1
+                self.value()
+                self.expect("]")
+                key = self.text[start:self.pos]
+                self.skip()
+                if self.pos >= len(self.text) or self.text[self.pos] != "=":
+                    self.error("expected '=' after a bracketed key")
+                self.pos += 1
+                tbl.fields[key] = self.value()
+                self.skip()
+                if self.peek() == ",":
+                    self.pos += 1
+                elif self.peek() != "}":
+                    self.error("expected ',' or '}'")
+                continue
             if self.peek().isalpha() or self.peek() == "_":
                 key = self.name()
                 self.skip()
@@ -279,10 +298,10 @@ def fmt_waypoint(wp, indent="  "):
     return line + ","
 
 
-def dump(waypoints, prologue):
-    """The whole file: the prologue verbatim, everything else regenerated."""
-    out = [prologue.rstrip("\n"), "", "WAYPOINTS = {", ""]
-    for name, chain in waypoints.fields.items():
+def dump_waypoints(tbl):
+    """The chain sections: one line of fields per waypoint, note on the next."""
+    out = []
+    for name, chain in tbl.fields.items():
         out.append(f"{name} = {{")
         if chain.fields.get("note"):
             out.append("  note = " + fmt(chain.fields["note"]) + ",")
@@ -290,22 +309,72 @@ def dump(waypoints, prologue):
             out.append(fmt_waypoint(wp))
         out.append("},")
         out.append("")
-    out.append("}")
-    return "\n".join(out) + "\n"
+    return out
+
+
+def dump_rooms(tbl):
+    """The room sections: one keyed block per room, its rule then its prose."""
+    out = []
+    for key, cfg in tbl.fields.items():
+        if not cfg.fields:
+            continue # every rule cleared: drop the entry rather than leave a husk
+        out.append(f"{key} = {{")
+        for field in ("kill", "giant", "region"):
+            if field in cfg.fields:
+                out.append(f"  {field} = " + fmt(cfg.fields[field]) + ",")
+        for k, v in cfg.fields.items():  # anything the tool does not know about
+            if k not in ("kill", "giant", "region", "note"):
+                out.append(f"  {k} = " + fmt(v) + ",")
+        if cfg.fields.get("note"):
+            out.append("  note = " + fmt(cfg.fields["note"]) + ",")
+        out.append("},")
+        out.append("")
+    return out
+
+
+# The top-level assignments this file holds, in the order they are written, each
+# with the writer that knows its shape. A section the tool does not know about
+# would be dropped on save, so `load` refuses rather than silently losing it.
+SECTIONS = {"WAYPOINTS": dump_waypoints, "ROOMS": dump_rooms}
+
+
+def dump(sections, prologue):
+    """The whole file: the prologue verbatim, everything else regenerated."""
+    out = [prologue.rstrip("\n"), ""]
+    for name, writer in SECTIONS.items():
+        tbl = sections.get(name)
+        if tbl is None:
+            continue
+        out += [f"{name} = {{", ""] + writer(tbl) + ["}", ""]
+    return "\n".join(out[:-1]) + "\n"
 
 
 def load(path):
-    """Splits the file at `WAYPOINTS =` and parses everything after it."""
+    """Parses every top-level `NAME = { ... }` from the first one onward.
+
+    Everything before the first assignment is the prologue, preserved verbatim;
+    everything after is data this tool owns and rewrites wholesale.
+    """
     text = open(path).read()
-    marker = "\nWAYPOINTS ="
-    at = text.find(marker)
-    if at < 0:
-        raise LuaError(f"{path}: no `WAYPOINTS =` assignment found")
-    prologue = text[:at]
-    p = Parser(text, at + len(marker))
-    p.expect("{")
-    p.pos -= 1
-    return p.table(), prologue
+    first = min((text.find("\n" + n + " =") for n in SECTIONS
+                 if text.find("\n" + n + " =") >= 0), default=-1)
+    if first < 0:
+        raise LuaError(f"{path}: no {' or '.join(SECTIONS)} assignment found")
+    prologue = text[:first]
+    sections, p = {}, Parser(text, first)
+    while True:
+        p.skip()
+        if p.pos >= len(p.text):
+            break
+        name = p.name()
+        if name not in SECTIONS:
+            raise LuaError(f"{path}: unknown section '{name}' — this tool would drop it")
+        p.skip()
+        if p.pos >= len(p.text) or p.text[p.pos] != "=":
+            p.error(f"expected '=' after {name}")
+        p.pos += 1
+        sections[name] = p.table()
+    return sections, prologue
 
 
 # ── The live session ────────────────────────────────────────────────────────
@@ -397,7 +466,9 @@ class Editor:
     def __init__(self, path, session):
         self.path = path
         self.session = session
-        self.waypoints, self.prologue = load(path)
+        self.sections, self.prologue = load(path)
+        self.waypoints = self.sections["WAYPOINTS"]
+        self.rooms = self.sections.get("ROOMS")
         self.chain_name = next(iter(self.waypoints.fields), None)
         self.dirty = False
 
@@ -417,6 +488,58 @@ class Editor:
         if not 1 <= n <= len(items):
             raise LuaError(f"{self.chain_name} has waypoints 1 to {len(items)}")
         return n, items[n - 1]
+
+    # -- rooms
+    #
+    # A room's authored rules are edited the same way its waypoints are: stand in
+    # the room and say what is true of it. The room number is optional everywhere
+    # for that reason — omit it and the live room is meant.
+
+    def room_key(self, arg):
+        """(key, cfg) for a room, creating the entry if it is not configured yet.
+
+        Keys are the bracketed source text (`[0x72]`), so a room already written in
+        decimal is found by value rather than by how it was spelled.
+        """
+        if self.rooms is None:
+            raise LuaError("this file has no ROOMS section")
+        n = self.room_number(arg)
+        for key, cfg in self.rooms.fields.items():
+            try:
+                if Parser(key[1:-1]).value().value == n:
+                    return key, cfg
+            except LuaError:
+                continue
+        key = f"[0x{n:02X}]"
+        self.rooms.fields[key] = Table()
+        self.rooms.fields = dict(sorted(self.rooms.fields.items(),
+                                        key=lambda kv: Parser(kv[0][1:-1]).value().value))
+        self.dirty = True
+        return key, self.rooms.fields[key]
+
+    def room_number(self, arg):
+        """A room id from `arg`, or the live room when it is empty."""
+        arg = (arg or "").strip()
+        if not arg:
+            pos = self.live()
+            if pos["module"] != 0x07:
+                raise LuaError("not in a dungeon, so there is no room to mean")
+            return pos["room"]
+        try:
+            return int(arg, 0)
+        except ValueError:
+            raise LuaError(f"'{arg}' is not a room number")
+
+    def room_summary(self, key, cfg):
+        f = cfg.fields
+        bits = [key.strip("[]")]
+        if "kill" in f:
+            bits.append("kill " + ("always" if f["kill"] is True else fmt(f["kill"])))
+        if f.get("giant") is True:
+            bits.append("giant")
+        if "region" in f:
+            bits.append(f"{len(f['region'].items)} region box(es)")
+        return "  ".join(bits) if len(bits) > 1 else bits[0] + "  (nothing set)"
 
     def summary(self, n, wp):
         f = wp.fields
@@ -577,6 +700,68 @@ class Editor:
         self.dirty = True
         return f"{n}: {key} = {fmt(wp.fields[key], key in HEX_FIELDS)}"
 
+    def cmd_rooms(self, arg):
+        if self.rooms is None or not self.rooms.fields:
+            return "(no rooms configured)"
+        return "\n".join(self.room_summary(k, c) for k, c in self.rooms.fields.items())
+
+    def cmd_room(self, arg):
+        key, cfg = self.room_key(arg)
+        out = [self.room_summary(key, cfg)]
+        if cfg.fields.get("region"):
+            for box in cfg.fields["region"].items:
+                b = box.fields
+                out.append(f"   box n={fmt(b.get('n'))} e={fmt(b.get('e'))}"
+                           f" s={fmt(b.get('s'))} w={fmt(b.get('w'))}")
+        if cfg.fields.get("note"):
+            out.append(f"   {cfg.fields['note']}")
+        return "\n".join(out)
+
+    def cmd_kill(self, arg):
+        """kill [ROOM] true|off|CLAUSE — is this room gated on a fight?"""
+        room, _, value = self.room_split(arg)
+        key, cfg = self.room_key(room)
+        value = value.strip()
+        if value in ("off", "false", "no", ""):
+            cfg.fields.pop("kill", None)
+            self.dirty = True
+            return f"{key.strip('[]')}: no forced kill rule"
+        cfg.fields["kill"] = True if value in ("true", "on", "always") else self.clause(value)
+        self.dirty = True
+        return f"{key.strip('[]')}: kill = " + fmt(cfg.fields["kill"])
+
+    def cmd_giant(self, arg):
+        """giant [ROOM] on|off — count enemies room-wide rather than on screen."""
+        room, _, value = self.room_split(arg)
+        key, cfg = self.room_key(room)
+        if value.strip() in ("off", "false", "no", ""):
+            cfg.fields.pop("giant", None)
+            self.dirty = True
+            return f"{key.strip('[]')}: counts enemies on screen"
+        cfg.fields["giant"] = True
+        self.dirty = True
+        return f"{key.strip('[]')}: counts enemies across the whole room"
+
+    def cmd_roomnote(self, arg):
+        room, _, text = self.room_split(arg)
+        key, cfg = self.room_key(room)
+        if not text.strip():
+            cfg.fields.pop("note", None)
+        else:
+            cfg.fields["note"] = text.strip()
+        self.dirty = True
+        return f"{key.strip('[]')}: note set" if text.strip() else f"{key.strip('[]')}: note cleared"
+
+    def room_split(self, arg):
+        """Splits `[ROOM] VALUE`, where a leading number is a room and anything else
+        means the live room — so `kill true` works while standing in it."""
+        head, sep, rest = arg.strip().partition(" ")
+        try:
+            int(head, 0)
+            return head, sep, rest
+        except ValueError:
+            return "", "", arg.strip()
+
     def cmd_test(self, arg):
         """Runs a waypoint's compiled gate and done against the live frame."""
         n, wp = self.wp(arg.strip())
@@ -611,7 +796,7 @@ class Editor:
         return "\n".join(out)
 
     def cmd_save(self, arg):
-        text = dump(self.waypoints, self.prologue)
+        text = dump(self.sections, self.prologue)
         load_check = Parser(text, text.index("\nWAYPOINTS =") + len("\nWAYPOINTS ="))
         load_check.expect("{")
         load_check.pos -= 1
@@ -639,6 +824,8 @@ class Editor:
         "list": cmd_list, "ls": cmd_list, "show": cmd_show,
         "here": cmd_here, "add": cmd_add, "move": cmd_move, "del": cmd_del,
         "set": cmd_set, "test": cmd_test,
+        "rooms": cmd_rooms, "room": cmd_room,
+        "kill": cmd_kill, "giant": cmd_giant, "roomnote": cmd_roomnote,
         "save": cmd_save, "reload": cmd_reload,
         "quit": cmd_quit, "exit": cmd_quit,
     }
@@ -674,6 +861,12 @@ gate N CLAUSE          when N becomes a target, e.g. gate 14 {"keys"}
 done N CLAUSE          when N's errand is already carried out
 set N FIELD [VALUE]    any other field (level, push, track, via, cue, ...)
 test N                 run N's gate and done against the live frame
+
+rooms                  every room with authored rules
+room [ROOM]            one room in full (default: the room you are standing in)
+kill [ROOM] V          true, off, or a clause — is the room gated on a fight?
+giant [ROOM] on|off    count enemies room-wide rather than just on screen
+roomnote [ROOM] TEXT   why this room is configured as it is
 save                   write the file
 reload                 save, then reload the plugin in the running session
 quit                   leave
@@ -709,8 +902,9 @@ def main():
     if rest:
         return echo(editor, " ".join(rest))
 
-    print(f"{short(path)}: "
-          f"{len(editor.waypoints.fields)} chains, editing {editor.chain_name}")
+    print(f"{short(path)}: {len(editor.waypoints.fields)} chains, "
+          f"{len(editor.rooms.fields) if editor.rooms else 0} rooms, "
+          f"editing {editor.chain_name}")
     print(session.why if not session.io else "connected to the running session")
     print("'help' for commands.")
     while True:
@@ -746,12 +940,15 @@ def round_trip(path):
     the parser or the writer.
     """
     original = open(path).read()
-    waypoints, prologue = load(path)
-    rewritten = dump(waypoints, prologue)
+    sections, prologue = load(path)
+    rewritten = dump(sections, prologue)
     if rewritten == original:
-        chains = len(waypoints.fields)
-        total = sum(len(c.items) for c in waypoints.fields.values())
-        print(f"round-trip clean: {chains} chains, {total} waypoints, byte-identical")
+        wp = sections["WAYPOINTS"]
+        chains = len(wp.fields)
+        total = sum(len(c.items) for c in wp.fields.values())
+        rooms = len(sections["ROOMS"].fields) if "ROOMS" in sections else 0
+        print(f"round-trip clean: {chains} chains, {total} waypoints, "
+              f"{rooms} rooms, byte-identical")
         return 0
     import difflib
     diff = difflib.unified_diff(
