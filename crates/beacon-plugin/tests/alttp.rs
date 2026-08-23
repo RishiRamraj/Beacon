@@ -1192,9 +1192,10 @@ fn alttp_courtyard_chain_arms_at_the_door_when_link_is_already_beside_it() {
 #[test]
 fn alttp_zelda_chain_leads_through_the_castle_rooms() {
     // The courtyard chain continues past the door into the castle as dungeon
-    // waypoints, room by room: Find Zelda in room 0x61, then a silent point in
-    // room 0x60. The chain stays armed across rooms; reaching one advances to the
-    // next without a signature change.
+    // waypoints, room by room: one in room 0x61, then one in room 0x60. The chain
+    // stays armed across rooms; reaching one advances to the next without a
+    // signature change. The waypoints are silent — the guide tone leads, and the
+    // chain no longer narrates where it is setting off to.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -1211,37 +1212,31 @@ fn alttp_zelda_chain_leads_through_the_castle_rooms() {
         ram
     };
 
-    // In room 0x61, a few tiles west of the Find Zelda waypoint (72,415): engaging
-    // arms the chain, and the driver leads to that waypoint, announcing "Find
-    // Zelda" as it sets off.
+    // In room 0x61, a few tiles west of that room's waypoint (72,415): engaging arms
+    // the chain and the driver leads to it.
     let approach = frame(0x61, 65, 415);
     plugin.on_frame(&approach, 0);
     plugin.on_frame(&approach, 1);
     plugin.command("advance", &approach); // engage -> chain armed
-    let out = plugin.on_frame(&approach, 2); // driver leads to the waypoint
+    plugin.on_frame(&approach, 2); // driver leads to the waypoint
     assert_eq!(
         plugin
             .eval("return #nav_chain .. ',' .. nav_chain_i", &approach)
             .unwrap(),
         "17,4",
-        "the dungeon leg targets the Find Zelda waypoint (index 4)"
-    );
-    assert!(
-        out.iter().any(|i| i.text.contains("Find Zelda")),
-        "announces the waypoint phrase: {:?}",
-        out.iter().map(|i| &i.text).collect::<Vec<_>>()
+        "the dungeon leg targets room 0x61's waypoint (index 4)"
     );
 
-    // Reaching Find Zelda records it and goes quiet — no room-graph hop. The chain
-    // stays armed; only when Link crosses into room 0x60 (its lower floor) does its
-    // waypoint (index 5) take over and lead to the silent point there.
-    plugin.on_frame(&frame(0x61, 72, 415), 3); // on Find Zelda -> recorded
+    // Reaching it records it — no room-graph hop. The chain stays armed; only when
+    // Link crosses into room 0x60 (its lower floor) does its waypoint (index 5) take
+    // over and lead to the point there.
+    plugin.on_frame(&frame(0x61, 72, 415), 3); // arrived -> recorded
     assert!(
         plugin
             .eval("return tostring(nav_chain)", &frame(0x61, 72, 415))
             .unwrap()
             .contains("table"),
-        "the chain stays armed after Find Zelda"
+        "the chain stays armed after arriving"
     );
     plugin.on_frame(&frame(0x60, 48, 415), 4); // enter room 0x60
     plugin.on_frame(&frame(0x60, 48, 415), 5);
@@ -2748,3 +2743,4 @@ fn alttp_a_pot_sweep_finds_pots_and_leaves_the_pushable_block_alone() {
         "the lifted pot's waypoint is dropped, the other stays"
     );
 }
+
