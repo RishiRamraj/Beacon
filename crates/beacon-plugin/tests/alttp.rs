@@ -3091,3 +3091,133 @@ fn alttp_the_chest_opened_clause_reads_the_rooms_permanent_bit() {
         "chest opened: the kill rule goes quiet, and only 0x72's bit moved"
     );
 }
+
+// ── The map renders ─────────────────────────────────────────────────────────
+// on_draw had no test, and a rename of a file-local it called turned every map
+// frame into a Lua error: the host logs it to stderr and returns no map, so the
+// window simply stopped updating and nothing else noticed. A draw pass touches the
+// whole read side of the plugin, so just running it without error is worth having.
+
+/// Draws one frame and returns the error, or None if it rendered.
+fn draw_error(plugin: &mut LuaPlugin, ram: &[u8]) -> Option<String> {
+    let probe = r#"
+        local ok, err = pcall(on_draw, __beacon_canvas, 0)
+        return ok and "ok" or tostring(err)
+    "#;
+    match plugin.eval(probe, ram) {
+        Ok(s) if s == "ok" => None,
+        Ok(s) => Some(s),
+        Err(e) => Some(e),
+    }
+}
+
+#[test]
+fn alttp_the_map_draws_without_error_in_every_context() {
+    let r = Registry::builtin();
+
+    // A dungeon room, with the guide armed and a chain to draw.
+    let mut ram = dungeon_frame((77, 499), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x71);
+        set(0x7E00AE, 0x08); // kill-tagged, so the objective overlay is exercised
+        set(0x7E00EE, 1);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3C5, 0);
+    }
+    sprite_slot(&mut ram, 0, 66, (81, 496), 4);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram); // arm the guide: chain, route and labels all draw
+    p.on_frame(&ram, 2);
+    assert_eq!(
+        draw_error(&mut p, &ram),
+        None,
+        "a guided dungeon room draws"
+    );
+
+    // A sweep replaces the chain with a generated one; its waypoints draw too.
+    p.command("sweep", &ram);
+    p.on_frame(&ram, 3);
+    assert_eq!(draw_error(&mut p, &ram), None, "a room being swept draws");
+
+    // Before any state has been read, and outside play: the map says so rather than
+    // reaching into a nil state.
+    let mut fresh = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    assert_eq!(
+        draw_error(&mut fresh, &ram),
+        None,
+        "no state yet still draws"
+    );
+    let mut title = vec![0u8; 128 * 1024]; // module 0x00: not in play
+    title[wram_offset(0x7EF36C).unwrap()] = 24;
+    let mut p2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p2.on_frame(&title, 0);
+    assert_eq!(draw_error(&mut p2, &title), None, "the title screen draws");
+
+    // And the host agrees it produced a map, not just that no error was raised.
+    let mut out = Vec::new();
+    assert!(
+        p.draw(&ram, 4, &mut out).is_some(),
+        "the host gets pixels back, so get_map has something to return"
+    );
+}
+
+#[test]
+fn alttp_an_authored_waypoint_number_is_teal_and_a_generated_one_is_not() {
+    // Two numberings share the map. A teal number is an index into waypoints.lua, so
+    // it can be looked up and moved in the editor; a sweep's numbers are generated
+    // and correspond to nothing in the file, so they must not read as editable.
+    let r = Registry::builtin();
+    let probe = r#"
+        local seen = {}
+        local canvas = {
+          text = function(self, x, y, s, color) seen[#seen + 1] = string.format("%06X", color) end,
+          rect = function() end, line = function() end, clear = function() end,
+        }
+        LABELS.reset()
+        local labels = {}
+        local nc = nav_chain.sweep and 0x50D0F0 or 0x20B0A0
+        for i, wp in ipairs(nav_chain) do
+          labels[#labels + 1] = { i * 20, i * 20, text = tostring(i), color = nc }
+        end
+        LABELS.number(canvas, labels)
+        return table.concat(seen, ",")
+    "#;
+
+    let mut ram = dungeon_frame((77, 499), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x71);
+        // Upper floor: the floor chest_tiles paints on, so the loot sweep finds its
+        // chest and keeps its generated chain instead of standing down again.
+        set(0x7E00EE, 0);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3C5, 0);
+    }
+    chest_tiles(&mut ram, (80, 500)); // something for a loot sweep to find
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram); // the authored chain
+    p.on_frame(&ram, 2);
+    let authored = p.eval(probe, &ram).unwrap();
+    assert!(
+        authored.split(',').all(|c| c == "20B0A0"),
+        "every authored number is teal: {authored}"
+    );
+
+    p.command("sweep", &ram); // a generated chain replaces it
+    p.on_frame(&ram, 3);
+    let swept = p.eval(probe, &ram).unwrap();
+    assert!(
+        !swept.is_empty() && swept.split(',').all(|c| c == "50D0F0"),
+        "a generated number is not teal: {swept}"
+    );
+}

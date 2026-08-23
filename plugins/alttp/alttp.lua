@@ -3881,7 +3881,11 @@ function on_draw(canvas)
     -- Its own tile coordinates plot the same on either floor, so a target on the floor
     -- above/below still shows where to head. Hidden while a room sub-goal is active
     -- (clear the guard, grab the key, open the chest).
-    if s.module == 0x07 and nav_chain and room_objective(s) == nil then
+    -- `room_obj_announced` is the read-only trace of that: nav_update sets it to the
+    -- objective it committed to and clears it when none holds. Drawing must not ask
+    -- room_aim directly — choosing an objective plans a route, and a draw pass has no
+    -- business changing where the guide is pointed.
+    if s.module == 0x07 and nav_chain and room_obj_announced == nil then
       local wp = nav_chain[nav_chain_i]
       if wp and wp.room == s.dungeon_room then
         local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
@@ -3920,16 +3924,24 @@ function on_draw(canvas)
       end
       -- Every waypoint of the active chain that belongs to this room, each tagged
       -- with its 1-based order in the chain so the routing sequence is legible.
-      -- Cyan for the ordinary points, white for the active target, so the debug
-      -- markers never read as the pink route or the orange dropped markers.
+      --
+      -- The number's colour says which numbering it belongs to, because two are on
+      -- screen at once and only one of them can be looked up. TEAL means an index
+      -- into an authored chain exactly as waypoints.lua declares it, so a teal 11 is
+      -- `show 11` in the editor and `move 11` repoints it. A generated sweep chain is
+      -- numbered the same way but corresponds to nothing in the file, so it stays the
+      -- neutral cyan; the pink numbers below are route steps, not waypoints at all.
+      -- The marker square keeps the white/coloured active distinction, so "which is
+      -- the target" and "which numbering is this" are two signals rather than one
+      -- overloaded colour.
       if nav_chain then
+        local nc = nav_chain.sweep and 0x50D0F0 or 0x20B0A0
         local labels = {}
         for i, wp in ipairs(nav_chain) do
           if wp.room == s.dungeon_room and inwin(wp.tx * 8 + 4, wp.ty * 8 + 4) then
             local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
-            local wc = (i == nav_chain_i) and 0xFFFFFF or 0x50D0F0
-            canvas:rect(px - 1, py - 1, 3, 3, wc)
-            labels[#labels + 1] = { px, py, text = tostring(i), color = wc,
+            canvas:rect(px - 1, py - 1, 3, 3, (i == nav_chain_i) and 0xFFFFFF or nc)
+            labels[#labels + 1] = { px, py, text = tostring(i), color = nc,
               first = i == nav_chain_i }
           end
         end
