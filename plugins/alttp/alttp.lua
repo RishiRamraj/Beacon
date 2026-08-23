@@ -3063,10 +3063,16 @@ function chain_dungeon_leg(s)
     for i, wp in ipairs(nav_chain) do
       if wp.room == s.dungeon_room and (wp.gate == nil or wp.gate(s, wp)) then
         if KIND.done(s, wp) then
-          -- Its errand is already carried out (a chest looted, a room cleared, a
-          -- block fully shoved): count it reached and never target it again, so the
-          -- guide advances past it.
-          nav_chain.arrived = math.max(nav_chain.arrived or 0, i)
+          -- Its errand is already carried out (a chest looted, a room cleared, a block
+          -- fully shoved), so it is simply not a target this frame — skipping it needs
+          -- nothing recorded.
+          --
+          -- It must NOT be marked arrived. `arrived` means Link physically got there, and
+          -- it is what lets a `via` step stop the scan running past it; latching it from a
+          -- done reading made that permanent, and a done reading is not. Room 0x80 is the
+          -- case: entering it, its enemies have not spawned yet, so its `via` clear step
+          -- reads done for a frame, latches, and can never hold the scan again — the guide
+          -- goes straight to Zelda's cell past a Ball-and-Chain Trooper carrying the key.
         else
           -- Where to lead depends on the kind: a place resolves to its own tile, a
           -- room-clear to whichever enemy is nearest this instant.
