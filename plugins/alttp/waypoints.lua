@@ -74,8 +74,6 @@ COURTYARD = {
   { tx = 95, ty = 11, room = 0x01, level = 1 },
   { tx = 159, ty = 472, room = 0x72, level = 0,
     note = "South-door exit, upper floor, after the guard, the key and the chest." },
-  { tx = 153, ty = 491, room = 0x72, level = 0,
-    note = "Mouth of the layer-swap stairs." },
   { tx = 149, ty = 507, room = 0x72, level = 1,
     note = "Lower floor, reached down those stairs." },
   { tx = 129, ty = 560, room = 0x82, level = 1 },

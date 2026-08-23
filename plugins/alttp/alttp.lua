@@ -612,6 +612,64 @@ local function bush_cue(s)
   end
 end
 
+-- ── Hazards underfoot ───────────────────────────────────────────────────────
+-- A pit is the one obstacle that punishes you for walking into it instead of
+-- stopping you, so the router treating it as impassable is not enough: a player
+-- who cannot see the floor needs to know the edge is there before he steps off it.
+-- Same shape as the bush cue — read the tile Link faces, speak once, re-arm when
+-- he faces something else — with two deliberate differences.
+--
+-- It is not gated on the guide. A bush cue is routing advice, useful only while
+-- being led somewhere; a pit is a hazard whether or not the guide is on, and
+-- staying quiet about it because navigation happens to be off would be the wrong
+-- silence. And it carries a danger tone: low and fast-pulsing, the vocabulary the
+-- enemy-weapon beacon already uses for "this will hurt you", positioned on the
+-- faced tile so sweeping the stick reads the edge out as it pans.
+--
+-- Dungeon only. The overworld gives entrance holes the same pit attribute — the
+-- castle intro drop among them — and they are places you are meant to fall into,
+-- so warning there would cry wolf at every doorway.
+--
+-- Tile classes are the game's own (zelda3 tile_detect.c TileBehavior_Pit): 0x20,
+-- plus the 0xB0-0xBD variants dungeons use for holes with a set destination.
+-- Everything hangs off one table to spare the main chunk's local budget.
+HAZARD = { said = false }
+HAZARD.PIT = {}
+do
+  HAZARD.PIT[0x20] = true
+  for a = 0xB0, 0xBD do HAZARD.PIT[a] = true end
+end
+HAZARD.TONE = { pitch = 0.6, tremolo = 6.0, volume = 0.7 }
+
+-- The world pixel one tile ahead of Link, by facing. Shared reach with the bush
+-- cue so both agree what "in front of" means.
+function HAZARD.ahead(s)
+  local dir = s.direction
+  return s.x + 8 + (dir == 4 and -12 or dir == 6 and 12 or 0),
+         s.y + 12 + (dir == 0 and -12 or dir == 2 and 12 or 0)
+end
+
+function HAZARD.clear()
+  HAZARD.said = false
+  beacon.clear("hazard")
+end
+
+function HAZARD.update(s)
+  if s == nil or s.module ~= 0x07 then HAZARD.clear(); return end
+  local ax, ay = HAZARD.ahead(s)
+  local a = tile_attr_at(s, ax, ay)
+  if a == nil or not HAZARD.PIT[a] then HAZARD.clear(); return end
+  beacon.set("hazard", { x = ax - s.x, y = ay - s.y, pitch = HAZARD.TONE.pitch,
+    tremolo = HAZARD.TONE.tremolo, volume = HAZARD.TONE.volume })
+  if not HAZARD.said then
+    -- Critical so it cuts through whatever else is queued: by the time a
+    -- description of the room finishes, Link has already stepped in. Its own
+    -- category keeps it in a separate rate-limit bucket from combat chatter.
+    say("Pit.", { priority = "critical", category = "hazard" })
+    HAZARD.said = true
+  end
+end
+
 -- ===========================================================================
 -- Full-overworld collision from ROM. The live $7E2000 table only holds the
 -- loaded screens, so to route to a distant objective we decode any area's map16
@@ -2006,6 +2064,7 @@ function on_frame(frame)
   -- this frame.
   nav_update(now)
   bush_cue(now)
+  HAZARD.update(now) -- a pit in front of Link, guide or no guide
   room_route_update(now)
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
@@ -3361,11 +3420,36 @@ local ROOM_OBJECTIVES = {
     end },
 }
 
--- The active short-term objective in Link's current room, or nil. Dungeon-only.
-local function room_objective(s)
+-- Aim at the first room objective that is both active and actually reachable,
+-- returning the one committed to, or nil. Dungeon-only.
+--
+-- Reachability is part of the choice, not an afterthought. Room 0x71 is the case
+-- that proved it: two guard pits walled off from each other, the key-holder in one
+-- and Link in the other. `keyholder` sits above `kill` in the list and was picked
+-- on being live alone, so the guide committed to a soldier the router could not
+-- reach — route_set_goal failed, no path was drawn, and the enemy five tiles from
+-- Link went unmentioned. An objective whose target cannot be routed to is real but
+-- not yet actionable, so it falls through to the next one that can.
+--
+-- The cheap path is unchanged: an objective already aimed where it wants keeps its
+-- route without replanning, so the common frame plans nothing. Only a target that
+-- has moved (or failed) costs a search, and a failed search used to buy nothing at
+-- all.
+local function room_aim(s)
   if s.module ~= 0x07 then return nil end
   for _, o in ipairs(ROOM_OBJECTIVES) do
-    if o.active(s) then return o end
+    if o.active(s) then
+      local tx, ty = o.target(s)
+      -- Active with nowhere to walk (overlord spawners hold a room open but have no
+      -- position): still the objective, and still worth stating.
+      if tx == nil then return o end
+      if pathfind_goal ~= nil
+        and math.abs(pathfind_goal[1] - (tx >> 3)) + math.abs(pathfind_goal[2] - (ty >> 3)) < 2
+      then
+        return o -- already leading there; leave the route alone
+      end
+      if route_set_goal(s, tx, ty) then return o end
+    end
   end
   return nil
 end
@@ -3412,17 +3496,14 @@ nav_update = function(s)
   -- entry, leading to whatever satisfies it, which retargets only when it moves a
   -- couple of tiles (once close, the combat beacon takes the final approach). When
   -- it clears, re-aim at the quest goal (now, e.g., with the doors open).
-  local ro = room_objective(s)
+  -- room_aim both picks the objective and sets its route, so what gets announced is
+  -- what the guide actually committed to leading Link toward.
+  local ro = room_aim(s)
   if ro then
     local key = s.dungeon_room .. ":" .. ro.id
     if room_obj_announced ~= key then
       nav_say(ro.cue)
       room_obj_announced = key
-    end
-    local tx, ty = ro.target(s)
-    if tx and (pathfind_goal == nil
-      or math.abs(pathfind_goal[1] - (tx >> 3)) + math.abs(pathfind_goal[2] - (ty >> 3)) >= 2) then
-      route_set_goal(s, tx, ty)
     end
     return
   end
