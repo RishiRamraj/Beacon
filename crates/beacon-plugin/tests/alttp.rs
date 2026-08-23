@@ -3153,6 +3153,38 @@ fn alttp_the_map_draws_without_error_in_every_context() {
     p.on_frame(&ram, 3);
     assert_eq!(draw_error(&mut p, &ram), None, "a room being swept draws");
 
+    // A room whose active step has no place of its own. Room 0x70's step is a
+    // room-clear, whose target is whichever enemy is nearest, so there is no tile to
+    // plot — and the drawing loops used to reach straight for wp.tx. This is the case
+    // that killed the map, and the 0x71 frame above cannot catch it because no
+    // authored clear step lives there.
+    let mut placeless = dungeon_frame((20, 452), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| placeless[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x70);
+        set(0x7E00EE, 0);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3C5, 0); // COURTYARD armed, so its clear step for 0x70 is in play
+    }
+    sprite_slot(&mut placeless, 0, 66, (30, 456), 4);
+    let mut p3 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p3.on_frame(&placeless, 0);
+    p3.on_frame(&placeless, 1);
+    p3.command("advance", &placeless);
+    p3.on_frame(&placeless, 2);
+    assert_eq!(
+        p3.eval(PICKED, &placeless).unwrap(),
+        "70,nil,nil",
+        "the active step really is the placeless one"
+    );
+    assert_eq!(
+        draw_error(&mut p3, &placeless),
+        None,
+        "a step with no tile of its own still draws"
+    );
+
     // Before any state has been read, and outside play: the map says so rather than
     // reaching into a nil state.
     let mut fresh = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();

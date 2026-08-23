@@ -2824,8 +2824,11 @@ local function chain_aim(s)
   local wp = nav_chain and nav_chain[nav_chain_i]
   if not wp then return end
   if s.module == 0x07 then
-    route_set_goal(s, wp.tx * 8 + 4, wp.ty * 8 + 4)
-  else
+    -- Ask the kind where to lead: a room-clear has no place of its own, so its target
+    -- is whichever enemy is nearest, and it may be nowhere at all this instant.
+    local gx, gy = KIND.target(s, wp)
+    if gx then route_set_goal(s, gx, gy, wp.level) end
+  elseif wp.tx then
     ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
   end
 end
@@ -4155,9 +4158,12 @@ function on_draw(canvas)
     -- objective it committed to and clears it when none holds. Drawing must not ask
     -- room_aim directly — choosing an objective plans a route, and a draw pass has no
     -- business changing where the guide is pointed.
+    -- A step with no place of its own (a room-clear, whose target is whichever enemy is
+    -- nearest) has nothing to plot: the enemy it is aiming at carries its own marker and
+    -- its own tone. Skip it rather than invent a position for it.
     if s.module == 0x07 and nav_chain and room_obj_announced == nil then
       local wp = nav_chain[nav_chain_i]
-      if wp and wp.room == s.dungeon_room then
+      if wp and wp.room == s.dungeon_room and wp.tx then
         local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
         canvas:rect(px - 1, py - 1, 3, 3, 0xFFFFFF)
       end
@@ -4208,7 +4214,8 @@ function on_draw(canvas)
         local nc = nav_chain.sweep and 0x50D0F0 or 0x20B0A0
         local labels = {}
         for i, wp in ipairs(nav_chain) do
-          if wp.room == s.dungeon_room and inwin(wp.tx * 8 + 4, wp.ty * 8 + 4) then
+          if wp.room == s.dungeon_room and wp.tx
+            and inwin(wp.tx * 8 + 4, wp.ty * 8 + 4) then
             local px, py = plot(wp.tx * 8 + 4, wp.ty * 8 + 4)
             canvas:rect(px - 1, py - 1, 3, 3, (i == nav_chain_i) and 0xFFFFFF or nc)
             labels[#labels + 1] = { px, py, text = tostring(i), color = nc,
