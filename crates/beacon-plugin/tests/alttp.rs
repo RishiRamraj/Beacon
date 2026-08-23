@@ -2883,10 +2883,10 @@ fn facing_frame(link: (u16, u16), dir: u8, tiles: &[(u16, u16, u8)]) -> Vec<u8> 
 }
 
 #[test]
-fn alttp_facing_a_pit_sounds_a_danger_tone_and_says_nothing() {
-    // A tone, not a word. Speech is the channel everything else competes for, and "Pit."
-    // arrives slower than the danger and is gone once spoken; a tone lasts as long as the
-    // edge does and pans to say where it is.
+fn alttp_facing_a_pit_blips_once_and_says_nothing() {
+    // A sharp quick notification, not a word and not a drone: it fires on turning onto
+    // the pit, pans to say which way the edge is, and stops, so it does not bury the
+    // enemy and guide tones while Link edges along a ledge.
     let r = Registry::builtin();
     let pit_at = faced_tile((20, 20), 2);
     let ram = facing_frame((20, 20), 2, &[(pit_at.0, pit_at.1, 0x20)]);

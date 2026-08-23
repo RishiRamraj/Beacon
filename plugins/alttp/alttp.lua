@@ -672,13 +672,19 @@ end
 -- Tile classes are the game's own (zelda3 tile_detect.c TileBehavior_Pit): 0x20,
 -- plus the 0xB0-0xBD variants dungeons use for holes with a set destination.
 -- Everything hangs off one table to spare the main chunk's local budget.
-HAZARD = {}
+HAZARD = { facing = false, ticks = 0 }
 HAZARD.PIT = {}
 do
   HAZARD.PIT[0x20] = true
   for a = 0xB0, 0xBD do HAZARD.PIT[a] = true end
 end
-HAZARD.TONE = { pitch = 0.6, tremolo = 6.0, volume = 0.7 }
+-- A sharp, quick notification rather than a sustained hum: `ping` makes each cycle an
+-- attack-decay strike instead of a swell, and BLIP frames at this tremolo is about one
+-- strike, so facing a pit produces a single crisp blip. Being brief also separates it
+-- from the enemy-weapon tone it used to sit next to in pitch — a one-shot and a
+-- continuous drone cannot be confused however close their frequencies are.
+HAZARD.TONE = { pitch = 0.9, tremolo = 8.0, volume = 0.8 }
+HAZARD.BLIP = 8 -- frames it sounds for, about a sixth of a second
 
 -- The world pixel one tile ahead of Link, by facing. Shared reach with the bush
 -- cue so both agree what "in front of" means.
@@ -689,6 +695,8 @@ function HAZARD.ahead(s)
 end
 
 function HAZARD.clear()
+  HAZARD.facing = false
+  HAZARD.ticks = 0
   beacon.clear("hazard")
 end
 
@@ -697,8 +705,22 @@ function HAZARD.update(s)
   local ax, ay = HAZARD.ahead(s)
   local a = tile_attr_at(s, ax, ay)
   if a == nil or not HAZARD.PIT[a] then HAZARD.clear(); return end
-  beacon.set("hazard", { x = ax - s.x, y = ay - s.y, pitch = HAZARD.TONE.pitch,
-    tremolo = HAZARD.TONE.tremolo, volume = HAZARD.TONE.volume })
+  -- Fires on turning ONTO the pit, not for as long as he faces it: a warning about a
+  -- step he is about to take has said its piece once he has heard it, and holding the
+  -- tone would bury the enemy and guide tones under it while he edges along a ledge.
+  -- Facing away re-arms it, so every fresh approach gets its own blip.
+  if not HAZARD.facing then
+    HAZARD.facing = true
+    HAZARD.ticks = HAZARD.BLIP
+  end
+  if HAZARD.ticks > 0 then
+    HAZARD.ticks = HAZARD.ticks - 1
+    -- Still positioned on the faced tile, so the blip pans and says which way the edge is.
+    beacon.set("hazard", { x = ax - s.x, y = ay - s.y, pitch = HAZARD.TONE.pitch,
+      tremolo = HAZARD.TONE.tremolo, ping = true, volume = HAZARD.TONE.volume })
+  else
+    beacon.clear("hazard")
+  end
 end
 
 -- ===========================================================================
