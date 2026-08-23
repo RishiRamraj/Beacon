@@ -2273,6 +2273,11 @@ fn sprite_slot(ram: &mut [u8], slot: u32, kind: u8, tile: (u16, u16), hp: u8) {
     set(0x7E0D00 + slot, (y & 0xFF) as u8);
     set(0x7E0D20 + slot, (y >> 8) as u8);
     set(0x7E0E50 + slot, hp);
+    // A sprite spawns on whichever floor Link is on, and the plugin reads that to decide
+    // whether he can fight it. Frames that left it at zero put every sprite on the upper
+    // floor regardless.
+    let floor = ram[wram_offset(0x7E00EE).unwrap()];
+    ram[wram_offset(0x7E0F20 + slot).unwrap()] = floor;
 }
 
 /// Paints a 2x2 chest with its top-left tile at `tile`, as the game lays one out.
@@ -3673,5 +3678,53 @@ fn alttp_an_enemy_behind_a_wall_does_not_count_without_any_authored_chamber() {
         goal((26, 40), true),
         "26,40",
         "one gap in the wall is enough"
+    );
+}
+
+#[test]
+fn alttp_an_enemy_on_the_other_floor_is_not_something_link_can_fight() {
+    // A two-floor room has two collision grids sharing one set of tile coordinates, so
+    // an enemy directly above or below Link sits at the same tx,ty he does. The
+    // reachability fill is built for HIS floor, and the comparison was purely positional,
+    // so the enemy read as standing next to him. Sprites carry their floor at $7E0F20.
+    let r = Registry::builtin();
+    let goal = |enemy_floor: u8| -> String {
+        let mut ram = dungeon_frame((20, 20), (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x55);
+            set(0x7E00AE, 0x0A); // room-wide kill tag, so only the floor can exclude it
+            set(0x7E00EE, 0); // Link on the upper floor
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3C5, 2);
+            set(0x7E0F20, enemy_floor); // slot 0's floor
+        }
+        sprite_slot(&mut ram, 0, 66, (26, 20), 4);
+        // sprite_slot must not clobber the floor byte, so set it after.
+        ram[wram_offset(0x7E0F20).unwrap()] = enemy_floor;
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.command("advance", &ram);
+        p.on_frame(&ram, 2);
+        p.eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &ram,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(goal(0), "26,20", "same floor as Link: a target");
+    assert_eq!(
+        goal(1),
+        "nil",
+        "the floor below: not something he can fight from here"
+    );
+    assert_eq!(
+        goal(2),
+        "26,20",
+        "floor 2 is the transient the explosion path sets: counted"
     );
 }

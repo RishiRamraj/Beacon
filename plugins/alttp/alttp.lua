@@ -297,7 +297,26 @@ local ENEMY_ONSCREEN = 144
 -- chamber first, since it can be finer than anything the game states; then the bound
 -- the room's own kill tag implies; then a plain radius for a room with no tag at all.
 -- Global so every caller shares one answer.
-function enemy_counts(s, sx, sy)
+-- Sprites carry the floor they are on ($7E0F20, set from link_is_on_lower_level when
+-- they spawn), and a two-floor room has two collision grids sharing one set of tile
+-- coordinates. Without this an enemy directly above or below Link reads as standing
+-- next to him: REACH is built for HIS floor, and the comparison was purely positional.
+--
+-- The game's own clear checks ignore the floor, but they are answering a different
+-- question — whether the room is finished — and the tag answers that for us now. This
+-- one only decides what Link can fight from where he stands, and he cannot fight
+-- through a floor. (Value 2 is the transient the explosion path sets; treat it as
+-- present on either floor rather than on neither.)
+local SPRITE_FLOOR = 0x7E0F20
+function enemy_floor_matches(s, slot)
+  local f = mem.u8(SPRITE_FLOOR + slot)
+  -- $7E00EE literal, not LOWER_LEVEL: that local is declared further down the file, and
+  -- naming it here would silently read a nil global instead.
+  return f == nil or f == 2 or f == mem.u8(0x7E00EE)
+end
+
+function enemy_counts(s, sx, sy, slot)
+  if slot ~= nil and not enemy_floor_matches(s, slot) then return false end
   local scope = kill_room(s)
   if scope == nil then
     -- No tag to take an area from. But an authored `clear` step for this room is itself
@@ -328,7 +347,7 @@ local function nearest_pending_enemy(s)
         and (mem.u8(SPRITE.hp + i) or 0) > 0 then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
-      if enemy_counts(s, sx, sy) then
+      if enemy_counts(s, sx, sy, i) then
         local d = math.abs(sx - s.x) + math.abs(sy - s.y)
         if bd == nil or d < bd then best, bd = { sx, sy }, d end
       end
@@ -3303,7 +3322,7 @@ function key_holder(s)
         and mem.u8(SPRITE.die + i) ~= 0 then
       local sx = mem.u8(SPRITE.x_lo + i) + mem.u8(SPRITE.x_hi + i) * 256
       local sy = mem.u8(SPRITE.y_lo + i) + mem.u8(SPRITE.y_hi + i) * 256
-      if enemy_counts(s, sx, sy) then
+      if enemy_counts(s, sx, sy, i) then
         local d = math.abs(sx - s.x) + math.abs(sy - s.y)
         if bd == nil or d < bd then best, bd = { sx, sy }, d end
       end
