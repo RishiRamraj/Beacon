@@ -4389,3 +4389,60 @@ fn alttp_the_sanctuary_chest_comes_before_the_door() {
         "chest taken: the door step takes over"
     );
 }
+
+#[test]
+fn alttp_a_quiet_step_keeps_its_kind_but_drops_its_cue() {
+    // The Sanctuary chest is led to as part of the escort, and "Open the chest." there is
+    // stating the obvious over the top of it. `quiet` drops the kind's cue while keeping
+    // everything else the kind does — its done predicate, and so its place in the errand
+    // index. Its own arrival line still speaks.
+    let r = Registry::builtin();
+    let frame = |link: (u16, u16)| -> Vec<u8> {
+        let mut ram = dungeon_frame(link, (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x12);
+            set(0x7E00EE, 0);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3CC, 1);
+            set(0x7EF3C5, 1);
+        }
+        for dy in 0..2u32 {
+            for dx in 0..2u32 {
+                ram[wram_offset(0x7F2000 + ((74 + dy) & 63) * 64 + ((156 + dx) & 63)).unwrap()] =
+                    0x58;
+            }
+        }
+        ram
+    };
+
+    let away = frame((156, 84));
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&away, 0);
+    p.on_frame(&away, 1);
+    let mut said: Vec<String> = p
+        .command("advance", &away)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    for f in 2..8 {
+        said.extend(p.on_frame(&away, f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        !said.iter().any(|t| t.contains("Open the chest")),
+        "setting off toward it says nothing about chests: {said:?}"
+    );
+    // The kind is still a chest: it retires when the tile stops reading as one.
+    assert_eq!(
+        p.eval(
+            r#"local w = WAYPOINTS.SANCTUARY[24]
+               return tostring(w.kind) .. "," .. tostring(KIND.of(w).done ~= nil)"#,
+            &away
+        )
+        .unwrap(),
+        "chest,true",
+        "quiet drops the cue, not the kind"
+    );
+}

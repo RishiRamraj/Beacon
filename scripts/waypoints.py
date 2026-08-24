@@ -76,7 +76,7 @@ FIELD_ORDER = [
 # Fields whose numbers read as hex, because the game's own documentation does.
 HEX_FIELDS = {"room", "track"}
 TEXT_FIELDS = {"say", "arrival", "note", "kind", "carries"}
-FLAG_FIELDS = {"cue", "via", "after_lift"}
+FLAG_FIELDS = {"cue", "via", "after_lift", "quiet"}
 
 
 # ── The Lua data subset ─────────────────────────────────────────────────────
