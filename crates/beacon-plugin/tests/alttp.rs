@@ -4015,3 +4015,97 @@ fn alttp_room_0x21_leads_to_the_rat_carrying_the_key() {
         "the guide leads to the rat with the key, not the nearer one without it"
     );
 }
+
+// ── What Link is facing ─────────────────────────────────────────────────────
+// The collision tells the router whether to go round something; it does not tell the
+// player what to do with it. A bush needs slashing, a block shoving, a pot lifting.
+
+#[test]
+fn alttp_facing_a_block_says_so_and_a_pot_is_told_apart_from_it() {
+    // Both are manipulable tiles in 0x70-0x7F, so the tile alone cannot say which. The
+    // room's replacement-state slot does: 0 or 1 for a pushable block, 0x1111 for a pot,
+    // 0x4040 for a hammer peg.
+    let r = Registry::builtin();
+    let said = |state: u16| -> Vec<String> {
+        let e = faced_tile((20, 20), 6);
+        let mut ram = facing_frame((20, 20), 6, &[(e.0, e.1, 0x71)]); // slot 1
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E0500 + 2, (state & 0xFF) as u8);
+            set(0x7E0500 + 3, (state >> 8) as u8);
+        }
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect()
+    };
+
+    assert!(
+        said(0).iter().any(|t| t == "Block."),
+        "unshoved block: {:?}",
+        said(0)
+    );
+    assert!(
+        said(1).iter().any(|t| t == "Block."),
+        "already shoved: still a block"
+    );
+    assert!(said(0x1111).iter().any(|t| t == "Pot."), "a pot is a pot");
+    let peg = said(0x4040);
+    assert!(
+        !peg.iter().any(|t| t == "Block." || t == "Pot."),
+        "a hammer peg is neither: {peg:?}"
+    );
+}
+
+#[test]
+fn alttp_a_faced_thing_is_named_once_and_renamed_when_it_changes() {
+    let r = Registry::builtin();
+    let e = faced_tile((20, 20), 6);
+    let block = facing_frame((20, 20), 6, &[(e.0, e.1, 0x71)]); // state 0 -> a block
+    let mut pot = facing_frame((20, 20), 6, &[(e.0, e.1, 0x71)]);
+    {
+        let mut set = |addr: u32, v: u8| pot[wram_offset(addr).unwrap()] = v;
+        set(0x7E0500 + 2, 0x11);
+        set(0x7E0500 + 3, 0x11);
+    }
+    let open = facing_frame((20, 20), 6, &[(e.0, e.1, 0x00)]);
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&block, 0);
+    let first: Vec<String> = p
+        .on_frame(&block, 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        first.iter().any(|t| t == "Block."),
+        "named on facing it: {first:?}"
+    );
+    let again: Vec<String> = p
+        .on_frame(&block, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        !again.iter().any(|t| t == "Block."),
+        "not repeated: {again:?}"
+    );
+
+    // Facing a different thing names that instead, without needing open ground between.
+    let switched: Vec<String> = p.on_frame(&pot, 3).iter().map(|i| i.text.clone()).collect();
+    assert!(
+        switched.iter().any(|t| t == "Pot."),
+        "renamed on change: {switched:?}"
+    );
+
+    // Open ground re-arms it.
+    p.on_frame(&open, 4);
+    let back: Vec<String> = p
+        .on_frame(&block, 5)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        back.iter().any(|t| t == "Block."),
+        "named again after open ground: {back:?}"
+    );
+}
