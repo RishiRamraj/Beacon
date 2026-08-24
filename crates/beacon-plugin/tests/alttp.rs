@@ -4290,6 +4290,13 @@ fn alttp_the_sanctuary_door_speaks_its_arrival_line() {
         set(0x7EF3C5, 1);
     }
 
+    // The Sanctuary chest comes before the door, so with it unopened the guide is on the
+    // chest and never reaches the door. Opened, it retires and the door is next.
+    for dy in 0..2u32 {
+        for dx in 0..2u32 {
+            ram[wram_offset(0x7F2000 + ((74 + dy) & 63) * 64 + ((156 + dx) & 63)).unwrap()] = 0x00;
+        }
+    }
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     p.on_frame(&ram, 0);
     p.on_frame(&ram, 1);
@@ -4307,5 +4314,56 @@ fn alttp_the_sanctuary_door_speaks_its_arrival_line() {
         said.iter().filter(|t| t.contains("excuuuuuse me")).count(),
         1,
         "and only once: {said:?}"
+    );
+}
+
+#[test]
+fn alttp_the_sanctuary_chest_comes_before_the_door() {
+    // Ordering, not just presence: with the chest unopened the guide must be on the chest,
+    // and once opened it retires and the door step takes over.
+    let r = Registry::builtin();
+    let frame = |chest_open: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((155, 78), (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x12);
+            set(0x7E00EE, 0);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3CC, 1); // Zelda following: the escort chain is armed
+            set(0x7EF3C5, 1);
+        }
+        if !chest_open {
+            for dy in 0..2u32 {
+                for dx in 0..2u32 {
+                    ram[wram_offset(0x7F2000 + ((74 + dy) & 63) * 64 + ((156 + dx) & 63))
+                        .unwrap()] = 0x58;
+                }
+            }
+        }
+        ram
+    };
+    let picked = |chest_open: bool| -> String {
+        let ram = frame(chest_open);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.command("advance", &ram);
+        for f in 2..20 {
+            p.on_frame(&ram, f);
+        }
+        p.eval(PICKED, &ram).unwrap()
+    };
+
+    assert_eq!(
+        picked(false),
+        "12,156,74",
+        "chest shut: the guide is on the chest"
+    );
+    assert_eq!(
+        picked(true),
+        "12,159,120",
+        "chest taken: the door step takes over"
     );
 }
