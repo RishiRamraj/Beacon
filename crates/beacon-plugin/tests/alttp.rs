@@ -4126,3 +4126,47 @@ fn alttp_a_shoved_block_is_still_called_a_block() {
         "a spent block still announces: {texts:?}"
     );
 }
+
+#[test]
+fn alttp_the_escape_lever_waypoint_rides_the_good_switch_not_the_bad_one() {
+    // Room 0x02 holds two levers: a Good Switch (sprite kind 4) and a Bad Switch (kind
+    // 6). The waypoint names the sprite type rather than a tile, which is the only thing
+    // that tells them apart, and offsets one tile south to where Link stands to pull it.
+    let r = Registry::builtin();
+    let mut ram = dungeon_frame((170, 52), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x02);
+        set(0x7E00EE, 1);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3CC, 1); // Zelda following: SANCTUARY armed
+        set(0x7EF3C5, 1);
+    }
+    sprite_slot(&mut ram, 5, 6, (148, 46), 3); // Bad Switch, the decoy
+    sprite_slot(&mut ram, 6, 4, (170, 46), 3); // Good Switch
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram);
+    for f in 2..20 {
+        p.on_frame(&ram, f);
+    }
+    assert_eq!(
+        p.eval(
+            r#"local w = WAYPOINTS.SANCTUARY[22]
+               return w.slot .. "@" .. w.tx .. "," .. w.ty"#,
+            &ram
+        )
+        .unwrap(),
+        "6@170,47",
+        "it rides slot 6, the Good Switch, offset one tile south of it"
+    );
+    assert_eq!(
+        p.eval(PICKED, &ram).unwrap(),
+        "02,170,47",
+        "and the guide is leading to it"
+    );
+}
