@@ -4446,3 +4446,73 @@ fn alttp_a_quiet_step_keeps_its_kind_but_drops_its_cue() {
         "quiet drops the cue, not the kind"
     );
 }
+
+#[test]
+fn alttp_an_errand_speaks_its_arrival_line_with_no_chain_armed() {
+    // The whole point of putting the line on the chest was that a step with a `done` is
+    // errand-indexed and so reachable once its chain has retired. But the errand driver
+    // had no arrival handling, so it led Link there and said nothing — reachable for
+    // routing, silent on arrival.
+    let r = Registry::builtin();
+    let frame = |link: (u16, u16)| -> Vec<u8> {
+        let mut ram = dungeon_frame(link, (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x12);
+            set(0x7E00EE, 0);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3CC, 0); // Zelda delivered...
+            set(0x7EF3C5, 2); // ...so the escort chain has retired
+        }
+        for dy in 0..2u32 {
+            for dx in 0..2u32 {
+                ram[wram_offset(0x7F2000 + ((74 + dy) & 63) * 64 + ((156 + dx) & 63)).unwrap()] =
+                    0x58; // chest still shut
+            }
+        }
+        ram
+    };
+
+    let away = frame((156, 84));
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&away, 0);
+    p.on_frame(&away, 1);
+    let mut said: Vec<String> = p
+        .command("advance", &away)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    for f in 2..8 {
+        said.extend(p.on_frame(&away, f).iter().map(|i| i.text.clone()));
+    }
+    assert_eq!(
+        p.eval("return tostring(nav_chain)", &away).unwrap(),
+        "nil",
+        "no chain is armed at this point in the quest"
+    );
+    assert!(
+        !said.iter().any(|t| t.contains("excuuuuuse me")),
+        "not yet: he has not reached it — {said:?}"
+    );
+    // And `quiet` holds on this path too, not just on the chain leg.
+    assert!(
+        !said.iter().any(|t| t.contains("Open the chest")),
+        "a quiet step stays quiet whichever driver leads to it: {said:?}"
+    );
+
+    let on = frame((156, 74));
+    for f in 8..16 {
+        said.extend(p.on_frame(&on, f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        said.iter().any(|t| t.contains("excuuuuuse me")),
+        "reaching an errand speaks its arrival line, chain or no chain: {said:?}"
+    );
+    assert_eq!(
+        said.iter().filter(|t| t.contains("excuuuuuse me")).count(),
+        1,
+        "and once: {said:?}"
+    );
+}

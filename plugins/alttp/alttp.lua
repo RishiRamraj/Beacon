@@ -3315,7 +3315,7 @@ local room_obj_announced = nil
 -- Bookkeeping for the room objective, global so it costs the main chunk no locals.
 -- `said` is the spoken latch (one cue per objective per room), `lapse` counts frames
 -- with no target so a flicker is not mistaken for the objective being finished.
-ROOMOBJ = { room = nil, said = nil, lapse = 0 }
+ROOMOBJ = { room = nil, said = nil, lapse = 0, arrived = nil }
 ROOMOBJ.LAPSE = 30 -- half a second of no target before believing it is over
 
 -- Aim the guide at the current quest goal from wherever Link stands. One line now:
@@ -3941,9 +3941,25 @@ nav_update = function(s)
     if wp then
       local key = s.dungeon_room .. ":errand"
       if room_obj_announced ~= key then
-        local line = wp.say or KIND.of(wp).cue
+        -- Same rule as the chain leg, `quiet` included: two drivers disagreeing about
+        -- whether a step narrates itself is worse than either answer.
+        local line = wp.say or (not wp.quiet and KIND.of(wp).cue) or nil
         if line then nav_say(line) end
         room_obj_announced = key
+      end
+      -- Arriving counts here too. The chain leg speaks a step's `arrival` on reaching it;
+      -- this driver did not, so a step whose chain had retired could be led to and then
+      -- say nothing on arrival — which is not "reachable from any quest state" in any
+      -- sense the player would recognise. Latched per step, so it lands once.
+      if wp.tx and math.abs((s.x >> 3) - wp.tx) + math.abs((s.y >> 3) - wp.ty) <= CHAIN_REACH
+        and (wp.level or 0) == mem.u8(LOWER_LEVEL)
+      then
+        if wp.arrival and ROOMOBJ.arrived ~= wp then
+          nav_say(wp.arrival)
+          ROOMOBJ.arrived = wp
+        end
+        pathfind_stop() -- standing on it; go quiet rather than shuffling on the spot
+        return
       end
       if pathfind_goal == nil
         or math.abs(pathfind_goal[1] - (gx >> 3)) + math.abs(pathfind_goal[2] - (gy >> 3)) >= 2
@@ -3957,7 +3973,7 @@ nav_update = function(s)
   -- what the guide actually committed to leading Link toward.
   -- Saying it again is a fresh room's business, not a fresh frame's.
   if ROOMOBJ.room ~= s.dungeon_room then
-    ROOMOBJ.room, ROOMOBJ.said, ROOMOBJ.lapse = s.dungeon_room, nil, 0
+    ROOMOBJ.room, ROOMOBJ.said, ROOMOBJ.lapse, ROOMOBJ.arrived = s.dungeon_room, nil, 0, nil
   end
   local ro = room_aim(s)
   if ro then
