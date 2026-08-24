@@ -628,26 +628,6 @@ local function tile_attr_at(s, px, py, level)
   return nil
 end
 
--- Cue the player to slash a bush the guide is leading them into. The router treats
--- bushes as passable (the sword cuts them), but the player still has to swing to
--- get through, so when Link faces a bush tile while the assist is on, say so once,
--- resetting when he faces open ground again. Global `nav_active` gates it so the
--- cue only sounds while actually being guided.
-local bush_cued = false
-local function bush_cue(s)
-  if s == nil or s.module ~= 0x09 or not nav_active then bush_cued = false; return end
-  local dir = s.direction
-  local ax = s.x + 8 + (dir == 4 and -12 or dir == 6 and 12 or 0)
-  local ay = s.y + 12 + (dir == 0 and -12 or dir == 2 and 12 or 0)
-  if tile_attr_at(s, ax, ay) == BUSH_TILE then
-    if not bush_cued then
-      say("Bush.", { priority = "navigation", category = "on-demand" })
-      bush_cued = true
-    end
-  else
-    bush_cued = false
-  end
-end
 
 
 -- ===========================================================================
@@ -2206,7 +2186,7 @@ function on_frame(frame)
   -- crosses screens, before the followers it drives so a fresh target takes effect
   -- this frame.
   nav_update(now)
-  bush_cue(now)
+  FACE.update(now)
   HAZARD.update(now) -- a pit in front of Link, guide or no guide
   room_route_update(now)
 
@@ -3436,10 +3416,63 @@ end
 -- game's own lift check reads it. A lifted pot's slot stops matching, which is
 -- what retires its waypoint.
 MANIP_STATE = 0x7E0500
+function SWEEP.is_block(attr)
+  if attr == nil or attr < 0x70 or attr > 0x7F then return false end
+  local st = mem.u16(MANIP_STATE + (attr & 0x0F) * 2)
+  return st == 0 or st == 1
+end
+
 function SWEEP.is_pot(attr)
   if attr == nil or attr < 0x70 or attr > 0x7F then return false end
   local st = mem.u16(MANIP_STATE + (attr & 0x0F) * 2)
   return st ~= nil and (st & 0xF0F0) == 0x1010
+end
+
+-- ── What Link is facing ─────────────────────────────────────────────────────
+-- Name the thing in front of Link, once, when it is something he has to act on rather
+-- than walk around. A bush needs slashing, a block needs shoving, a pot needs lifting;
+-- the router treats a bush as passable and a block as solid, and in neither case does
+-- the collision alone tell the player what to DO with it.
+--
+-- One announcer rather than a cue per class, because they are the same behaviour: read
+-- the faced tile, say what it is if it is worth saying, and stay quiet until he faces
+-- something else. `said` holds the last thing named, so turning from a bush to a block
+-- announces the block — it is about what is in front of him now, not about novelty.
+--
+-- Some classes only make sense while being led somewhere. A bush cue is routing advice
+-- (the guide has just routed THROUGH that bush, and the player has to swing to follow),
+-- so it keeps the `guided` gate it always had. A block or a pot is worth knowing about
+-- whenever Link walks into one.
+FACE = { said = nil }
+
+-- One tile ahead, by facing: the reach the bush cue has always used.
+function FACE.ahead(s)
+  local dir = s.direction
+  return s.x + 8 + (dir == 4 and -12 or dir == 6 and 12 or 0),
+         s.y + 12 + (dir == 0 and -12 or dir == 2 and 12 or 0)
+end
+
+FACE.CLASSES = {
+  -- Overworld only in practice: BUSH_TILE is what the overworld decode reports for the
+  -- two bush map16 ids, and the dungeon grid never yields it.
+  { say = "Bush.", guided = true, test = function(a) return a == BUSH_TILE end },
+  { say = "Block.", test = function(a) return SWEEP.is_block(a) end },
+  { say = "Pot.", test = function(a) return SWEEP.is_pot(a) end },
+}
+
+function FACE.update(s)
+  if s == nil or not in_play(s) then FACE.said = nil; return end
+  local ax, ay = FACE.ahead(s)
+  local a = tile_attr_at(s, ax, ay)
+  local hit
+  for _, c in ipairs(FACE.CLASSES) do
+    if (not c.guided or nav_active) and c.test(a) then hit = c; break end
+  end
+  if hit == nil then FACE.said = nil; return end
+  if FACE.said ~= hit.say then
+    say(hit.say, { priority = "navigation", category = "on-demand" })
+    FACE.said = hit.say
+  end
 end
 
 -- Every tile of a class in the room window, as one target per cluster. The things
