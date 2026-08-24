@@ -4271,3 +4271,41 @@ fn alttp_the_doorway_the_lever_opens_is_gated_on_the_lever() {
         "a 0x86 doorway is walkable, so the route can reach a waypoint standing in it"
     );
 }
+
+#[test]
+fn alttp_the_sanctuary_door_speaks_its_arrival_line() {
+    // The last step of the escort, at the Sanctuary doorway (attr 0x8E). Its `arrival`
+    // line is spoken on reaching it, in place of a generic arrival — which is the field's
+    // whole purpose, and had no test.
+    let r = Registry::builtin();
+    let mut ram = dungeon_frame((159, 120), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x12); // the Sanctuary
+        set(0x7E00EE, 0);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3CC, 1); // Zelda still following, so the escort chain is armed
+        set(0x7EF3C5, 1);
+    }
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram);
+    let mut said = Vec::new();
+    for f in 2..20 {
+        said.extend(p.on_frame(&ram, f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        said.iter().any(|t| t.contains("excuuuuuse me")),
+        "standing on the Sanctuary door speaks its arrival line: {said:?}"
+    );
+    // Once, not every frame it is stood on.
+    assert_eq!(
+        said.iter().filter(|t| t.contains("excuuuuuse me")).count(),
+        1,
+        "and only once: {said:?}"
+    );
+}
