@@ -3097,8 +3097,11 @@ function chain_dungeon_leg(s)
         pathfind_stop() -- arrived; go quiet until the next waypoint opens up
       else
         -- The waypoint's own line if it has one, else the kind's: a step whose
-        -- requirement a tone cannot convey says so once ("Defeat all enemies.").
-        local line = wp.say or KIND.of(wp).cue
+        -- requirement a tone cannot convey says so once ("Defeat all enemies."). `quiet`
+        -- opts a step out of its kind's cue, for one whose kind is right but whose
+        -- narration is not wanted — the Sanctuary chest is led to as part of the escort,
+        -- and "Open the chest." there is stating the obvious over the top of it.
+        local line = wp.say or (not wp.quiet and KIND.of(wp).cue) or nil
         if line and not chain_said[pick] then nav_say(line); chain_said[pick] = true end
         route_set_goal(s, pgx, pgy, plevel)
       end
