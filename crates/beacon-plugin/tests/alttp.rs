@@ -3971,3 +3971,47 @@ fn alttp_a_via_step_holds_the_scan_even_after_it_briefly_read_as_done() {
         "and it leads to the enemy carrying the key, not on to the cell"
     );
 }
+
+#[test]
+fn alttp_room_0x21_leads_to_the_rat_carrying_the_key() {
+    // The escape's locked door north out of 0x21 needs a key, and the key is on one rat
+    // among nine sprites — eight other rats and three Keese share the room. `carries =
+    // "key"` picks it out by die_action, which is the only thing that distinguishes it.
+    //
+    // Authoring the step also widens the area it is judged over: with no fight step in
+    // the room there is no kill tag either, so the tally fell back to a 144-pixel radius
+    // and the rat 264 pixels away did not count at all.
+    let r = Registry::builtin();
+    let mut ram = dungeon_frame((107, 175), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x21);
+        set(0x7E00EE, 0);
+        set(0x7E040C, 0x02);
+        set(0x7EF34A, 1);
+        set(0x7EF359, 1);
+        set(0x7EF3CC, 1); // Zelda following: the escape, so SANCTUARY is armed
+        set(0x7EF3C5, 1);
+    }
+    // The key carrier, and a decoy rat nearer to Link that drops nothing.
+    sprite_slot(&mut ram, 0, 109, (74, 140), 2);
+    ram[wram_offset(0x7E0CBA).unwrap()] = 0x01;
+    sprite_slot(&mut ram, 3, 109, (98, 172), 2); // die_action stays 0
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram);
+    for f in 2..20 {
+        p.on_frame(&ram, f);
+    }
+    assert_eq!(
+        p.eval(
+            "return pathfind_goal and (pathfind_goal[1]..','..pathfind_goal[2]) or 'nil'",
+            &ram
+        )
+        .unwrap(),
+        "74,140",
+        "the guide leads to the rat with the key, not the nearer one without it"
+    );
+}
