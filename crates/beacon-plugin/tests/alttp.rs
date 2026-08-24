@@ -4273,43 +4273,65 @@ fn alttp_the_doorway_the_lever_opens_is_gated_on_the_lever() {
 }
 
 #[test]
-fn alttp_the_sanctuary_door_speaks_its_arrival_line() {
-    // The last step of the escort, at the Sanctuary doorway (attr 0x8E). Its `arrival`
-    // line is spoken on reaching it, in place of a generic arrival — which is the field's
-    // whole purpose, and had no test.
+fn alttp_the_sanctuary_chest_speaks_its_arrival_line_on_reaching_it() {
+    // The escort's parting line sits on the chest rather than the door, because the chest
+    // has a `done` and so is errand-indexed: it stays reachable after the escort chain
+    // retires at progress 2, where a plain position cannot be reached at all.
+    //
+    // Link has to ARRIVE for an arrival line. chain_start seeds nav_chain.arrived from
+    // where he is standing, so a step he is already on when the chain arms counts as
+    // reached and says nothing — which is why reloading the plugin while stood on a
+    // waypoint never speaks it.
     let r = Registry::builtin();
-    let mut ram = dungeon_frame((159, 120), (0, 0), &[]);
-    {
-        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
-        set(0x7E00A0, 0x12); // the Sanctuary
-        set(0x7E00EE, 0);
-        set(0x7E040C, 0x02);
-        set(0x7EF34A, 1);
-        set(0x7EF359, 1);
-        set(0x7EF3CC, 1); // Zelda still following, so the escort chain is armed
-        set(0x7EF3C5, 1);
-    }
-
-    // The Sanctuary chest comes before the door, so with it unopened the guide is on the
-    // chest and never reaches the door. Opened, it retires and the door is next.
-    for dy in 0..2u32 {
-        for dx in 0..2u32 {
-            ram[wram_offset(0x7F2000 + ((74 + dy) & 63) * 64 + ((156 + dx) & 63)).unwrap()] = 0x00;
+    let frame = |link: (u16, u16)| -> Vec<u8> {
+        let mut ram = dungeon_frame(link, (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x12); // the Sanctuary
+            set(0x7E00EE, 0);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3CC, 1);
+            set(0x7EF3C5, 1);
         }
-    }
+        // Chest shut, or the step is done and never a target.
+        for dy in 0..2u32 {
+            for dx in 0..2u32 {
+                ram[wram_offset(0x7F2000 + ((74 + dy) & 63) * 64 + ((156 + dx) & 63)).unwrap()] =
+                    0x58;
+            }
+        }
+        ram
+    };
+
+    // Arm the chain well clear of the chest, so nothing is seeded as already reached.
+    let away = frame((156, 84));
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    p.on_frame(&ram, 0);
-    p.on_frame(&ram, 1);
-    p.command("advance", &ram);
-    let mut said = Vec::new();
-    for f in 2..20 {
-        said.extend(p.on_frame(&ram, f).iter().map(|i| i.text.clone()));
+    p.on_frame(&away, 0);
+    p.on_frame(&away, 1);
+    let mut said: Vec<String> = p
+        .command("advance", &away)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    for f in 2..6 {
+        said.extend(p.on_frame(&away, f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        !said.iter().any(|t| t.contains("excuuuuuse me")),
+        "nothing yet: he has not reached it — {said:?}"
+    );
+
+    // Now walk him onto it.
+    let on = frame((156, 74));
+    for f in 6..14 {
+        said.extend(p.on_frame(&on, f).iter().map(|i| i.text.clone()));
     }
     assert!(
         said.iter().any(|t| t.contains("excuuuuuse me")),
-        "standing on the Sanctuary door speaks its arrival line: {said:?}"
+        "reaching the chest speaks its arrival line: {said:?}"
     );
-    // Once, not every frame it is stood on.
     assert_eq!(
         said.iter().filter(|t| t.contains("excuuuuuse me")).count(),
         1,
