@@ -2681,7 +2681,7 @@ fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
             &ram
         )
         .unwrap(),
-        "3|19|20|string|string|function|gate|push|nil|function|nil",
+        "3|19|21|string|string|function|gate|push|nil|function|nil",
         "chains arrive whole, prose intact, clauses compiled to closures"
     );
 }
