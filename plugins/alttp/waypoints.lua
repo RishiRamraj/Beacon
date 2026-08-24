@@ -140,7 +140,7 @@ SANCTUARY = {
     note = "North into 0x11 to the dungeon push-block (tile 0x76 at 111-112,76-77). A TILE push obstacle with no sprite to track, so push = 0 to face north is all that drives the alignment tone. done: once shoved, its tile stops reading as a push-block, so the tone goes silent when the block can move no further." },
   { tx = 111, ty = 68, room = 0x11, level = 0, gate = {"at", 111, 76, 0, {"tile_outside", 0x70, 0x7F}},
     note = "North through where the block was, further into 0x11. Gated on the push-block at (111,76) being SHOVED: the way north is a dead end until then, and the pathfinder can slip around the block on the open floor beside it, so a collision block alone would not hold the guide back — the block's pushed state is the real gate." },
-  { tx = 170, ty = 47, room = 0x02, level = 1, via = true, track = 4, track_dy = 1,
+  { tx = 170, ty = 47, room = 0x02, level = 1, via = true, track = 4, track_dy = 1, done = {"lever_pulled"},
     note = "The pull lever on the escape, tracked by sprite rather than by tile: kind 4 is the Good Switch, and the room holds a Bad Switch (kind 6) as well, so naming the sprite type is what tells the right one from the wrong one. track_dy 1 offsets the waypoint one tile south of the lever, where Link stands to face north at it. tx/ty are the fallback until the sprite loads. via because the way on does not open until it is pulled." },
 },
 
