@@ -4109,3 +4109,20 @@ fn alttp_a_faced_thing_is_named_once_and_renamed_when_it_changes() {
         "named again after open ground: {back:?}"
     );
 }
+
+#[test]
+fn alttp_a_shoved_block_is_still_called_a_block() {
+    // Pushing a block clears its manipulable tile and leaves 0x27 — hookshottable — at
+    // the new position. The push machinery rightly goes quiet, but the thing is still
+    // standing there, and a player who cannot see it still wants to know.
+    let r = Registry::builtin();
+    let e = faced_tile((20, 20), 6);
+    let ram = facing_frame((20, 20), 6, &[(e.0, e.1, 0x27)]);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    let texts: Vec<String> = p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect();
+    assert!(
+        texts.iter().any(|t| t == "Block."),
+        "a spent block still announces: {texts:?}"
+    );
+}

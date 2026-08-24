@@ -3456,7 +3456,12 @@ FACE.CLASSES = {
   -- Overworld only in practice: BUSH_TILE is what the overworld decode reports for the
   -- two bush map16 ids, and the dungeon grid never yields it.
   { say = "Bush.", guided = true, test = function(a) return a == BUSH_TILE end },
-  { say = "Block.", test = function(a) return SWEEP.is_block(a) end },
+  -- 0x27 is TileBehavior_Hookshottables, and it is what a shoved block becomes at its
+  -- new position: the tile stops being manipulable, so the push machinery rightly goes
+  -- quiet, but the thing is still standing there and still worth naming. Statues, logs
+  -- and hookshot pegs share the class and get called blocks too, which is a wrong word
+  -- for a log and the right one for the case that comes up.
+  { say = "Block.", test = function(a) return SWEEP.is_block(a) or a == 0x27 end },
   { say = "Pot.", test = function(a) return SWEEP.is_pot(a) end },
 }
 
