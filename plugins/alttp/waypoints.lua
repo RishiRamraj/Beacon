@@ -144,6 +144,8 @@ SANCTUARY = {
     note = "The pull lever on the escape, tracked by sprite rather than by tile: kind 4 is the Good Switch, and the room holds a Bad Switch (kind 6) as well, so naming the sprite type is what tells the right one from the wrong one. track_dy 1 offsets the waypoint one tile south of the lever, where Link stands to face north at it. tx/ty are the fallback until the sprite loads. via because the way on does not open until it is pulled." },
   { tx = 159, ty = 57, room = 0x02, level = 1, gate = {"lever_pulled"},
     note = "The doorway the lever opens, south out of 0x02: a 2x3 block of attr 0x86 at 159-160,56-58, which is TileHandlerIndoor_80, the indoor door collision. Gated on the lever, since before it is pulled this way is blocked and aiming at it would send Link into a wall. Not a `gate` kind: that means a locked door reading 0xF0-0xFF, and this one has no key, it just has to be opened first." },
+  { tx = 159, ty = 120, room = 0x12, level = 0, arrival = "Well excuuuuuse me, princess.",
+    note = "The Sanctuary door itself, at the end of the escort: attr 0x8E, TileBehavior_Entrance, the doorway Link brings Zelda through. Last step of the chain, so its arrival line is the one that lands as the escort completes." },
 },
 
 }
