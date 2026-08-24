@@ -132,6 +132,8 @@ SANCTUARY = {
     note = "The locked door north (a 2x2 at 159-160,197-198). gate: an OPEN door is always a target, so the guide leads Link through it; a still-locked door is a target only once he holds a small key, otherwise the guide stays on the chest, which holds that key, rather than a door he cannot open." },
   { tx = 131, ty = 175, room = 0x22, level = 0,
     note = "North into 0x22, upper floor." },
+  { room = 0x21, kind = "enemy", via = true, carries = "key",
+    note = "The key-holder rat. Room 0x21 gates the escape on its locked door north, and the key comes off a rat in here, so the fight is the step that comes first: kind enemy with carries key targets whichever sprite still drops a key on death (die_action non-zero), which is what tells it apart from the eight other rats and the Keese sharing the room. via keeps the guide on it, since the door waypoint below cannot be a target until the key is in hand anyway." },
   { tx = 111, ty = 133, room = 0x21, level = 0, kind = "gate", gate = {"any", {"tile_outside", 0xF0, 0xFF}, {"keys"}},
     note = "West into 0x21, then the locked door north (a 2x2 at 111-112,133-134). Same open-or-keyed gate as 0x32; here the key-holder rat drops the key." },
   { tx = 111, ty = 76, room = 0x11, level = 0, kind = "push", push = 0,
