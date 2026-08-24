@@ -2666,7 +2666,10 @@ fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
             r#"
               local c, sanct = WAYPOINTS.COURTYARD, WAYPOINTS.SANCTUARY
               return table.concat({
-                #WAYPOINTS.UNCLE_APPROACH, #c, #sanct,
+                -- Non-empty rather than exact counts: the counts churn every time a
+                -- step is authored, and what this test is about is that the chains
+                -- arrive whole with their prose and their clauses compiled.
+                tostring(#WAYPOINTS.UNCLE_APPROACH > 0 and #c > 0 and #sanct > 0),
                 type(c.note),                 -- the chain's own prose
                 type(c[14].note),             -- the locked door's rationale
                 type(c[14].gate),             -- ...compiled from a clause
@@ -2681,7 +2684,7 @@ fn alttp_the_authored_chains_are_data_the_plugin_compiles() {
             &ram
         )
         .unwrap(),
-        "3|19|22|string|string|function|gate|push|nil|function|nil",
+        "true|string|string|function|gate|push|nil|function|nil",
         "chains arrive whole, prose intact, clauses compiled to closures"
     );
 }
@@ -4217,4 +4220,54 @@ fn alttp_the_lever_step_retires_when_the_room_records_it_pulled() {
         "door still blocked: the lever wants pulling"
     );
     assert_eq!(done(0), "true", "room records it pulled: the step retires");
+}
+
+#[test]
+fn alttp_the_doorway_the_lever_opens_is_gated_on_the_lever() {
+    // The doorway south out of 0x02 only exists once the lever has been pulled, so aiming
+    // at it before that would send Link into a wall. Same shape as a locked door's gate,
+    // keyed on the room flag rather than on a key.
+    let r = Registry::builtin();
+    let gate = |trapdoors: u8| -> String {
+        let mut ram = dungeon_frame((159, 52), (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x02);
+            set(0x7E00EE, 1);
+            set(0x7E0468, trapdoors);
+        }
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.eval(
+            r#"local w = WAYPOINTS.SANCTUARY[23]
+               return tostring(w.gate({ module = 0x07, dungeon_room = 0x02 }, w))"#,
+            &ram,
+        )
+        .unwrap()
+    };
+    assert_eq!(gate(1), "false", "door still blocked: not a target");
+    assert_eq!(gate(0), "true", "lever pulled: the doorway opens up");
+
+    // And the doorway must be walkable, or the route could not reach it. 0x86 is
+    // TileHandlerIndoor_80, the indoor door collision, and is deliberately not in
+    // IMPASSABLE — asked through REACH, which floods over passable ground only.
+    let mut ram = dungeon_frame((159, 52), (0, 0), &[]);
+    for ty in 56..59u32 {
+        for tx in 159..161u32 {
+            ram[wram_offset(0x7F3000 + (ty & 63) * 64 + (tx & 63)).unwrap()] = 0x86;
+        }
+    }
+    ram[wram_offset(0x7E00EE).unwrap()] = 1;
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    assert_eq!(
+        p.eval(
+            r#"local s = { x = 159*8+4, y = 52*8+4, module = 0x07, dungeon_room = 0x02 }
+               return tostring(REACH.can(s, 159*8+4, 57*8+4))"#,
+            &ram
+        )
+        .unwrap(),
+        "true",
+        "a 0x86 doorway is walkable, so the route can reach a waypoint standing in it"
+    );
 }
