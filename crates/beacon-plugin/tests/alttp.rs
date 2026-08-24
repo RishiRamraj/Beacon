@@ -4143,6 +4143,9 @@ fn alttp_the_escape_lever_waypoint_rides_the_good_switch_not_the_bad_one() {
         set(0x7EF359, 1);
         set(0x7EF3CC, 1); // Zelda following: SANCTUARY armed
         set(0x7EF3C5, 1);
+        // The door the lever opens is still blocked, so the step is still wanted. A zero
+        // here means the room has already recorded the lever pulled, and the step retires.
+        set(0x7E0468, 1);
     }
     sprite_slot(&mut ram, 5, 6, (148, 46), 3); // Bad Switch, the decoy
     sprite_slot(&mut ram, 6, 4, (170, 46), 3); // Good Switch
@@ -4169,4 +4172,49 @@ fn alttp_the_escape_lever_waypoint_rides_the_good_switch_not_the_bad_one() {
         "02,170,47",
         "and the guide is leading to it"
     );
+}
+
+#[test]
+fn alttp_the_lever_step_retires_when_the_room_records_it_pulled() {
+    // The lever's own sprite says nothing durable about having been pulled. The game
+    // records it as a property of the ROOM: pulling a Good Switch sets a state-change
+    // flag, and RoomTag_RoomTrigger_BlockDoor consumes it by lowering the door it was
+    // blocking, clearing dung_flag_trapdoors_down. That flag is what the step reads.
+    let r = Registry::builtin();
+    let frame = |trapdoors: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((170, 52), (0, 0), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E00A0, 0x02);
+            set(0x7E00AE, 0x14); // the block-door tag this room carries
+            set(0x7E00EE, 1);
+            set(0x7E040C, 0x02);
+            set(0x7EF34A, 1);
+            set(0x7EF359, 1);
+            set(0x7EF3CC, 1);
+            set(0x7EF3C5, 1);
+            set(0x7E0468, trapdoors); // 1 = door still blocked, 0 = lever pulled
+        }
+        sprite_slot(&mut ram, 6, 4, (170, 46), 3); // the Good Switch
+        ram
+    };
+    let done = |trapdoors: u8| -> String {
+        let ram = frame(trapdoors);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        p.eval(
+            r#"local w = WAYPOINTS.SANCTUARY[22]
+               return tostring(KIND.done({ module = 0x07, dungeon_room = 0x02 }, w))"#,
+            &ram,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        done(1),
+        "false",
+        "door still blocked: the lever wants pulling"
+    );
+    assert_eq!(done(0), "true", "room records it pulled: the step retires");
 }

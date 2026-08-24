@@ -2654,6 +2654,16 @@ WP.PRED = {
     local v = mem.u16(0x7EF000 + room * 2)
     return v ~= nil and (v & 0x8000) ~= 0
   end,
+  -- Has this room's lever been pulled? The game keeps that as a property of the room
+  -- rather than of the lever: pulling a Good Switch sets a state-change flag, and the
+  -- room's own tag routine consumes it by lowering the door it was blocking
+  -- (RoomTag_RoomTrigger_BlockDoor waits on exactly that pair). So the durable answer is
+  -- the blocked-door flag, dung_flag_trapdoors_down at $7E0468, clearing to 0 — read from
+  -- the game rather than tracked by us, and true of the room however Link got there.
+  lever_pulled = function(s, wp, c)
+    local v = mem.u8(0x7E0468)
+    return v ~= nil and v == 0
+  end,
   -- Save/WRAM bytes, for the progress the tiles cannot report.
   byte = function(s, wp, c)
     local v = mem.u8(c[2])
