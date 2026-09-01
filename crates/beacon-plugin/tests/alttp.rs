@@ -4740,3 +4740,49 @@ fn alttp_a_stored_name_decodes_through_the_same_table() {
         "the file's name is read with the option: {said:?}"
     );
 }
+
+#[test]
+fn alttp_moving_between_cells_that_read_alike_still_speaks() {
+    // The picker has two `end` cells side by side and long runs of blanks. Latching on the
+    // spoken text meant moving between them said nothing, which reads as the reader having
+    // stopped working. The announcement is how the player learns the cursor moved, so it
+    // follows the cursor.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // Row 3 columns 2 and 3 are both "end"; columns 4 and 5 are both blank.
+    let pairs = [((2u8, 3u8), (3u8, 3u8), "end"), ((4, 3), (5, 3), "space")];
+    for (a, b, word) in pairs {
+        let first = name_entry_frame(a.0, a.1);
+        let second = name_entry_frame(b.0, b.1);
+        // Both frames count: on a fresh plugin the first returns early for want of a
+        // previous state, so the announcement lands on the second — but once it is warm it
+        // lands on the first.
+        let mut there: Vec<String> = p
+            .on_frame(&first, 0)
+            .iter()
+            .map(|i| i.text.clone())
+            .collect();
+        there.extend(p.on_frame(&first, 1).iter().map(|i| i.text.clone()));
+        assert!(there.iter().any(|t| t == word), "{word}: {there:?}");
+        // Same word, different cell: it speaks again.
+        let moved: Vec<String> = p
+            .on_frame(&second, 2)
+            .iter()
+            .map(|i| i.text.clone())
+            .collect();
+        assert!(
+            moved.iter().any(|t| t == word),
+            "moving to the neighbouring {word} cell speaks again: {moved:?}"
+        );
+        // Held still on that cell, it does not.
+        let held: Vec<String> = p
+            .on_frame(&second, 3)
+            .iter()
+            .map(|i| i.text.clone())
+            .collect();
+        assert!(
+            !held.iter().any(|t| t == word),
+            "holding still does not repeat: {held:?}"
+        );
+    }
+}
