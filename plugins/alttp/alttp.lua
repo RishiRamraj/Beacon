@@ -3462,6 +3462,8 @@ MENU.FILE_SELECT_OPTIONS = { "Copy", "Erase" } -- what follows the three files
 -- where it finds the 0x55AA signature in the cartridge save (selectfile_arr1, $7E00BF,
 -- one 16-bit entry each). Reading the game's own answer beats re-deriving it, and the
 -- save itself is in SRAM, which the plugin cannot reach.
+--
+-- Only meaningful once FileSelect_Main has run: see MENU.SETTLE.
 function MENU.file_exists(k)
   return mem.u16(0x7E00BF + k * 2) == 1
 end
@@ -3566,11 +3568,35 @@ function MENU.name_selection()
   return REF.name_spoken[cell] or cell
 end
 
+-- Frames to let the file select settle before reading it.
+--
+-- Everything this screen is asked about — which files exist, and their names — is put in
+-- place by FileSelect_Main, the submodule 5 handler, on each of its runs. Arriving here
+-- from the name picker goes through submodule 1, FileSelect_ReInitSaveFlagsAndEraseTriforce,
+-- which memsets the file-exists flags to zero first. So the first submodule-5 frame the
+-- plugin sees is one where the handler has not run yet and every file reads as empty — and
+-- because the announcement latches on the cursor, that reading could never correct itself:
+-- a file just named was announced as empty until the cursor moved off it and back.
+--
+-- One frame is enough, the handler running once being all it takes, and 16ms is inaudible.
+-- The alternative — latching on the words instead, so a corrected reading re-speaks — would
+-- both still say "empty" once and risk stuttering, since the name is read out of the VRAM
+-- upload buffer and that is transient.
+MENU.SETTLE = 1
+
 function MENU.update(s)
   -- Forget the slot on the way out, or re-entering the picker reads the reset back to 0 as
   -- a commit and speaks a character nobody typed.
   local naming = s.module == 0x04 and mem.u8(0x7E0011) == 0x03
   if not naming then MENU.slot = nil end
+
+  local on_files = s.module == 0x01 and mem.u8(0x7E0011) == 0x05
+  MENU.files_for = on_files and ((MENU.files_for or 0) + 1) or 0
+  if on_files and MENU.files_for <= MENU.SETTLE then
+    -- Nothing trustworthy to say yet. Clear the latch so the settled reading speaks.
+    MENU.said = nil
+    return
+  end
 
   if naming then
     local picked = MENU.name_selection()
