@@ -5508,3 +5508,135 @@ fn alttp_joining_a_message_part_way_reads_only_the_current_page() {
         "not the pages before it: {joined:?}"
     );
 }
+
+/// The same frame with a different message index, for the window where the game has changed
+/// which message it means but has not yet refilled the buffer.
+fn with_msg_id(mut ram: Vec<u8>, id: u16) -> Vec<u8> {
+    ram[wram_offset(0x7E1CF0).unwrap()] = (id & 0xFF) as u8;
+    ram[wram_offset(0x7E1CF1).unwrap()] = (id >> 8) as u8;
+    ram
+}
+
+#[test]
+fn alttp_a_new_message_is_not_read_out_of_the_old_buffer() {
+    // Reported: "Please help me" played before the uncle's line. dialogue_message_index changes
+    // BEFORE Text_LoadCharacterBuffer refills the buffer and zeroes read_pos, so for a frame or
+    // two the new id still describes the text just finished — and adopting the new id there read
+    // the tail of the old message under it.
+    let (zelda, zstarts) =
+        dialog_buffer(&["Help me!", "<wait>", "<scroll>", "Please help me!", "<end>"]);
+    let (uncle, _) = dialog_buffer(&["Link, I am going out.", "<end>"]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    warm(&mut p, &dialog_frame(&zelda, zstarts[1]));
+    let ended: Vec<String> = p
+        .on_frame(&dialog_frame(&zelda, zstarts[4]), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(ended.iter().any(|t| t == "Please help me!"), "{ended:?}");
+
+    // The uncle's message is named, but the buffer and read_pos are still Zelda's.
+    let mut stale = Vec::new();
+    for f in 0..3 {
+        let frame = with_msg_id(dialog_frame(&zelda, zstarts[4]), 0x2A);
+        stale.extend(
+            p.on_frame(&frame, WARM + 1 + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
+    assert!(
+        stale.is_empty(),
+        "nothing is read until the buffer holds the message named: {stale:?}"
+    );
+
+    // Now it is loaded: read_pos back near the start, the buffer the uncle's.
+    let loaded: Vec<String> = p
+        .on_frame(&with_msg_id(dialog_frame(&uncle, 4), 0x2A), WARM + 5)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        loaded.iter().any(|t| t == "Link, I am going out."),
+        "and then it is read: {loaded:?}"
+    );
+    assert!(
+        !loaded.iter().any(|t| t.contains("help")),
+        "without the old message's tail: {loaded:?}"
+    );
+}
+
+#[test]
+fn alttp_a_box_opening_on_a_leftover_buffer_reads_nothing() {
+    // With no box up, the buffer still holds the last message shown, and the plugin has no
+    // rewind to tell it otherwise. So a plugin that starts outside a box must not read what it
+    // finds there when one opens — it waits for the load it can actually see.
+    let (old, _) = dialog_buffer(&["Link, I am going out.", "<end>"]);
+    let (fresh, _) = dialog_buffer(&["It is dangerous to go alone.", "<end>"]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // In play, no box, the previous message still sitting in the buffer at its end.
+    let mut idle = dialog_frame(&old, 21);
+    idle[wram_offset(0x7E0010).unwrap()] = 0x07;
+    for f in 0..3 {
+        p.on_frame(&idle, f);
+    }
+
+    // A box opens for a new message: the index has changed, the buffer has not caught up.
+    let mut opening = Vec::new();
+    for f in 0..3 {
+        let frame = with_msg_id(dialog_frame(&old, 21), 0x2A);
+        opening.extend(p.on_frame(&frame, 3 + f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        opening.is_empty(),
+        "the leftover buffer is not read: {opening:?}"
+    );
+
+    // Once the load is visible, the new message is read.
+    let loaded: Vec<String> = p
+        .on_frame(&with_msg_id(dialog_frame(&fresh, 4), 0x2A), 7)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        loaded.iter().any(|t| t == "It is dangerous to go alone."),
+        "{loaded:?}"
+    );
+}
+
+#[test]
+fn alttp_a_swapped_buffer_is_noticed_without_read_pos_falling() {
+    // Loading a save state replaces all of WRAM at once, while the plugin's own Lua state
+    // carries on. read_pos need not fall — it can land further along — so the recorded page
+    // break is the check: a byte that is no longer a break means a different buffer. Latching
+    // to a page that no longer exists is what makes the reader go quiet for good.
+    let (before, bstarts) = dialog_buffer(&["Help me!", "<wait>", "<scroll>", "Please!", "<end>"]);
+    let (after, _) = dialog_buffer(&[
+        "It is dangerous to go alone and a good deal further than this one.",
+        "<end>",
+    ]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let said = warm(&mut p, &dialog_frame(&before, bstarts[1]));
+    assert!(said.iter().any(|t| t == "Help me!"), "{said:?}");
+
+    // The state loads: a different buffer, and read_pos FORWARD of where it was, so nothing
+    // about read_pos alone says anything happened.
+    let swapped: Vec<String> = p
+        .on_frame(&dialog_frame(&after, bstarts[1] + 20), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        swapped
+            .iter()
+            .any(|t| t == "It is dangerous to go alone and a good deal further than this one."),
+        "the new buffer is read: {swapped:?}"
+    );
+}
