@@ -670,23 +670,49 @@ function TEXT.update(s)
   local id, pos = mem.u16(TEXT.ID), mem.u16(TEXT.POS)
   if id == nil or pos == nil then return end
 
-  -- A new message, or the same one shown again — Text_LoadCharacterBuffer zeroes read_pos
-  -- either way, so a position behind where we had got to means a fresh message.
+  -- A message loading is what starts a message, and read_pos is what says so: it only ever
+  -- climbs while a message is drawn, and Text_LoadCharacterBuffer is the one thing that sends
+  -- it back to 0. So a fall means the buffer now holds something newly loaded.
   --
+  -- The message INDEX is the wrong signal even though it names the message, because the game
+  -- sets it first and refills the buffer afterwards. For a frame or two it names text that has
+  -- already gone, and trusting it there read the wrong message out of the old buffer: "Please
+  -- help me", the tail of Zelda's plea, arrived ahead of the uncle's line. Worse, that reading
+  -- latched the page as spoken under the new id, so when the buffer really did change there
+  -- was no index change left to notice and the message that followed never got read at all —
+  -- the uncle's line replaying over the lamp, and the lamp's own text never arriving.
+  local reloaded = TEXT.at ~= nil and pos < TEXT.at
+  TEXT.at = pos
+
+  -- The buffer can also change without read_pos falling at all: loading a save state replaces
+  -- the whole of WRAM while the plugin's own Lua state carries on regardless. The break we
+  -- recorded for the page being read is a cheap check on that — it is a break in the buffer we
+  -- were reading, so if the byte there is no longer one, this is a different buffer. Without
+  -- this the reader stays latched to a page that no longer exists and goes quiet for good.
+  if not reloaded and TEXT.spoke ~= nil then
+    local b = mem.u8(TEXT.BUFFER + TEXT.spoke)
+    if b ~= nil and not TEXT.BREAKS[b] then reloaded = true end
+  end
+
   -- Progress is deliberately NOT forgotten when the module stops being 0x0E. The screen can
   -- leave and come back mid-message — the opening brings the lights up part way through
   -- Zelda's plea — and starting over there replayed the whole message: read_pos was already
   -- past every break, so page after page met its trigger on consecutive frames.
-  if id ~= TEXT.msg or pos < (TEXT.from or 0) then
+  if TEXT.msg == nil or reloaded then
     TEXT.msg, TEXT.spoke, TEXT.next_from, TEXT.last = id, nil, nil, nil
     -- Not necessarily the top of the message: arriving with the renderer already part way in,
     -- as a plugin reload mid-scene does, should read the page it is on and not everything
-    -- before it. For a genuinely new message read_pos is 0 and this is 0 too.
+    -- before it. For a freshly loaded message read_pos is 0 and this is 0 too.
     TEXT.from = TEXT.page_at(pos)
+    -- Having watched the load, the buffer certainly holds this message. On a first sighting
+    -- that is only knowable if a box is already up, because then the buffer is what is on
+    -- screen; with no box it is leftover from the last one and must not be read.
+    TEXT.trust = reloaded or s.module == 0x0E
   end
 
-  -- Track wherever the message is, but only speak while the box is actually up.
-  if s.module ~= 0x0E then return end
+  -- Track wherever the message is, but only speak while the box is up and the buffer is known
+  -- to match it.
+  if s.module ~= 0x0E or not TEXT.trust then return end
 
   if TEXT.spoke ~= nil then
     -- Said already. Nothing more until read_pos passes its break, which only happens when
