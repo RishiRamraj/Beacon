@@ -4516,3 +4516,75 @@ fn alttp_an_errand_speaks_its_arrival_line_with_no_chain_armed() {
         "and once: {said:?}"
     );
 }
+
+#[test]
+fn alttp_overworld_chain_waypoints_are_numbered_too() {
+    // The dungeon overlay labels each step with its chain index; the overworld branch drew
+    // the markers without numbers, so UNCLE_APPROACH gave position and nothing to look up
+    // in the editor. Same numbers, same teal, so a number on either map means the same.
+    let r = Registry::builtin();
+    let mut ram = vec![0u8; 128 * 1024];
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09); // overworld
+        set(0x7E001B, 0x00); // outdoors
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E008A, 0x1B); // the castle area, where the uncle beat drives the chain
+                             // Lamp taken (that beat done), sword NOT yet — which is the uncle beat, the one
+                             // UNCLE_APPROACH is wired to. With the sword in hand the goal is complete and no
+                             // chain arms at all.
+        set(0x7EF34A, 1);
+        set(0x7EF359, 0);
+        // Link near the chain's first waypoint (280,316).
+        let (lx, ly) = (282u16 * 8 + 4, 316u16 * 8 + 4);
+        set(0x7E0022, (lx & 0xFF) as u8);
+        set(0x7E0023, (lx >> 8) as u8);
+        set(0x7E0020, (ly & 0xFF) as u8);
+        set(0x7E0021, (ly >> 8) as u8);
+    }
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    p.command("advance", &ram);
+    p.on_frame(&ram, 2);
+
+    // Draw through a stub canvas so the labels can be inspected.
+    let drawn = p
+        .eval(
+            r#"
+              local seen = {}
+              local stub = {
+                width = 256, height = 256,
+                clear = function() end, rect = function() end, line = function() end,
+                text = function(self, x, y, s, color)
+                  seen[#seen + 1] = s .. ":" .. string.format("%06X", color)
+                end,
+              }
+              local ok, err = pcall(on_draw, stub, 0)
+              if not ok then return "ERROR " .. tostring(err) end
+              return table.concat(seen, " ")
+            "#,
+            &ram,
+        )
+        .unwrap();
+
+    assert!(
+        !drawn.starts_with("ERROR"),
+        "the overworld map draws without error: {drawn}"
+    );
+    // At least one authored index, in the teal that means "look this up in the editor".
+    assert!(
+        drawn.split_whitespace().any(|t| t.ends_with(":20B0A0")),
+        "an overworld chain waypoint is numbered in teal: {drawn}"
+    );
+    // And it drew with no computed route at all — this frame has no ROM, so the
+    // overworld A* has nothing to decode. The chain used to be nested inside the
+    // route block, so an unreachable target took the whole chain off the map.
+    assert_eq!(
+        p.eval("return tostring(ow_route_path)", &ram).unwrap(),
+        "nil",
+        "no route was computed, and the chain was drawn anyway"
+    );
+}
