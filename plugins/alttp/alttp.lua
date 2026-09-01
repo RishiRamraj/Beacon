@@ -631,6 +631,19 @@ function TEXT.next_break(from)
   return nil
 end
 
+-- The start of the page `pos` falls inside: just past the last break before it, or 0 if
+-- there is none. Steps by command length for the same reason next_break does.
+function TEXT.page_at(pos)
+  local from, i = 0, 0
+  while i < pos and i < TEXT.MAX do
+    local b = mem.u8(TEXT.BUFFER + i)
+    if b == nil then break end
+    if TEXT.BREAKS[b] then from = i + 1 end
+    i = i + ((b >= 0x67 and b <= 0x7E) and (CMD_LENGTHS[b - 0x67 + 1] or 1) or 1)
+  end
+  return from
+end
+
 -- The whole of the page being shown, for reading on demand. The whole page rather than the
 -- part drawn so far: it is all in the buffer, and the player asking wants the page, not a
 -- race with the typewriter.
@@ -655,16 +668,25 @@ end
 -- pass that page's break, which is the player turning it.
 function TEXT.update(s)
   local id, pos = mem.u16(TEXT.ID), mem.u16(TEXT.POS)
-  if s.module ~= 0x0E or id == nil or pos == nil then
-    -- Out of the box: forget where we were, so re-opening one starts at its first page.
-    TEXT.msg, TEXT.from, TEXT.spoke, TEXT.next_from, TEXT.last = nil, 0, nil, nil, nil
-    return
-  end
+  if id == nil or pos == nil then return end
+
   -- A new message, or the same one shown again — Text_LoadCharacterBuffer zeroes read_pos
   -- either way, so a position behind where we had got to means a fresh message.
+  --
+  -- Progress is deliberately NOT forgotten when the module stops being 0x0E. The screen can
+  -- leave and come back mid-message — the opening brings the lights up part way through
+  -- Zelda's plea — and starting over there replayed the whole message: read_pos was already
+  -- past every break, so page after page met its trigger on consecutive frames.
   if id ~= TEXT.msg or pos < (TEXT.from or 0) then
-    TEXT.msg, TEXT.from, TEXT.spoke, TEXT.next_from, TEXT.last = id, 0, nil, nil, nil
+    TEXT.msg, TEXT.spoke, TEXT.next_from, TEXT.last = id, nil, nil, nil
+    -- Not necessarily the top of the message: arriving with the renderer already part way in,
+    -- as a plugin reload mid-scene does, should read the page it is on and not everything
+    -- before it. For a genuinely new message read_pos is 0 and this is 0 too.
+    TEXT.from = TEXT.page_at(pos)
   end
+
+  -- Track wherever the message is, but only speak while the box is actually up.
+  if s.module ~= 0x0E then return end
 
   if TEXT.spoke ~= nil then
     -- Said already. Nothing more until read_pos passes its break, which only happens when
