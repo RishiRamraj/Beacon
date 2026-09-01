@@ -4706,11 +4706,12 @@ fn alttp_the_name_picker_says_the_letter_under_the_cursor() {
     // The gap-fillers at the left edge.
     assert!(says(0, 0).iter().any(|t| t == "G"));
     assert!(says(3, 1).iter().any(|t| t == "T"));
-    // Lowercase, digits, punctuation.
+    // Lowercase and digits speak as themselves; punctuation is named instead, since a
+    // synthesiser handed "!" says nothing — see alttp_punctuation_cells_are_spoken_by_name.
     assert!(says(6, 0).iter().any(|t| t == "a"));
     assert!(says(11, 2).iter().any(|t| t == "z"));
     assert!(says(18, 1).iter().any(|t| t == "5"));
-    assert!(says(18, 2).iter().any(|t| t == "!"));
+    assert!(says(18, 2).iter().any(|t| t == "exclamation mark"));
     // The same glyph, read by position: capital I on row 0, lowercase l on row 1.
     assert!(says(2, 0).iter().any(|t| t == "I"), "{:?}", says(2, 0));
     assert!(says(7, 1).iter().any(|t| t == "l"), "{:?}", says(7, 1));
@@ -4720,18 +4721,32 @@ fn alttp_the_name_picker_says_the_letter_under_the_cursor() {
     assert!(says(4, 0).iter().any(|t| t == "space"));
 }
 
-#[test]
-fn alttp_a_stored_name_decodes_through_the_same_table() {
-    // A saved name is six characters staged into the VRAM upload buffer as code + 0x1800.
-    // "LINK" plus two blanks: L is 0x0B, I is 0x5F, N is 0x0D, K is 0x0A, blank is 0x59.
-    let r = Registry::builtin();
-    let mut ram = file_select_frame(0, [true, false, false]);
-    for (i, code) in [0x0Bu16, 0x5F, 0x0D, 0x0A, 0x59, 0x59].iter().enumerate() {
-        let t = code + 0x1800;
+/// Picking grid cell `t` does not store `t`: the game stores this, so the grid's 0x00-0x0F
+/// pass through unchanged while everything above them moves. Spelling a name through the
+/// formula rather than with literals is the point of these tests — an earlier pair hard-coded
+/// grid codes on both sides, so they agreed with a table keyed the same wrong way and passed
+/// while the real game read "LINK" back as "LNK".
+fn stored_code(grid: u16) -> u16 {
+    (grid & 0xFFF0) * 2 + (grid & 0xF)
+}
+
+fn name_in_save(exists: [bool; 3], grid: [u16; 6]) -> Vec<u8> {
+    let mut ram = file_select_frame(0, exists);
+    for (i, code) in grid.iter().enumerate() {
+        let t = stored_code(*code) + 0x1800;
         let at = 0x7E1002 + 8 + i as u32 * 2;
         ram[wram_offset(at).unwrap()] = (t & 0xFF) as u8;
         ram[wram_offset(at + 1).unwrap()] = (t >> 8) as u8;
     }
+    ram
+}
+
+#[test]
+fn alttp_a_stored_name_decodes_through_the_same_table() {
+    // "LINK": grid L 0x0B, I 0x5F, N 0x0D, K 0x0A, then two blanks (0x59). Only I leaves the
+    // identity range, which is exactly why the bug hid here — L, N and K decoded either way.
+    let r = Registry::builtin();
+    let ram = name_in_save([true, false, false], [0x0B, 0x5F, 0x0D, 0x0A, 0x59, 0x59]);
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     p.on_frame(&ram, 0);
     let said: Vec<String> = p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect();
@@ -4739,6 +4754,46 @@ fn alttp_a_stored_name_decodes_through_the_same_table() {
         said.iter().any(|t| t == "File 1, LINK"),
         "the file's name is read with the option: {said:?}"
     );
+}
+
+#[test]
+fn alttp_a_name_from_the_far_end_of_the_grid_decodes() {
+    // Q-Z sit past the identity range too, so they went the same way as I. "ZELDA" spends
+    // three of its five characters out there: Z 0x19, E 0x04, L 0x0B, D 0x03, A 0x00.
+    let r = Registry::builtin();
+    let ram = name_in_save([true, false, false], [0x19, 0x04, 0x0B, 0x03, 0x00, 0x59]);
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    let said: Vec<String> = p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect();
+    assert!(
+        said.iter().any(|t| t == "File 1, ZELDA"),
+        "the file's name is read with the option: {said:?}"
+    );
+}
+
+#[test]
+fn alttp_punctuation_cells_are_spoken_by_name() {
+    // A synthesiser renders "." or "-" as a pause or as nothing, so these cells were mute
+    // while every letter spoke. Row 2 holds the whole punctuation block.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    for (col, row, word) in [
+        (0u8, 2u8, "dash"),
+        (1, 2, "period"),
+        (2, 2, "comma"),
+        (18, 2, "exclamation mark"),
+        (19, 2, "question mark"),
+        (20, 2, "open bracket"),
+        (21, 2, "close bracket"),
+    ] {
+        let ram = name_entry_frame(col, row);
+        let mut said: Vec<String> = p.on_frame(&ram, 0).iter().map(|i| i.text.clone()).collect();
+        said.extend(p.on_frame(&ram, 1).iter().map(|i| i.text.clone()));
+        assert!(
+            said.iter().any(|t| t == word),
+            "({col},{row}) -> {word}: {said:?}"
+        );
+    }
 }
 
 #[test]
