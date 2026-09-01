@@ -3513,11 +3513,24 @@ function MENU.name_text(off)
   return name ~= "" and name or nil
 end
 
+-- Names as they were last read, per file.
+--
+-- A name is only in the VRAM upload buffer while a screen that draws it is up. The erase
+-- confirmation replaces the buffer with its own prompt and never re-stages the names, so
+-- remembering is the only way to say WHICH save is about to be destroyed. Deliberately not a
+-- fallback inside file_line: a screen that ought to be able to read a name should be seen to
+-- fail when its offsets are wrong, rather than quietly serving a remembered one.
+MENU.seen_names = {}
+
 -- One file row, wherever it is being shown: "File 2, LINK", or "File 2, empty".
 function MENU.file_line(k, off)
   local label = "File " .. (k + 1)
-  if not MENU.file_exists(k) then return label .. ", empty" end
+  if not MENU.file_exists(k) then
+    MENU.seen_names[k] = nil
+    return label .. ", empty"
+  end
   local name = MENU.name_text(off)
+  if name ~= nil then MENU.seen_names[k] = name end
   return name and (label .. ", " .. name) or label
 end
 
@@ -3571,7 +3584,41 @@ function MENU.copy_line(sub, at)
   return nil
 end
 
+-- The erase screen (module 0x03), the same shape as copy and sharing its cursor byte.
+--
+--   submodule 3  pick a file: cursor 0-2, 3 is Quit, and navigation skips files that do not
+--                exist. Names are staged by SelectFile_Func17 — the routine the file select
+--                itself uses — so this screen shares the file select's offsets rather than
+--                having its own, unlike the copy screen.
+--   submodule 4  confirm: cursor 0 goes ahead, 1 backs out. "ERASE THIS PLAYER" is the
+--                game's own wording for that line, decoded from the tiles it stages.
+--
+-- The confirmation names the file as well. The screen does say which — it clears the other
+-- two rows and leaves the chosen one standing — and the wording alone would not, which for
+-- something irreversible is worth the extra words. Which file it is is not the cursor here
+-- but subsubmodule_index at $7E00B0, where KILLFile_ChooseTarget parked it.
+function MENU.erase_line(sub, at)
+  local key = string.format("erase:%s:%s", tostring(sub), tostring(at))
+  if sub == 0x03 then
+    if at >= 3 then return "Quit", key end
+    return MENU.file_line(at, MENU.NAME_AT.files[at + 1]), key
+  elseif sub == 0x04 then
+    if at ~= 0 then return "Quit", key end
+    local k = mem.u8(0x7E00B0)
+    if k == nil or k > 2 then return "Erase this player", key end
+    local name = MENU.seen_names[k]
+    local which = "File " .. (k + 1) .. (name and (", " .. name) or "")
+    return "Erase this player: " .. which, key
+  end
+  return nil
+end
+
 function MENU.line(s)
+  if s.module == 0x03 then
+    local at = mem.u8(0x7E00C8)
+    if at == nil then return nil end
+    return MENU.erase_line(mem.u8(0x7E0011), at)
+  end
   if s.module == 0x02 then
     local at = mem.u8(0x7E00C8)
     if at == nil then return nil end
