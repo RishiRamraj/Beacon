@@ -51,8 +51,32 @@ REF.name_cells = {
   "forward", "space", "end", "end", "space", "space", "space", "space", "space", "space", "space", "back", "forward", "space", "end", "end", "space", "space", "back", "forward", "space", "end", "end", "space", "space", "space", "space", "space", "space", "space", "space", "back",
 }
 
--- Glyph code -> character, for reading a name back out of a save. Single-valued codes
--- only; 0x5F is given as capital I because a stored name cannot distinguish it from
--- lowercase l — both store as 0xAF, so the game has lost the difference too. The three
--- controls are left out: they are things to press, not characters a name can contain.
-REF.name_chars = { [0x00] = "A", [0x01] = "B", [0x02] = "C", [0x03] = "D", [0x04] = "E", [0x05] = "F", [0x06] = "G", [0x07] = "H", [0x09] = "J", [0x0A] = "K", [0x0B] = "L", [0x0C] = "M", [0x0D] = "N", [0x0E] = "O", [0x0F] = "P", [0x10] = "Q", [0x11] = "R", [0x12] = "S", [0x13] = "T", [0x14] = "U", [0x15] = "V", [0x16] = "W", [0x17] = "X", [0x18] = "Y", [0x19] = "Z", [0x1A] = "a", [0x1B] = "b", [0x1C] = "c", [0x1D] = "d", [0x1E] = "e", [0x1F] = "f", [0x20] = "g", [0x21] = "h", [0x23] = "j", [0x24] = "k", [0x26] = "m", [0x27] = "n", [0x28] = "o", [0x29] = "p", [0x2A] = "q", [0x2B] = "r", [0x2C] = "s", [0x2D] = "t", [0x2E] = "u", [0x2F] = "v", [0x30] = "w", [0x31] = "x", [0x32] = "y", [0x33] = "z", [0x3F] = "?", [0x40] = "-", [0x41] = ".", [0x42] = ",", [0x45] = "(", [0x46] = ")", [0x59] = " ", [0x5F] = "I", [0x60] = "i", [0x61] = "!", [0x76] = "0", [0x77] = "1", [0x78] = "2", [0x79] = "3", [0x7A] = "4", [0x7B] = "5", [0x7C] = "6", [0x7D] = "7", [0x7E] = "8", [0x7F] = "9" }
+-- Character -> how to SAY it, for the cells a speech engine renders as silence.
+--
+-- Punctuation is markup to a synthesiser, not a word: handed "." or "-" it pauses or says
+-- nothing at all, so those cells were mute while every letter spoke. Naming them is the
+-- only way the cursor being on one is audible. Letters, digits and the three controls need
+-- no entry — they already speak as themselves.
+REF.name_spoken = {
+  ["-"] = "dash",
+  ["."] = "period",
+  [","] = "comma",
+  ["!"] = "exclamation mark",
+  ["?"] = "question mark",
+  ["("] = "open bracket",
+  [")"] = "close bracket",
+}
+
+-- STORED code -> character, for reading a name back out of a save.
+--
+-- Keyed by what the save actually holds, which is not the grid's glyph code: picking a
+-- cell stores (t & 0xFFF0) * 2 + (t & 0xF), so the grid's 0x00-0x0F pass through unchanged
+-- while everything above them moves. That is why a first attempt keyed on grid codes read
+-- "LINK" back as "LNK" — L, N and K are all in the identity range and I is not, and Q-Z
+-- would have gone the same way. The blank confirms the formula: 0x59 stores as 0xA9, which
+-- is what an empty save slot's six characters read as.
+--
+-- 0x5F stores as 0xAF and draws both capital I and lowercase l, so a saved name cannot
+-- distinguish them and this gives capital I; the game has lost the difference too. The
+-- three controls are left out, being things to press rather than characters.
+REF.name_chars = { [0x00] = "A", [0x01] = "B", [0x02] = "C", [0x03] = "D", [0x04] = "E", [0x05] = "F", [0x06] = "G", [0x07] = "H", [0x09] = "J", [0x0A] = "K", [0x0B] = "L", [0x0C] = "M", [0x0D] = "N", [0x0E] = "O", [0x0F] = "P", [0x20] = "Q", [0x21] = "R", [0x22] = "S", [0x23] = "T", [0x24] = "U", [0x25] = "V", [0x26] = "W", [0x27] = "X", [0x28] = "Y", [0x29] = "Z", [0x2A] = "a", [0x2B] = "b", [0x2C] = "c", [0x2D] = "d", [0x2E] = "e", [0x2F] = "f", [0x40] = "g", [0x41] = "h", [0x43] = "j", [0x44] = "k", [0x46] = "m", [0x47] = "n", [0x48] = "o", [0x49] = "p", [0x4A] = "q", [0x4B] = "r", [0x4C] = "s", [0x4D] = "t", [0x4E] = "u", [0x4F] = "v", [0x60] = "w", [0x61] = "x", [0x62] = "y", [0x63] = "z", [0x6F] = "?", [0x80] = "-", [0x81] = ".", [0x82] = ",", [0x85] = "(", [0x86] = ")", [0xA9] = " ", [0xAF] = "I", [0xC0] = "i", [0xC1] = "!", [0xE6] = "0", [0xE7] = "1", [0xE8] = "2", [0xE9] = "3", [0xEA] = "4", [0xEB] = "5", [0xEC] = "6", [0xED] = "7", [0xEE] = "8", [0xEF] = "9" }

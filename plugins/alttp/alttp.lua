@@ -3514,7 +3514,9 @@ function MENU.name_entry_line()
   if at == nil or row == nil then return nil end
   local said = REF.name_cells[at + row * 0x20 + 1]
   if said == nil or said == "" then return nil end
-  return said
+  -- Punctuation cells hold the character itself, which a speech engine renders as a pause
+  -- or as nothing, so those cells were silent. Say their names instead.
+  return REF.name_spoken[said] or said
 end
 
 -- What the cursor is on, and a key for where it is. The key is what decides whether to
