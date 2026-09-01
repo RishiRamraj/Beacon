@@ -5111,3 +5111,86 @@ fn alttp_the_copy_screen_speaks_again_when_the_cursor_moves() {
         .collect();
     assert!(moved.iter().any(|t| t == "Quit"), "{moved:?}");
 }
+
+/// The erase screen: module 0x03, cursor at $7E00C8, names staged where the file select
+/// stages them because it is the same routine (SelectFile_Func17) that puts them there.
+fn erase_frame(sub: u8, at: u8, exists: [bool; 3], names: &[(u32, [u16; 6])]) -> Vec<u8> {
+    let mut ram = copy_frame(sub, at, exists, names);
+    ram[wram_offset(0x7E0010).unwrap()] = 0x03;
+    ram
+}
+
+#[test]
+fn alttp_the_erase_screen_reads_the_files_and_quit() {
+    let r = Registry::builtin();
+    // Offsets 8 and 0x5C are the file select's, which this screen shares.
+    let names = [(8, LINK), (0x5C, ZELDA)];
+    let read = |at: u8| speaks_over(&r, &erase_frame(0x03, at, [true, true, false], &names), 4);
+
+    let first = read(0);
+    assert!(first.iter().any(|t| t == "File 1, LINK"), "{first:?}");
+    let second = read(1);
+    assert!(second.iter().any(|t| t == "File 2, ZELDA"), "{second:?}");
+    let third = read(2);
+    assert!(third.iter().any(|t| t == "File 3, empty"), "{third:?}");
+    let quit = read(3);
+    assert!(
+        quit.iter().any(|t| t == "Quit"),
+        "cursor 3 is Quit: {quit:?}"
+    );
+}
+
+#[test]
+fn alttp_the_erase_confirmation_names_the_file_it_will_destroy() {
+    // The confirmation replaces the upload buffer with its own prompt and never re-stages a
+    // name, so the name has to be remembered from the screen before. Which file it is comes
+    // from subsubmodule_index ($7E00B0), not from the cursor, which is now the yes/no.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let names = [(8, LINK), (0x5C, ZELDA)];
+
+    // Pick file 2 on the selection screen, so its name is read once while it is readable.
+    let picking = erase_frame(0x03, 1, [true, true, false], &names);
+    let seen = warm(&mut p, &picking);
+    assert!(seen.iter().any(|t| t == "File 2, ZELDA"), "{seen:?}");
+
+    // Now the confirmation, with no name staged anywhere and the chosen file in $7E00B0.
+    let mut confirm = erase_frame(0x04, 0, [true, true, false], &[]);
+    confirm[wram_offset(0x7E00B0).unwrap()] = 1;
+    p.on_frame(&confirm, WARM);
+    let asked: Vec<String> = p
+        .on_frame(&confirm, WARM + 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        asked
+            .iter()
+            .any(|t| t == "Erase this player: File 2, ZELDA"),
+        "the confirmation says which save: {asked:?}"
+    );
+
+    // The other option backs out.
+    let mut quit_frame = erase_frame(0x04, 1, [true, true, false], &[]);
+    quit_frame[wram_offset(0x7E00B0).unwrap()] = 1;
+    let quit: Vec<String> = p
+        .on_frame(&quit_frame, WARM + 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(quit.iter().any(|t| t == "Quit"), "{quit:?}");
+}
+
+#[test]
+fn alttp_the_erase_confirmation_still_asks_when_no_name_was_seen() {
+    // Reloading the plugin on the confirmation screen means nothing was ever remembered.
+    // Better to ask without the name than to say nothing on an irreversible prompt.
+    let r = Registry::builtin();
+    let mut confirm = erase_frame(0x04, 0, [true, false, false], &[]);
+    confirm[wram_offset(0x7E00B0).unwrap()] = 0;
+    let asked = speaks_over(&r, &confirm, 4);
+    assert!(
+        asked.iter().any(|t| t == "Erase this player: File 1"),
+        "{asked:?}"
+    );
+}
