@@ -2008,6 +2008,10 @@ function on_frame(frame)
   local was = prev
   prev = now
 
+  -- Menus first, and outside every in-play gate: the file select and the title screens
+  -- are exactly where Link does not exist yet, and they are unusable unheard.
+  MENU.update(now)
+
   -- Turn navigation on by itself at the very start of the quest — once Link is up
   -- out of bed and controllable in his house — so the opening guidance leads without
   -- the player first pressing the key. Setting nav_active is enough: nav_update,
@@ -3439,6 +3443,94 @@ function SWEEP.is_pot(attr)
   if attr == nil or attr < 0x70 or attr > 0x7F then return false end
   local st = mem.u16(MANIP_STATE + (attr & 0x0F) * 2)
   return st ~= nil and (st & 0xF0F0) == 0x1010
+end
+
+-- ── Menus ───────────────────────────────────────────────────────────────────
+-- A menu is unusable if you cannot see it, and unlike the overworld there is no tone
+-- that can stand in: the whole content of the screen is which option the cursor is on.
+-- So the cursor is read aloud, and re-read whenever it moves.
+--
+-- The file select screen (module 0x01, submodule 0x05) is the first one. Its cursor is a
+-- single byte at $7E00C8 running 0-4: the three save files, then Copy and Erase. What
+-- happens on the button confirms the mapping — cursor 3 enters main_module 2, the copy
+-- module, and cursor 4 enters module 3, erase (zelda3 FileSelect_Main).
+MENU = { said = nil }
+
+MENU.FILE_SELECT_OPTIONS = { "Copy", "Erase" } -- what follows the three files
+
+-- Does save file `k` (0-based) exist? The screen keeps that as a flag per file, set
+-- where it finds the 0x55AA signature in the cartridge save (selectfile_arr1, $7E00BF,
+-- one 16-bit entry each). Reading the game's own answer beats re-deriving it, and the
+-- save itself is in SRAM, which the plugin cannot reach.
+function MENU.file_exists(k)
+  return mem.u16(0x7E00BF + k * 2) == 1
+end
+
+-- A save file's name, or nil.
+--
+-- The name lives in SRAM (offset 0x3D9, six 16-bit characters) and the plugin only reads
+-- work RAM. But the screen stages the name's tiles into the VRAM upload buffer to draw
+-- it, and THAT is in work RAM: $7E1002, with file k's name at byte offset 8, 0x5C or
+-- 0xB0, six 16-bit entries, each the character plus 0x1800 (zelda3 SelectFile_Func17).
+-- So the characters are read back off what the game is about to draw. Only staged for
+-- files that exist, which is why the caller checks first.
+--
+-- What is NOT yet known is how a character code maps to a letter. It is not the dialogue
+-- encoding: the text decoder's ALPHABET is indexed by message character, and running the
+-- name-entry grid's codes through it produces nonsense (zelda3 stores a picked character
+-- as (t & 0xFFF0) * 2 + (t & 0xF), and those values land on lowercase letters and
+-- punctuation where the grid plainly shows a row of capitals). Rather than speak a wrong
+-- name, MENU.name_codes hands the raw codes back so the table can be built from a file
+-- with a known name, and file_name stays nil until it is.
+MENU.NAME_OFFSETS = { 8, 0x5C, 0xB0 }
+MENU.NAME_LEN = 6
+MENU.CHARS = nil -- code -> letter, once established empirically
+
+function MENU.name_codes(k)
+  local off = MENU.NAME_OFFSETS[k + 1]
+  if off == nil then return nil end
+  local out = {}
+  for i = 0, MENU.NAME_LEN - 1 do
+    local t = mem.u16(0x7E1002 + off + i * 2)
+    if t == nil then return nil end
+    out[#out + 1] = (t - 0x1800) & 0xFFFF
+  end
+  return out
+end
+
+function MENU.file_name(k)
+  if MENU.CHARS == nil then return nil end
+  local codes = MENU.name_codes(k)
+  if codes == nil then return nil end
+  local out = {}
+  for _, c in ipairs(codes) do out[#out + 1] = MENU.CHARS[c] or "" end
+  local name = table.concat(out):gsub("%s+$", "")
+  return name ~= "" and name or nil
+end
+
+-- What the cursor is on, as a spoken line, or nil if this is not a menu we read.
+function MENU.line(s)
+  if s.module ~= 0x01 or mem.u8(0x7E0011) ~= 0x05 then return nil end
+  local at = mem.u8(0x7E00C8)
+  if at == nil then return nil end
+  if at >= 3 then
+    return MENU.FILE_SELECT_OPTIONS[at - 2]
+  end
+  local label = "File " .. (at + 1)
+  if not MENU.file_exists(at) then return label .. ", empty" end
+  local name = MENU.file_name(at)
+  return name and (label .. ", " .. name) or label
+end
+
+function MENU.update(s)
+  local line = MENU.line(s)
+  if line == nil then MENU.said = nil; return end
+  if MENU.said == line then return end
+  MENU.said = line
+  -- Critical: a menu with nothing spoken is a menu that cannot be used, so it must not
+  -- sit behind the verbosity gate, and a fresh selection should cut off the last one
+  -- rather than queue behind it.
+  say(line, { priority = "critical", category = "menu" })
 end
 
 -- ── What Link is facing ─────────────────────────────────────────────────────
