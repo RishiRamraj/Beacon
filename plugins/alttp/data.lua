@@ -20,3 +20,39 @@ REF.sprite_names = { [0]="Raven", [1]="Vulture", [2]="Flying Stalfos Head", [4]=
 REF.enemy_types = { [1]=true, [2]=true, [8]=true, [9]=true, [12]=true, [13]=true, [14]=true, [15]=true, [16]=true, [17]=true, [18]=true, [21]=true, [24]=true, [25]=true, [32]=true, [34]=true, [35]=true, [36]=true, [38]=true, [39]=true, [65]=true, [66]=true, [67]=true, [68]=true, [69]=true, [70]=true, [71]=true, [72]=true, [73]=true, [74]=true, [83]=true, [84]=true, [85]=true, [86]=true, [88]=true, [99]=true, [100]=true, [104]=true, [105]=true, [106]=true, [107]=true, [109]=true, [111]=true, [131]=true, [132]=true, [133]=true, [134]=true, [136]=true, [139]=true, [142]=true, [143]=true, [144]=true, [145]=true, [146]=true, [153]=true, [154]=true, [155]=true, [162]=true, [165]=true, [167]=true, [169]=true, [170]=true, [185]=true, [203]=true, [206]=true, [211]=true, [214]=true, [215]=true }
 REF.item_types = { [98]=true, [178]=true, [216]=true, [217]=true, [218]=true, [219]=true, [220]=true, [221]=true, [222]=true, [223]=true, [224]=true, [225]=true, [226]=true, [227]=true, [228]=true, [229]=true, [230]=true, [231]=true, [234]=true, [235]=true }
 REF.npc_types = { [22]=true, [30]=true, [31]=true, [33]=true, [47]=true, [49]=true, [53]=true, [54]=true, [60]=true, [76]=true, [82]=true, [115]=true, [117]=true, [118]=true, [120]=true, [171]=true, [173]=true, [187]=true, [233]=true }
+
+-- The name-entry picker grid (zelda3 select_file.c kNamePlayer_Tab3): 128 cells, 32 per
+-- row, indexed by the live cursor (selectfile_var3 + selectfile_var5 * 0x20). Each cell
+-- holds a glyph code; the game stores a picked one as (t & 0xFFF0) * 2 + (t & 0xF).
+REF.name_grid = {
+  0x06, 0x07, 0x5F, 0x09, 0x59, 0x59, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x60, 0x23,
+  0x59, 0x59, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x59, 0x59, 0x59, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+  0x10, 0x11, 0x12, 0x13, 0x59, 0x59, 0x24, 0x5F, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D,
+  0x59, 0x59, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0x59, 0x59, 0x59, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+  0x40, 0x41, 0x42, 0x59, 0x59, 0x59, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x40, 0x41, 0x42, 0x59,
+  0x59, 0x59, 0x61, 0x3F, 0x45, 0x46, 0x59, 0x59, 0x59, 0x59, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+  0x44, 0x59, 0x6F, 0x6F, 0x59, 0x59, 0x59, 0x59, 0x59, 0x59, 0x59, 0x5A, 0x44, 0x59, 0x6F, 0x6F,
+  0x59, 0x59, 0x5A, 0x44, 0x59, 0x6F, 0x6F, 0x59, 0x59, 0x59, 0x59, 0x59, 0x59, 0x59, 0x59, 0x5A,
+}
+
+-- What each cell of the name-entry picker says, keyed by grid index (32 per row, four
+-- rows), read out of the game by walking the grid: Rishi filled in every cell against
+-- what was on screen, and the capitals came out of the arithmetic beforehand and matched.
+--
+-- Keyed by POSITION, not by glyph code, because one code is two characters: 0x5F draws
+-- both capital I and lowercase l — the same glyph doing double duty, as SNES fonts often
+-- do — so only where it sits says which is meant. Two other codes appear twice (0x40-0x42,
+-- the punctuation block) but agree with themselves, and the lowercase run a-h then this
+-- cell then j is what fixes grid index 14 as lowercase i.
+REF.name_cells = {
+  "G", "H", "I", "J", "space", "space", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "space", "space", "0", "1", "2", "3", "4", "space", "space", "space", "A", "B", "C", "D", "E", "F",
+  "Q", "R", "S", "T", "space", "space", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "space", "space", "5", "6", "7", "8", "9", "space", "space", "space", "K", "L", "M", "N", "O", "P",
+  "-", ".", ",", "space", "space", "space", "u", "v", "w", "x", "y", "z", "-", ".", ",", "space", "space", "space", "!", "?", "(", ")", "space", "space", "space", "space", "U", "V", "W", "X", "Y", "Z",
+  "forward", "space", "end", "end", "space", "space", "space", "space", "space", "space", "space", "back", "forward", "space", "end", "end", "space", "space", "back", "forward", "space", "end", "end", "space", "space", "space", "space", "space", "space", "space", "space", "back",
+}
+
+-- Glyph code -> character, for reading a name back out of a save. Single-valued codes
+-- only; 0x5F is given as capital I because a stored name cannot distinguish it from
+-- lowercase l — both store as 0xAF, so the game has lost the difference too. The three
+-- controls are left out: they are things to press, not characters a name can contain.
+REF.name_chars = { [0x00] = "A", [0x01] = "B", [0x02] = "C", [0x03] = "D", [0x04] = "E", [0x05] = "F", [0x06] = "G", [0x07] = "H", [0x09] = "J", [0x0A] = "K", [0x0B] = "L", [0x0C] = "M", [0x0D] = "N", [0x0E] = "O", [0x0F] = "P", [0x10] = "Q", [0x11] = "R", [0x12] = "S", [0x13] = "T", [0x14] = "U", [0x15] = "V", [0x16] = "W", [0x17] = "X", [0x18] = "Y", [0x19] = "Z", [0x1A] = "a", [0x1B] = "b", [0x1C] = "c", [0x1D] = "d", [0x1E] = "e", [0x1F] = "f", [0x20] = "g", [0x21] = "h", [0x23] = "j", [0x24] = "k", [0x26] = "m", [0x27] = "n", [0x28] = "o", [0x29] = "p", [0x2A] = "q", [0x2B] = "r", [0x2C] = "s", [0x2D] = "t", [0x2E] = "u", [0x2F] = "v", [0x30] = "w", [0x31] = "x", [0x32] = "y", [0x33] = "z", [0x3F] = "?", [0x40] = "-", [0x41] = ".", [0x42] = ",", [0x45] = "(", [0x46] = ")", [0x59] = " ", [0x5F] = "I", [0x60] = "i", [0x61] = "!", [0x76] = "0", [0x77] = "1", [0x78] = "2", [0x79] = "3", [0x7A] = "4", [0x7B] = "5", [0x7C] = "6", [0x7D] = "7", [0x7E] = "8", [0x7F] = "9" }
