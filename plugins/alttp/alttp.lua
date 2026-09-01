@@ -3549,14 +3549,13 @@ function MENU.name_entry_line()
   if said == nil or said == "" then return nil end
   -- Punctuation cells hold the character itself, which a speech engine renders as a pause
   -- or as nothing, so those cells were silent. Say their names instead.
+  --
+  -- Case is NOT distinguished, though the grid has separate blocks for each and "A" and "a"
+  -- are spoken alike. A screen reader would normally say "cap A"; asked, the player said the
+  -- letter alone is what they want here, so this is settled rather than overlooked.
   return REF.name_spoken[said] or said
 end
 
--- What the cursor is on, and a key for where it is. The key is what decides whether to
--- speak again, because the text alone cannot: the picker has two `end` cells side by side
--- and a dozen blanks in a row, and moving between them said nothing at all. An
--- announcement is how the player learns the cursor moved, so it follows the cursor rather
--- than the words.
 -- The copy-file screen (module 0x02), which is three screens sharing one cursor,
 -- selectfile_R16 at $7E00C8 — the same byte the file select uses.
 --
@@ -3613,6 +3612,11 @@ function MENU.erase_line(sub, at)
   return nil
 end
 
+-- What the cursor is on, and a key for where it is. The key is what decides whether to
+-- speak again, because the text alone cannot: the picker has two `end` cells side by side
+-- and a dozen blanks in a row, and moving between them said nothing at all. An
+-- announcement is how the player learns the cursor moved, so it follows the cursor rather
+-- than the words.
 function MENU.line(s)
   if s.module == 0x03 then
     local at = mem.u8(0x7E00C8)
@@ -3654,7 +3658,9 @@ MENU.CONTROLS = { back = true, forward = true, ["end"] = true }
 --
 -- `back` and `forward` move the slot too and type nothing, so the label has to be checked;
 -- otherwise walking the name cursor would announce whichever letter happened to be under
--- the grid cursor. Reading the grid cursor on this frame is right rather than a frame late,
+-- the grid cursor. They stay SILENT rather than announcing the slot they moved to, which the
+-- player confirmed is what they want; the alternative was calling out "slot 3" or re-reading
+-- the name so far after every keystroke. Reading the grid cursor on this frame is right rather than a frame late,
 -- because NameFile returns early once it has scrolled, so no frame both moves and commits.
 function MENU.name_selection()
   local slot = mem.u8(0x7E0B12)
