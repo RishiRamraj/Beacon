@@ -3517,28 +3517,34 @@ function MENU.name_entry_line()
   return said
 end
 
--- What the cursor is on, as a spoken line, or nil if this is not a menu we read.
+-- What the cursor is on, and a key for where it is. The key is what decides whether to
+-- speak again, because the text alone cannot: the picker has two `end` cells side by side
+-- and a dozen blanks in a row, and moving between them said nothing at all. An
+-- announcement is how the player learns the cursor moved, so it follows the cursor rather
+-- than the words.
 function MENU.line(s)
   if s.module == 0x04 and mem.u8(0x7E0011) == 0x03 then
-    return MENU.name_entry_line()
+    local at, row = mem.u8(0x7E0B10), mem.u8(0x7E0B15)
+    return MENU.name_entry_line(), string.format("name:%s,%s", tostring(at), tostring(row))
   end
   if s.module ~= 0x01 or mem.u8(0x7E0011) ~= 0x05 then return nil end
   local at = mem.u8(0x7E00C8)
   if at == nil then return nil end
+  local key = "file:" .. at
   if at >= 3 then
-    return MENU.FILE_SELECT_OPTIONS[at - 2]
+    return MENU.FILE_SELECT_OPTIONS[at - 2], key
   end
   local label = "File " .. (at + 1)
-  if not MENU.file_exists(at) then return label .. ", empty" end
+  if not MENU.file_exists(at) then return label .. ", empty", key end
   local name = MENU.file_name(at)
-  return name and (label .. ", " .. name) or label
+  return (name and (label .. ", " .. name) or label), key
 end
 
 function MENU.update(s)
-  local line = MENU.line(s)
+  local line, key = MENU.line(s)
   if line == nil then MENU.said = nil; return end
-  if MENU.said == line then return end
-  MENU.said = line
+  if MENU.said == key then return end
+  MENU.said = key
   -- Critical: a menu with nothing spoken is a menu that cannot be used, so it must not
   -- sit behind the verbosity gate, and a fresh selection should cut off the last one
   -- rather than queue behind it.
