@@ -454,9 +454,6 @@ local CMD_LENGTHS = { 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2
 local CMD_NAMES = { "NextPic", "Choose", "Item", "Name", "Window", "Number", "Position", "ScrollSpd", "Selchg", "Unused_Crash", "Choose3", "Choose2", "Scroll", "1", "2", "3", "Color", "Wait", "Sound", "Speed", "Unused_Mark", "Unused_Mark2", "Unused_Clear", "Waitkey" }
 local ROM_ADDRS = { 0x9C8000, 0x8EDF40 }
 
--- WRAM $7E1CF0 holds the id of the message currently displayed.
-local DIALOG_ID = 0x7E1CF0
-
 local function snes_to_rom(snes)
   local bank = (snes >> 16) & 0x7F
   local off = snes & 0xFFFF
@@ -523,13 +520,144 @@ end
 -- when developing or debugging.
 dialog = decode_dialog()
 
--- The message currently displayed, or nil if none / not decoded.
-local function current_dialog_text()
-  local did = mem.u16(DIALOG_ID)
-  if did == nil then return nil end
-  local text = dialog[did]
-  if text and text ~= "" then return text end
-  return nil
+-- Nothing reads `dialog` to speak with any more — TEXT below does that from the buffer the
+-- game is actually drawing from, so that only what has been shown gets read. It stays as the
+-- whole-message reference: every message by id, readable without one being on screen, which
+-- is what makes `dialog[0x1F]` answerable from eval_lua when working out what a scene says.
+
+-- ── Paginated game text ─────────────────────────────────────────────────────
+-- What the game has put on screen, page by page, rather than the whole message.
+--
+-- Reading the ROM's copy of a message tells the player things they have not been shown yet:
+-- Zelda's telepathic plea is five pages that turn on a button press, and it was all being
+-- read out at once the moment the box opened.
+--
+-- The game itself has the answer. Text_LoadCharacterBuffer expands the message it is about
+-- to show into messaging_text_buffer, and RenderText_Draw_MessageCharacters walks that
+-- buffer leaving dialogue_msg_read_pos at the next byte to consume — so the bytes before
+-- that position are exactly what has been drawn. The buffer is pre-expanded: dictionary
+-- words, the player's name and preloaded numbers are already substituted, so unlike the ROM
+-- decoder there is no dictionary byte to look up here.
+TEXT = {
+  BUFFER = 0x7F1200, -- messaging_text_buffer (WRAM offset 0x11200, so bank $7F)
+  POS = 0x7E1CD9, -- dialogue_msg_read_pos
+  ID = 0x7E1CF0, -- dialogue_message_index: which message is being shown
+  MAX = 0x400, -- a bound, so a corrupt buffer cannot spin; messages are far shorter
+  END = 0x7F,
+}
+
+-- The commands the renderer stops on to wait for the player, which is what makes a page a
+-- page. Waitkey (0x7E) is the ordinary page turn; the Choose family halts on a prompt; 0x7F
+-- ends the message. RenderText_Draw_MessageCharacters leaves read_pos sitting ON each of
+-- these instead of stepping past it, so the resting position means "this much is drawn".
+-- Verified live: mid-message read_pos rested at 28, the byte there 0x7E.
+TEXT.BREAKS = {
+  [0x68] = true, -- Choose
+  [0x69] = true, -- Item
+  [0x6F] = true, -- Selchg
+  [0x71] = true, -- Choose3
+  [0x72] = true, -- Choose2
+  [0x7E] = true, -- Waitkey
+  [0x7F] = true, -- end of message
+}
+
+-- Decode the buffer from `from` until `upto`, and then to the end of a word the boundary
+-- splits. Returns the text and where it actually stopped, so a caller reading page by page
+-- can start the next one past a word it has already spoken.
+--
+-- The word completion is what stops a half-drawn line reading as half a word — asking for
+-- the text while "Help me" is still typing should not say "Help m". It only extends when the
+-- boundary falls INSIDE a word: landing just after a space reads no further, or every page
+-- would give away the first word of the next one.
+function TEXT.decode(from, upto)
+  local out, i, in_word = {}, from, false
+  local function take()
+    local b = mem.u8(TEXT.BUFFER + i)
+    if b == nil or b == TEXT.END then return nil end
+    local ch, step = "", 1
+    if b <= 0x5E then
+      ch = ALPHABET[b + 1] or ""
+    elseif b >= 0x67 and b <= 0x7E then
+      local name = CMD_NAMES[b - 0x67 + 1]
+      -- The line and scroll commands are where one line ends and the next begins, which is
+      -- a word gap even though the message spells no space there.
+      if name == "Scroll" or name == "1" or name == "2" or name == "3" then ch = " " end
+      step = CMD_LENGTHS[b - 0x67 + 1] or 1
+    end
+    i = i + step
+    return ch
+  end
+
+  while i < upto and i < TEXT.MAX do
+    local ch = take()
+    if ch == nil then return normalize(table.concat(out)), i end
+    out[#out + 1] = ch
+    -- Only a letter or digit leaves us mid-word. Ending on punctuation means the word
+    -- finished, and extending there would swallow the next page's first word: a page ending
+    -- "Help me!" must not go on to say the "Now" that starts the page after it.
+    if ch ~= "" then in_word = ch ~= " " and ch:match("%w") ~= nil end
+  end
+
+  while in_word and i < TEXT.MAX do
+    local at = i
+    local ch = take()
+    if ch == nil or ch == " " then
+      i = at -- leave the boundary unconsumed, so the next page starts on it
+      break
+    end
+    -- Step over a zero-width command rather than stopping at it: the break itself sits
+    -- between the halves of a word split across a page, so this is how the rest is reached.
+    if ch ~= "" then
+      out[#out + 1] = ch
+      if ch:match("%w") == nil then break end -- trailing punctuation closes the word
+    end
+  end
+
+  return normalize(table.concat(out)), i
+end
+
+-- Where the renderer has come to rest waiting for the player, or nil if it is still drawing.
+function TEXT.at_break()
+  local pos = mem.u16(TEXT.POS)
+  if pos == nil or pos >= TEXT.MAX then return nil end
+  return TEXT.BREAKS[mem.u8(TEXT.BUFFER + pos)] and pos or nil
+end
+
+-- The current page as far as it has been drawn, for reading on demand. Falls back to the
+-- page just spoken, since asking the moment a page finishes would otherwise find nothing
+-- new drawn and answer that there is no text.
+function TEXT.shown()
+  local pos = mem.u16(TEXT.POS)
+  if pos == nil then return TEXT.last end
+  local text = TEXT.decode(TEXT.from or 0, pos)
+  if text ~= "" then return text end
+  return TEXT.last
+end
+
+function TEXT.update(s)
+  local id, pos = mem.u16(TEXT.ID), mem.u16(TEXT.POS)
+  if s.module ~= 0x0E or id == nil or pos == nil then
+    -- Out of the box: forget where we were, so re-opening one starts at its first page.
+    TEXT.msg, TEXT.from, TEXT.said_to, TEXT.last = nil, 0, nil, nil
+    return
+  end
+  -- A new message, or the same one shown again — Text_LoadCharacterBuffer zeroes read_pos
+  -- either way, so a position behind where we had got to means a fresh message.
+  if id ~= TEXT.msg or pos < (TEXT.from or 0) then
+    TEXT.msg, TEXT.from, TEXT.said_to, TEXT.last = id, 0, nil, nil
+  end
+
+  local brk = TEXT.at_break()
+  if brk == nil or brk == TEXT.said_to then return end
+  TEXT.said_to = brk
+  local text, stop = TEXT.decode(TEXT.from, brk)
+  TEXT.from = stop
+  if text ~= "" then
+    TEXT.last = text
+    -- `always`: the game's own story is spoken at any verbosity. A low chatter setting trims
+    -- the guide's routine callouts, never the plot.
+    say(text, { priority = "navigation", category = "dialog", always = true })
+  end
 end
 
 -- The map's collision colours. A tile attribute describes what a tile *is* for
@@ -2012,6 +2140,10 @@ function on_frame(frame)
   -- are exactly where Link does not exist yet, and they are unusable unheard.
   MENU.update(now)
 
+  -- Game text likewise: it is read as the game draws each page, so it has to be watched
+  -- every frame rather than at a module change, and a text box is not in-play either.
+  TEXT.update(now)
+
   -- Turn navigation on by itself at the very start of the quest — once Link is up
   -- out of bed and controllable in his house — so the opening guidance leads without
   -- the player first pressing the key. Setting nav_active is enough: nav_update,
@@ -2060,15 +2192,9 @@ function on_frame(frame)
     )
   end
 
-  -- Game text: when a text or menu box opens (module 0x0E), read it aloud. Marked
-  -- `always` so the game's own story and menu text is spoken at any verbosity — a
-  -- low chatter setting trims the guide's routine callouts, never the plot.
-  if now.module == 0x0E and was.module ~= 0x0E then
-    local text = current_dialog_text()
-    if text then
-      say(text, { priority = "navigation", category = "dialog", always = true })
-    end
-  end
+  -- Game text is read page by page as the game draws it, from TEXT.update below, rather than
+  -- announced whole when the box opens (module 0x0E). Reading it on the module change meant
+  -- reading pages the player had not turned to yet.
 
   -- Top level state changes: file select, entering a dungeon, and so on. Some
   -- modules are deliberately silent: the text module (0x0E, handled just above),
@@ -2296,9 +2422,10 @@ on_command("scan", function()
   end
 end)
 
--- "Read text" — re-read the message currently on screen, a custom command.
+-- "Read text" — re-read the page currently on screen, a custom command. The page, not the
+-- message: the rest of it has not been shown yet.
 on_command("read_text", function()
-  local text = current_dialog_text()
+  local text = TEXT.shown()
   if text then
     say(text, { priority = "navigation", category = "on-demand" })
   else

@@ -5194,3 +5194,227 @@ fn alttp_the_erase_confirmation_still_asks_when_no_name_was_seen() {
         "{asked:?}"
     );
 }
+
+// ── Paginated game text ─────────────────────────────────────────────────────
+
+const TEXT_WAITKEY: u8 = 0x7E;
+const TEXT_SCROLL: u8 = 0x73;
+const TEXT_END: u8 = 0x7F;
+
+/// One character in the message encoding, which is not the name-picker's encoding.
+fn text_byte(c: char) -> u8 {
+    match c {
+        'A'..='Z' => c as u8 - b'A',
+        'a'..='z' => c as u8 - b'a' + 0x1A,
+        '0'..='9' => c as u8 - b'0' + 0x34,
+        '!' => 0x3E,
+        '.' => 0x41,
+        ',' => 0x42,
+        ' ' => 0x59,
+        _ => panic!("no encoding for {c:?}"),
+    }
+}
+
+/// A message box mid-render: the pre-expanded buffer the game decodes from, and how far
+/// RenderText_Draw_MessageCharacters has got through it.
+fn dialog_frame(buf: &[u8], read_pos: u16) -> Vec<u8> {
+    let mut ram = vec![0u8; 128 * 1024];
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    set(0x7E0010, 0x0E); // the text module
+    set(0x7E1CF0, 0x1F); // dialogue_message_index
+    set(0x7E1CD9, (read_pos & 0xFF) as u8); // dialogue_msg_read_pos
+    set(0x7E1CDA, (read_pos >> 8) as u8);
+    for (i, b) in buf.iter().enumerate() {
+        set(0x7F1200 + i as u32, *b);
+    }
+    ram
+}
+
+/// Builds a buffer from pieces, returning it with the START offset of each piece — which is
+/// what a test wants, since a break is a piece and read_pos rests exactly on one.
+fn dialog_buffer(pieces: &[&str]) -> (Vec<u8>, Vec<u16>) {
+    let mut buf = Vec::new();
+    let mut starts = Vec::new();
+    for piece in pieces {
+        starts.push(buf.len() as u16);
+        match *piece {
+            "<wait>" => buf.push(TEXT_WAITKEY),
+            "<scroll>" => buf.push(TEXT_SCROLL),
+            "<end>" => buf.push(TEXT_END),
+            s => buf.extend(s.chars().map(text_byte)),
+        }
+    }
+    (buf, starts)
+}
+
+#[test]
+fn alttp_a_paginated_message_is_read_one_page_at_a_time() {
+    // Zelda's telepathic plea: five pages that turn on a button press. The whole message was
+    // being read out the moment the box opened, which gives away pages not yet turned to.
+    let (buf, starts) = dialog_buffer(&[
+        "Help me!",
+        "<wait>",
+        "<scroll>",
+        "I am a prisoner.",
+        "<wait>",
+        "<scroll>",
+        "My name is Zelda.",
+        "<end>",
+    ]);
+    let (first_wait, second_wait, end) = (starts[1], starts[4], starts[7]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // The renderer rests ON the Waitkey while it waits, so that position means page complete.
+    let page1 = warm(&mut p, &dialog_frame(&buf, first_wait));
+    assert!(page1.iter().any(|t| t == "Help me!"), "{page1:?}");
+    assert!(
+        !page1
+            .iter()
+            .any(|t| t.contains("prisoner") || t.contains("Zelda")),
+        "no page the player has not turned to: {page1:?}"
+    );
+
+    // Held at the same break, it does not repeat.
+    let held: Vec<String> = p
+        .on_frame(&dialog_frame(&buf, first_wait), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(held.is_empty(), "one announcement per page: {held:?}");
+
+    let page2: Vec<String> = p
+        .on_frame(&dialog_frame(&buf, second_wait), WARM + 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(page2.iter().any(|t| t == "I am a prisoner."), "{page2:?}");
+    assert!(
+        !page2
+            .iter()
+            .any(|t| t.contains("Help") || t.contains("Zelda")),
+        "the page turned to, not the ones before or after: {page2:?}"
+    );
+
+    // The last page has no Waitkey after it; the terminator is its break.
+    let page3: Vec<String> = p
+        .on_frame(&dialog_frame(&buf, end), WARM + 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(page3.iter().any(|t| t == "My name is Zelda."), "{page3:?}");
+}
+
+#[test]
+fn alttp_a_word_split_across_a_page_break_is_read_whole() {
+    // A page can end mid-word. Reading only as far as the break would say half of it, so the
+    // rest is taken across the boundary — and the next page then starts past it, rather than
+    // beginning with a fragment already spoken.
+    let (buf, starts) =
+        dialog_buffer(&["I am in the dunge", "<wait>", "on of the castle.", "<end>"]);
+    let (wait, end) = (starts[1], starts[3]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let page1 = warm(&mut p, &dialog_frame(&buf, wait));
+    assert!(
+        page1.iter().any(|t| t == "I am in the dungeon"),
+        "the word is finished across the break: {page1:?}"
+    );
+
+    let page2: Vec<String> = p
+        .on_frame(&dialog_frame(&buf, end), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        page2.iter().any(|t| t == "of the castle."),
+        "and is not said again: {page2:?}"
+    );
+}
+
+#[test]
+fn alttp_a_break_on_a_word_boundary_reads_no_further() {
+    // The other half of finishing a split word: when the break falls between words there is
+    // nothing to finish, and reading on would give away the next page's first word.
+    let (buf, starts) = dialog_buffer(&["Go ", "<wait>", "now!", "<end>"]);
+    let wait = starts[1];
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let page1 = warm(&mut p, &dialog_frame(&buf, wait));
+    assert!(page1.iter().any(|t| t == "Go"), "{page1:?}");
+    assert!(
+        !page1.iter().any(|t| t.contains("now")),
+        "the next page's word is not given away: {page1:?}"
+    );
+}
+
+#[test]
+fn alttp_a_message_still_drawing_is_not_announced() {
+    // read_pos only means "page complete" when it is resting on a break. Mid-word it is just
+    // where the typing has got to, and announcing there would talk over the game.
+    let (buf, _) = dialog_buffer(&["Help me!", "<wait>", "<end>"]);
+    let r = Registry::builtin();
+    let mid = speaks_over(&r, &dialog_frame(&buf, 5), 4);
+    assert!(
+        !mid.iter().any(|t| t.contains("Help")),
+        "nothing until the page is done: {mid:?}"
+    );
+}
+
+#[test]
+fn alttp_reopening_a_box_starts_from_its_first_page() {
+    // Text_LoadCharacterBuffer zeroes read_pos for every message, including the same message
+    // shown twice, so a position behind where we had got to means a fresh message.
+    let (buf, starts) = dialog_buffer(&["Help me!", "<wait>", "<scroll>", "Please!", "<end>"]);
+    let (first_wait, end) = (starts[1], starts[4]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    warm(&mut p, &dialog_frame(&buf, first_wait));
+    p.on_frame(&dialog_frame(&buf, end), WARM);
+
+    // Out of the text module and back in, the message starting over.
+    p.on_frame(&dungeon_frame((100, 100), (120, 100), &[]), WARM + 1);
+    let again: Vec<String> = p
+        .on_frame(&dialog_frame(&buf, first_wait), WARM + 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        again.iter().any(|t| t == "Help me!"),
+        "the first page is read again: {again:?}"
+    );
+}
+
+#[test]
+fn alttp_a_page_ending_in_punctuation_does_not_swallow_the_next_word() {
+    // The word-completion's limit. A page that ends on punctuation ended on a finished word,
+    // so there is nothing to carry across — and carrying on regardless would say the first
+    // word of a page the player has not turned to. Distinct from the space case: here there
+    // is no line break after the Waitkey to stop the reader by accident.
+    let (buf, starts) = dialog_buffer(&["Help me!", "<wait>", "Now go.", "<end>"]);
+    let (wait, end) = (starts[1], starts[3]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let page1 = warm(&mut p, &dialog_frame(&buf, wait));
+    assert!(
+        page1.iter().any(|t| t == "Help me!"),
+        "the page ends where its punctuation does: {page1:?}"
+    );
+    assert!(
+        !page1.iter().any(|t| t.contains("Now")),
+        "the next page's word is not swallowed: {page1:?}"
+    );
+
+    // And that word is still there to be read when the page is turned.
+    let page2: Vec<String> = p
+        .on_frame(&dialog_frame(&buf, end), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(page2.iter().any(|t| t == "Now go."), "{page2:?}");
+}
