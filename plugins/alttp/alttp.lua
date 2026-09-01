@@ -4476,40 +4476,57 @@ function on_draw(canvas)
       end
     end
 
-    -- The cross-screen overworld route, drawn through the current 512-pixel
-    -- window; the segment leaving the screen edge points on toward the next area.
-    -- World tiles are placed relative to Link's block, so off-window corners clip.
-    if s.module == 0x09 and ow_route_goal and ow_route_path then
+    -- The overworld chain and the route to its current target, drawn through the
+    -- current 512-pixel window; the segment leaving the screen edge points on toward
+    -- the next area. World tiles are placed relative to Link's block, so off-window
+    -- corners clip.
+    --
+    -- The chain is drawn on its own terms rather than nested inside the route, which is
+    -- how it used to be: the route needs a computed A* path, so a target the router
+    -- could not reach took the whole chain off the map with it, exactly when seeing
+    -- where the guide meant to go would help most.
+    if s.module == 0x09 then
       local function oplot(tx, ty)
         return plot(tx * 8 + 4, ty * 8 + 4)
       end
       -- The active route to the immediate target, string-pulled, in pink.
-      for i = 1, #ow_route_path - 1 do
-        local ax, ay = oplot(ow_route_path[i][1], ow_route_path[i][2])
-        local cx2, cy2 = oplot(ow_route_path[i + 1][1], ow_route_path[i + 1][2])
-        canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+      if ow_route_path then
+        for i = 1, #ow_route_path - 1 do
+          local ax, ay = oplot(ow_route_path[i][1], ow_route_path[i][2])
+          local cx2, cy2 = oplot(ow_route_path[i + 1][1], ow_route_path[i + 1][2])
+          canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+        end
       end
       if nav_chain then
-        -- Past the active target, draw the rest of the chain: straight pink
-        -- segments linking the remaining waypoints, then a marker on each — the
-        -- next waypoint white, the rest pink — so the route reads ahead (bushes →
-        -- castle door) and the immediate goal stands out. Only the overworld
-        -- waypoints are drawn here; a dungeon point (one with a `room`) belongs to
-        -- the map inside, not out on this screen.
+        -- Past the active target, draw the rest of the chain: straight pink segments
+        -- linking the remaining waypoints, then a marker on each — the next waypoint
+        -- white, the rest pink — so the route reads ahead (bushes -> castle door) and
+        -- the immediate goal stands out. Only the overworld waypoints are drawn here; a
+        -- dungeon point (one with a `room`) belongs to the map inside, not out here.
         for i = nav_chain_i, #nav_chain - 1 do
-          if nav_chain[i].room == nil and nav_chain[i + 1].room == nil then
+          if nav_chain[i].room == nil and nav_chain[i].tx
+            and nav_chain[i + 1].room == nil and nav_chain[i + 1].tx then
             local ax, ay = oplot(nav_chain[i].tx, nav_chain[i].ty)
             local cx2, cy2 = oplot(nav_chain[i + 1].tx, nav_chain[i + 1].ty)
             canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
           end
         end
+        -- Numbered like the dungeon overlay's, and in the same teal, so a number on
+        -- either map means the same thing: an index into an authored chain that
+        -- `show N` in the editor will find. These markers used to carry no number,
+        -- which left UNCLE_APPROACH showing position and nothing to look up.
+        local labels = {}
         for i = nav_chain_i, #nav_chain do
-          if nav_chain[i].room == nil then
+          if nav_chain[i].room == nil and nav_chain[i].tx then
             local px, py = oplot(nav_chain[i].tx, nav_chain[i].ty)
             canvas:rect(px - 1, py - 1, 3, 3, (i == nav_chain_i) and 0xFFFFFF or 0xFF60D0)
+            labels[#labels + 1] = { px, py, text = tostring(i),
+              color = nav_chain.sweep and 0x50D0F0 or 0x20B0A0,
+              first = i == nav_chain_i }
           end
         end
-      else
+        LABELS.number(canvas, labels)
+      elseif ow_route_goal then
         -- A plain single target: mark its destination white.
         local px, py = oplot(ow_route_goal[1], ow_route_goal[2])
         canvas:rect(px - 1, py - 1, 3, 3, 0xFFFFFF)
