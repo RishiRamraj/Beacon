@@ -5432,3 +5432,79 @@ fn alttp_a_page_ending_in_punctuation_does_not_swallow_the_next_word() {
         .collect();
     assert!(page2.iter().any(|t| t == "Now go."), "{page2:?}");
 }
+
+#[test]
+fn alttp_a_message_is_not_re_read_when_the_screen_comes_back() {
+    // Reported: the opening text repeated after the lights came on. Leaving the text module
+    // forgot how far we had got, so coming back with read_pos still at the end started again
+    // from page one — and since read_pos was already past every break, each page satisfied
+    // its trigger on the very next frame and the whole message replayed at once.
+    let (buf, starts) = dialog_buffer(&[
+        "Help me!",
+        "<wait>",
+        "<scroll>",
+        "I am a prisoner.",
+        "<wait>",
+        "<scroll>",
+        "My name is Zelda.",
+        "<end>",
+    ]);
+    let (first_wait, second_wait, end) = (starts[1], starts[4], starts[7]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    warm(&mut p, &dialog_frame(&buf, first_wait));
+    p.on_frame(&dialog_frame(&buf, second_wait), WARM);
+    p.on_frame(&dialog_frame(&buf, end), WARM + 1);
+
+    // The lights go on: out of the text module and back. Built from the same frame so the
+    // message index and read_pos persist across it, which is what the game does — only the
+    // module changes.
+    let mut lit = dialog_frame(&buf, end);
+    lit[wram_offset(0x7E0010).unwrap()] = 0x07;
+    p.on_frame(&lit, WARM + 2);
+    let mut after = Vec::new();
+    for f in 0..6 {
+        after.extend(
+            p.on_frame(&dialog_frame(&buf, end), WARM + 3 + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
+    // Nothing at all, not merely none of the earlier pages: the last page coming round again
+    // is just as much a repeat, and checking only for the earlier ones let the whole fix rest
+    // on knowing which page read_pos was in.
+    assert!(
+        after.is_empty(),
+        "a message already read is not read again: {after:?}"
+    );
+}
+
+#[test]
+fn alttp_joining_a_message_part_way_reads_only_the_current_page() {
+    // Reloading the plugin mid-scene, or arriving with the renderer already past earlier
+    // pages: the page read_pos is inside is the one to read, not the message from the top.
+    let (buf, starts) = dialog_buffer(&[
+        "Help me!",
+        "<wait>",
+        "<scroll>",
+        "I am a prisoner.",
+        "<wait>",
+        "<scroll>",
+        "My name is Zelda.",
+        "<end>",
+    ]);
+    let r = Registry::builtin();
+    // read_pos inside the third page, the first two long since drawn.
+    let joined = speaks_over(&r, &dialog_frame(&buf, starts[6] + 4), 4);
+    assert!(
+        joined.iter().any(|t| t == "My name is Zelda."),
+        "the page it is on: {joined:?}"
+    );
+    assert!(
+        !joined
+            .iter()
+            .any(|t| t.contains("Help") || t.contains("prisoner")),
+        "not the pages before it: {joined:?}"
+    );
+}
