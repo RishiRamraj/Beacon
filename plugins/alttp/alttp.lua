@@ -616,42 +616,73 @@ function TEXT.decode(from, upto)
   return normalize(table.concat(out)), i
 end
 
--- Where the renderer has come to rest waiting for the player, or nil if it is still drawing.
-function TEXT.at_break()
-  local pos = mem.u16(TEXT.POS)
-  if pos == nil or pos >= TEXT.MAX then return nil end
-  return TEXT.BREAKS[mem.u8(TEXT.BUFFER + pos)] and pos or nil
+-- Where the page starting at `from` ends: the next command the renderer will stop on.
+--
+-- Steps by command length rather than byte by byte, so a command's parameter can never be
+-- mistaken for a break — a Speed or Sound parameter is free to be 0x7E.
+function TEXT.next_break(from)
+  local i = from
+  while i < TEXT.MAX do
+    local b = mem.u8(TEXT.BUFFER + i)
+    if b == nil then return nil end
+    if TEXT.BREAKS[b] then return i end
+    i = i + ((b >= 0x67 and b <= 0x7E) and (CMD_LENGTHS[b - 0x67 + 1] or 1) or 1)
+  end
+  return nil
 end
 
--- The current page as far as it has been drawn, for reading on demand. Falls back to the
--- page just spoken, since asking the moment a page finishes would otherwise find nothing
--- new drawn and answer that there is no text.
+-- The whole of the page being shown, for reading on demand. The whole page rather than the
+-- part drawn so far: it is all in the buffer, and the player asking wants the page, not a
+-- race with the typewriter.
 function TEXT.shown()
-  local pos = mem.u16(TEXT.POS)
-  if pos == nil then return TEXT.last end
-  local text = TEXT.decode(TEXT.from or 0, pos)
+  local from = TEXT.from or 0
+  local brk = TEXT.next_break(from)
+  if brk == nil then return TEXT.last end
+  local text = TEXT.decode(from, brk)
   if text ~= "" then return text end
   return TEXT.last
 end
 
+-- Read each page as it BEGINS to appear, not once it has finished.
+--
+-- Waiting for a page to finish drawing means waiting out the typewriter before hearing a word
+-- of it, and the whole page is sitting in the buffer already — so the moment the renderer
+-- starts on a page, the page can be spoken in full. What the renderer is still doing is
+-- putting it on screen for anyone reading it with their eyes.
+--
+-- So the trigger is the page having started rather than the renderer having come to rest:
+-- speak the page at `from` as soon as read_pos has moved into it, then wait for read_pos to
+-- pass that page's break, which is the player turning it.
 function TEXT.update(s)
   local id, pos = mem.u16(TEXT.ID), mem.u16(TEXT.POS)
   if s.module ~= 0x0E or id == nil or pos == nil then
     -- Out of the box: forget where we were, so re-opening one starts at its first page.
-    TEXT.msg, TEXT.from, TEXT.said_to, TEXT.last = nil, 0, nil, nil
+    TEXT.msg, TEXT.from, TEXT.spoke, TEXT.next_from, TEXT.last = nil, 0, nil, nil, nil
     return
   end
   -- A new message, or the same one shown again — Text_LoadCharacterBuffer zeroes read_pos
   -- either way, so a position behind where we had got to means a fresh message.
   if id ~= TEXT.msg or pos < (TEXT.from or 0) then
-    TEXT.msg, TEXT.from, TEXT.said_to, TEXT.last = id, 0, nil, nil
+    TEXT.msg, TEXT.from, TEXT.spoke, TEXT.next_from, TEXT.last = id, 0, nil, nil, nil
   end
 
-  local brk = TEXT.at_break()
-  if brk == nil or brk == TEXT.said_to then return end
-  TEXT.said_to = brk
+  if TEXT.spoke ~= nil then
+    -- Said already. Nothing more until read_pos passes its break, which only happens when
+    -- the player turns the page.
+    if pos <= TEXT.spoke then return end
+    TEXT.from, TEXT.spoke, TEXT.next_from = TEXT.next_from, nil, nil
+  end
+
+  -- Wait for the page to have actually begun, so nothing is said before the box is up.
+  if pos <= TEXT.from then return end
+  local brk = TEXT.next_break(TEXT.from)
+  if brk == nil then return end
+
   local text, stop = TEXT.decode(TEXT.from, brk)
-  TEXT.from = stop
+  TEXT.spoke = brk
+  -- The next page starts after this one's break — or after the word that ran past it, when a
+  -- word was split across it, so the half already spoken is not said again.
+  TEXT.next_from = (stop > brk + 1) and stop or (brk + 1)
   if text ~= "" then
     TEXT.last = text
     -- `always`: the game's own story is spoken at any verbosity. A low chatter setting trims

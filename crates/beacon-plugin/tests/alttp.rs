@@ -5352,15 +5352,29 @@ fn alttp_a_break_on_a_word_boundary_reads_no_further() {
 }
 
 #[test]
-fn alttp_a_message_still_drawing_is_not_announced() {
-    // read_pos only means "page complete" when it is resting on a break. Mid-word it is just
-    // where the typing has got to, and announcing there would talk over the game.
+fn alttp_a_page_is_read_as_soon_as_it_starts_appearing() {
+    // Not once it has finished: waiting out the typewriter means waiting to hear a word of a
+    // page that is sitting in the buffer whole already. read_pos here is five bytes into an
+    // eight-byte page, and the whole page is spoken.
     let (buf, _) = dialog_buffer(&["Help me!", "<wait>", "<end>"]);
     let r = Registry::builtin();
-    let mid = speaks_over(&r, &dialog_frame(&buf, 5), 4);
+    let drawing = speaks_over(&r, &dialog_frame(&buf, 5), 4);
     assert!(
-        !mid.iter().any(|t| t.contains("Help")),
-        "nothing until the page is done: {mid:?}"
+        drawing.iter().any(|t| t == "Help me!"),
+        "the page is read while it is still drawing: {drawing:?}"
+    );
+}
+
+#[test]
+fn alttp_nothing_is_read_before_a_page_has_begun() {
+    // read_pos at 0 is the box opening with nothing drawn yet. The page is spoken once the
+    // renderer has moved into it, not before.
+    let (buf, _) = dialog_buffer(&["Help me!", "<wait>", "<end>"]);
+    let r = Registry::builtin();
+    let opening = speaks_over(&r, &dialog_frame(&buf, 0), 4);
+    assert!(
+        !opening.iter().any(|t| t.contains("Help")),
+        "nothing before the page starts: {opening:?}"
     );
 }
 
