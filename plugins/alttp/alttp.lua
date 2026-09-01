@@ -3480,10 +3480,20 @@ end
 -- REF.name_chars turns a code into a character. It is not the dialogue encoding — the
 -- text decoder's ALPHABET is a different space entirely — so it was read out of the game
 -- by walking the name-entry picker and recording what each cell shows.
-MENU.NAME_OFFSETS = { 8, 0x5C, 0xB0 }
+-- Where each screen stages its names, as byte offsets into the buffer. Every screen lays
+-- its file rows out differently, so this belongs to the screen rather than to the file:
+--   files   the file select      (SelectFile_Func17)
+--   source  copy, pick a source  (CopyFile_SelectionAndBlinker, Dst)
+--   target  copy, pick a target  (CopyFile_TargetSelectionAndBlink, Dst + 4 for the row's
+--           own "1"/"2"/"3" glyph, and only two rows because the source is skipped)
+MENU.NAME_AT = {
+  files = { 8, 0x5C, 0xB0 },
+  source = { 0x3C, 0x64, 0x8C },
+  target = { 0x38 + 4, 0x60 + 4 },
+}
 MENU.NAME_LEN = 6
-function MENU.name_codes(k)
-  local off = MENU.NAME_OFFSETS[k + 1]
+
+function MENU.name_codes(off)
   if off == nil then return nil end
   local out = {}
   for i = 0, MENU.NAME_LEN - 1 do
@@ -3494,13 +3504,25 @@ function MENU.name_codes(k)
   return out
 end
 
-function MENU.file_name(k)
-  local codes = MENU.name_codes(k)
+function MENU.name_text(off)
+  local codes = MENU.name_codes(off)
   if codes == nil then return nil end
   local out = {}
   for _, c in ipairs(codes) do out[#out + 1] = REF.name_chars[c] or "" end
   local name = table.concat(out):gsub("%s+$", "")
   return name ~= "" and name or nil
+end
+
+-- One file row, wherever it is being shown: "File 2, LINK", or "File 2, empty".
+function MENU.file_line(k, off)
+  local label = "File " .. (k + 1)
+  if not MENU.file_exists(k) then return label .. ", empty" end
+  local name = MENU.name_text(off)
+  return name and (label .. ", " .. name) or label
+end
+
+function MENU.file_name(k)
+  return MENU.name_text(MENU.NAME_AT.files[k + 1])
 end
 
 -- The name-entry picker (module 0x04, submodule 0x03). The highlighted cell is
@@ -3522,7 +3544,39 @@ end
 -- and a dozen blanks in a row, and moving between them said nothing at all. An
 -- announcement is how the player learns the cursor moved, so it follows the cursor rather
 -- than the words.
+-- The copy-file screen (module 0x02), which is three screens sharing one cursor,
+-- selectfile_R16 at $7E00C8 — the same byte the file select uses.
+--
+--   submodule 3  pick a source: cursor 0-2 are the files, 3 is Quit. Navigation skips files
+--                that do not exist, so the cursor only ever lands on a real one or on Quit.
+--   submodule 4  pick a target: cursor 0-1 are the two files that are not the source, 2 is
+--                Quit. Which file a row is is not the cursor — the game keeps the two
+--                candidates in selectfile_arr2 ($7E00CA) as file * 2, ascending, and the
+--                rows follow that order. A target may well be empty; that is the point.
+--   submodule 5  confirm: cursor 0 does the copy, 1 backs out. "COPY OK" is the game's own
+--                wording, decoded from the tiles the screen stages for that line.
+function MENU.copy_line(sub, at)
+  local key = string.format("copy:%s:%s", tostring(sub), tostring(at))
+  if sub == 0x03 then
+    if at >= 3 then return "Quit", key end
+    return MENU.file_line(at, MENU.NAME_AT.source[at + 1]), key
+  elseif sub == 0x04 then
+    if at >= 2 then return "Quit", key end
+    local slot = mem.u8(0x7E00CA + at)
+    if slot == nil then return nil end
+    return MENU.file_line(slot >> 1, MENU.NAME_AT.target[at + 1]), key
+  elseif sub == 0x05 then
+    return (at == 0 and "Copy OK" or "Quit"), key
+  end
+  return nil
+end
+
 function MENU.line(s)
+  if s.module == 0x02 then
+    local at = mem.u8(0x7E00C8)
+    if at == nil then return nil end
+    return MENU.copy_line(mem.u8(0x7E0011), at)
+  end
   if s.module == 0x04 and mem.u8(0x7E0011) == 0x03 then
     local at, row = mem.u8(0x7E0B10), mem.u8(0x7E0B15)
     return MENU.name_entry_line(), string.format("name:%s,%s", tostring(at), tostring(row))
@@ -3568,31 +3622,40 @@ function MENU.name_selection()
   return REF.name_spoken[cell] or cell
 end
 
--- Frames to let the file select settle before reading it.
+-- Frames to let a screen settle before reading it.
 --
--- Everything this screen is asked about — which files exist, and their names — is put in
--- place by FileSelect_Main, the submodule 5 handler, on each of its runs. Arriving here
--- from the name picker goes through submodule 1, FileSelect_ReInitSaveFlagsAndEraseTriforce,
--- which memsets the file-exists flags to zero first. So the first submodule-5 frame the
--- plugin sees is one where the handler has not run yet and every file reads as empty — and
--- because the announcement latches on the cursor, that reading could never correct itself:
--- a file just named was announced as empty until the cursor moved off it and back.
+-- Every one of these screens is drawn by its own submodule handler, and everything the
+-- reader asks about — which files exist, and their names — is put in place by that handler
+-- on each of its runs. So the first frame on a new screen is one where the handler has not
+-- run yet and the reader is looking at whatever the last screen left behind.
 --
--- One frame is enough, the handler running once being all it takes, and 16ms is inaudible.
--- The alternative — latching on the words instead, so a corrected reading re-speaks — would
--- both still say "empty" once and risk stuttering, since the name is read out of the VRAM
--- upload buffer and that is transient.
+-- The file select is where this bit. Arriving from the name picker goes through submodule 1,
+-- FileSelect_ReInitSaveFlagsAndEraseTriforce, which memsets the file-exists flags to zero,
+-- and only submodule 5's FileSelect_Main puts them back. The announcement latches on the
+-- cursor, so that first reading was also the last word on it: a file just named was
+-- announced as empty until the cursor moved off it and back. The copy screen stages its
+-- names the same way and would have gone the same way, so the wait belongs to all of them
+-- rather than to the one screen that showed the symptom.
+--
+-- One frame is enough — the handler running once is all it takes — and 16ms is inaudible.
+-- Only a change of screen resets it, so moving the cursor within a screen is not delayed.
+-- The alternative, latching on the words instead so a corrected reading re-speaks, is worse
+-- on both counts: it would still say the wrong thing once, and the names are read out of
+-- the VRAM upload buffer, which is transient enough to stutter.
 MENU.SETTLE = 1
 
 function MENU.update(s)
+  local sub = mem.u8(0x7E0011)
+
   -- Forget the slot on the way out, or re-entering the picker reads the reset back to 0 as
   -- a commit and speaks a character nobody typed.
-  local naming = s.module == 0x04 and mem.u8(0x7E0011) == 0x03
+  local naming = s.module == 0x04 and sub == 0x03
   if not naming then MENU.slot = nil end
 
-  local on_files = s.module == 0x01 and mem.u8(0x7E0011) == 0x05
-  MENU.files_for = on_files and ((MENU.files_for or 0) + 1) or 0
-  if on_files and MENU.files_for <= MENU.SETTLE then
+  local screen = sub and (s.module .. ":" .. sub) or nil
+  MENU.screen_for = (screen ~= nil and screen == MENU.screen) and (MENU.screen_for + 1) or 0
+  MENU.screen = screen
+  if MENU.screen_for < MENU.SETTLE then
     -- Nothing trustworthy to say yet. Clear the latch so the settled reading speaks.
     MENU.said = nil
     return

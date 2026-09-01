@@ -4736,6 +4736,24 @@ fn name_entry_frame(col: u8, row: u8) -> Vec<u8> {
     ram
 }
 
+/// Frames a fresh plugin needs before a screen's first reading is spoken.
+///
+/// Three, for two unrelated reasons. The first on_frame returns early for want of a previous
+/// state, so the reader never runs. The next is the frame MENU.SETTLE spends waiting for the
+/// screen's own submodule handler to have run — until it has, the file-exists flags and the
+/// staged names still describe whatever was on screen before. The third is the one that
+/// speaks. Any test that walks frames by hand has to start after these.
+const WARM: u64 = 3;
+
+/// Run a plugin up to and including its first reading of `ram`, returning what it said.
+fn warm(p: &mut LuaPlugin, ram: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in 0..WARM {
+        out.extend(p.on_frame(ram, f).iter().map(|i| i.text.clone()));
+    }
+    out
+}
+
 /// The same screen with the name cursor (selectfile_var4) at a given slot. The game advances
 /// that slot on every commit, which is how a selection is detected at all.
 fn name_entry_at_slot(col: u8, row: u8, slot: u8) -> Vec<u8> {
@@ -4750,10 +4768,13 @@ fn alttp_selecting_a_character_speaks_it() {
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     // Sit on capital A (col 26, row 0) long enough for the cursor line to be said and latched.
     let holding = name_entry_at_slot(26, 0, 0);
-    p.on_frame(&holding, 0);
-    p.on_frame(&holding, 1);
+    let arrived = warm(&mut p, &holding);
+    assert!(
+        arrived.iter().any(|t| t == "A"),
+        "the cursor line is said: {arrived:?}"
+    );
     let quiet: Vec<String> = p
-        .on_frame(&holding, 2)
+        .on_frame(&holding, WARM)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -4761,7 +4782,7 @@ fn alttp_selecting_a_character_speaks_it() {
 
     // Pressing A types it and advances the name cursor 0 -> 1, without moving the grid.
     let typed: Vec<String> = p
-        .on_frame(&name_entry_at_slot(26, 0, 1), 3)
+        .on_frame(&name_entry_at_slot(26, 0, 1), WARM + 1)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -4772,7 +4793,7 @@ fn alttp_selecting_a_character_speaks_it() {
 
     // The grid cursor never moved, so its latch must be intact and moving off it still speaks.
     let moved: Vec<String> = p
-        .on_frame(&name_entry_at_slot(27, 0, 1), 4)
+        .on_frame(&name_entry_at_slot(27, 0, 1), WARM + 2)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -4790,11 +4811,10 @@ fn alttp_the_name_cursor_controls_type_nothing() {
     for (col, row, label) in [(0u8, 3u8, "forward"), (11, 3, "back")] {
         let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
         let holding = name_entry_at_slot(col, row, 2);
-        p.on_frame(&holding, 0);
-        p.on_frame(&holding, 1);
+        warm(&mut p, &holding);
         // Slot moves as the control does its job; nothing was typed, so nothing is said.
         let after: Vec<String> = p
-            .on_frame(&name_entry_at_slot(col, row, 3), 2)
+            .on_frame(&name_entry_at_slot(col, row, 3), WARM)
             .iter()
             .map(|i| i.text.clone())
             .collect();
@@ -4809,13 +4829,16 @@ fn alttp_re_entering_the_picker_does_not_speak_a_phantom_character() {
     let r = Registry::builtin();
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     let inside = name_entry_at_slot(26, 0, 3);
-    p.on_frame(&inside, 0);
-    p.on_frame(&inside, 1);
+    warm(&mut p, &inside);
     // Out to the file select, then back in with the slot reset and the cursor on a letter.
-    p.on_frame(&file_select_frame(0, [false, false, false]), 2);
+    // Each screen change costs its own settle frame, hence the frame walked past each way.
+    let files = file_select_frame(0, [false, false, false]);
+    p.on_frame(&files, WARM);
+    p.on_frame(&files, WARM + 1);
     let inside = name_entry_at_slot(26, 0, 0);
+    p.on_frame(&inside, WARM + 2);
     let back: Vec<String> = p
-        .on_frame(&inside, 3)
+        .on_frame(&inside, WARM + 3)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -4827,7 +4850,7 @@ fn alttp_re_entering_the_picker_does_not_speak_a_phantom_character() {
     // Both readings say "A", so the frame after is what tells them apart: the cursor line
     // sets the latch and falls quiet, while a commit returns before setting it and repeats.
     let held: Vec<String> = p
-        .on_frame(&inside, 4)
+        .on_frame(&inside, WARM + 4)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -4844,10 +4867,8 @@ fn alttp_the_name_picker_says_the_letter_under_the_cursor() {
     // code 0x5F draws both capital I and lowercase l and only its place says which.
     let r = Registry::builtin();
     let says = |col: u8, row: u8| -> Vec<String> {
-        let ram = name_entry_frame(col, row);
         let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-        p.on_frame(&ram, 0);
-        p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect()
+        warm(&mut p, &name_entry_frame(col, row))
     };
 
     // The three six-wide capital blocks, which the grid's own arithmetic predicted.
@@ -4934,9 +4955,7 @@ fn alttp_punctuation_cells_are_spoken_by_name() {
         (20, 2, "open bracket"),
         (21, 2, "close bracket"),
     ] {
-        let ram = name_entry_frame(col, row);
-        let mut said: Vec<String> = p.on_frame(&ram, 0).iter().map(|i| i.text.clone()).collect();
-        said.extend(p.on_frame(&ram, 1).iter().map(|i| i.text.clone()));
+        let said = warm(&mut p, &name_entry_frame(col, row));
         assert!(
             said.iter().any(|t| t == word),
             "({col},{row}) -> {word}: {said:?}"
@@ -4957,19 +4976,11 @@ fn alttp_moving_between_cells_that_read_alike_still_speaks() {
     for (a, b, word) in pairs {
         let first = name_entry_frame(a.0, a.1);
         let second = name_entry_frame(b.0, b.1);
-        // Both frames count: on a fresh plugin the first returns early for want of a
-        // previous state, so the announcement lands on the second — but once it is warm it
-        // lands on the first.
-        let mut there: Vec<String> = p
-            .on_frame(&first, 0)
-            .iter()
-            .map(|i| i.text.clone())
-            .collect();
-        there.extend(p.on_frame(&first, 1).iter().map(|i| i.text.clone()));
+        let there = warm(&mut p, &first);
         assert!(there.iter().any(|t| t == word), "{word}: {there:?}");
         // Same word, different cell: it speaks again.
         let moved: Vec<String> = p
-            .on_frame(&second, 2)
+            .on_frame(&second, WARM)
             .iter()
             .map(|i| i.text.clone())
             .collect();
@@ -4979,7 +4990,7 @@ fn alttp_moving_between_cells_that_read_alike_still_speaks() {
         );
         // Held still on that cell, it does not.
         let held: Vec<String> = p
-            .on_frame(&second, 3)
+            .on_frame(&second, WARM + 1)
             .iter()
             .map(|i| i.text.clone())
             .collect();
@@ -4988,4 +4999,115 @@ fn alttp_moving_between_cells_that_read_alike_still_speaks() {
             "holding still does not repeat: {held:?}"
         );
     }
+}
+
+/// The copy-file screen: module 0x02, one cursor at $7E00C8 shared by its three submodules.
+///
+/// `names` are staged into the VRAM upload buffer at the offsets that submodule uses, keyed
+/// by row rather than by file, since the target screen shows only the two non-source files.
+fn copy_frame(sub: u8, at: u8, exists: [bool; 3], names: &[(u32, [u16; 6])]) -> Vec<u8> {
+    let mut ram = vec![0u8; 128 * 1024];
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    set(0x7E0010, 0x02);
+    set(0x7E0011, sub);
+    set(0x7E00C8, at); // selectfile_R16
+    for (k, &e) in exists.iter().enumerate() {
+        set(0x7E00BF + k as u32 * 2, if e { 1 } else { 0 });
+    }
+    for (off, name) in names {
+        for (i, code) in name.iter().enumerate() {
+            let t = stored_code(*code) + 0x1800;
+            let at = 0x7E1002 + off + i as u32 * 2;
+            set(at, (t & 0xFF) as u8);
+            set(at + 1, (t >> 8) as u8);
+        }
+    }
+    ram
+}
+
+/// LINK, ZELDA: six grid codes each, blanks padding to the fixed six characters.
+const LINK: [u16; 6] = [0x0B, 0x5F, 0x0D, 0x0A, 0x59, 0x59];
+const ZELDA: [u16; 6] = [0x19, 0x04, 0x0B, 0x03, 0x00, 0x59];
+
+#[test]
+fn alttp_the_copy_screen_reads_the_source_and_quit() {
+    // Submodule 3 picks a source: cursor 0-2 are the files, 3 is Quit. Names are staged at
+    // 0x3C/0x64/0x8C (CopyFile_SelectionAndBlinker's own Dst, not the file select's).
+    let r = Registry::builtin();
+    let names = [(0x3C, LINK), (0x64, ZELDA)];
+    let read = |at: u8| speaks_over(&r, &copy_frame(0x03, at, [true, true, false], &names), 4);
+
+    let first = read(0);
+    assert!(first.iter().any(|t| t == "File 1, LINK"), "{first:?}");
+    let second = read(1);
+    assert!(second.iter().any(|t| t == "File 2, ZELDA"), "{second:?}");
+    let quit = read(3);
+    assert!(
+        quit.iter().any(|t| t == "Quit"),
+        "cursor 3 is Quit: {quit:?}"
+    );
+}
+
+#[test]
+fn alttp_the_copy_screen_reads_the_target_rows_and_quit() {
+    // Submodule 4 picks a target: cursor 0-1 are rows, 2 is Quit. A row is not a file — the
+    // two candidates live in selectfile_arr2 ($7E00CA) as file * 2, so with file 1 as the
+    // source the rows are files 2 and 3. Row names are staged at 0x38+4 and 0x60+4.
+    let r = Registry::builtin();
+    let names = [(0x38 + 4, ZELDA)];
+    let frame = |at: u8| {
+        let mut ram = copy_frame(0x04, at, [true, true, false], &names);
+        ram[wram_offset(0x7E00CA).unwrap()] = 2; // row 0 -> file 2
+        ram[wram_offset(0x7E00CB).unwrap()] = 4; // row 1 -> file 3
+        ram
+    };
+
+    // Row 0 is file 2, which exists and is named — so the row index is not what gets said.
+    let row0 = speaks_over(&r, &frame(0), 4);
+    assert!(row0.iter().any(|t| t == "File 2, ZELDA"), "{row0:?}");
+    // Row 1 is file 3, which does not exist. Copying into an empty slot is the normal case.
+    let row1 = speaks_over(&r, &frame(1), 4);
+    assert!(row1.iter().any(|t| t == "File 3, empty"), "{row1:?}");
+    let quit = speaks_over(&r, &frame(2), 4);
+    assert!(
+        quit.iter().any(|t| t == "Quit"),
+        "cursor 2 is Quit: {quit:?}"
+    );
+}
+
+#[test]
+fn alttp_the_copy_screen_reads_its_confirmation() {
+    // Submodule 5: cursor 0 does the copy, 1 backs out. "COPY OK" is the game's own wording,
+    // decoded from the tiles CopyFile_TargetSelectionAndBlink stages for that line.
+    let r = Registry::builtin();
+    let ok = speaks_over(&r, &copy_frame(0x05, 0, [true, false, false], &[]), 4);
+    assert!(ok.iter().any(|t| t == "Copy OK"), "{ok:?}");
+    let quit = speaks_over(&r, &copy_frame(0x05, 1, [true, false, false], &[]), 4);
+    assert!(quit.iter().any(|t| t == "Quit"), "{quit:?}");
+}
+
+#[test]
+fn alttp_the_copy_screen_speaks_again_when_the_cursor_moves() {
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let names = [(0x3C, LINK), (0x64, ZELDA)];
+    let first = copy_frame(0x03, 0, [true, true, false], &names);
+    let arrived = warm(&mut p, &first);
+    assert!(arrived.iter().any(|t| t == "File 1, LINK"), "{arrived:?}");
+
+    let held: Vec<String> = p
+        .on_frame(&first, WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(held.is_empty(), "holding still is silent: {held:?}");
+
+    // Down to Quit. The cursor key carries the submodule too, so the same cursor value on
+    // the source and target screens cannot be mistaken for holding still.
+    let moved: Vec<String> = p
+        .on_frame(&copy_frame(0x03, 3, [true, true, false], &names), WARM + 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(moved.iter().any(|t| t == "Quit"), "{moved:?}");
 }
