@@ -4608,14 +4608,62 @@ fn file_select_frame(at: u8, exists: [bool; 3]) -> Vec<u8> {
 }
 
 #[test]
+fn alttp_a_file_just_named_is_not_announced_as_empty() {
+    // Finishing the name picker calls ReturnToFileSelect, which sets submodule 1 —
+    // FileSelect_ReInitSaveFlagsAndEraseTriforce, which memsets the file-exists flags to
+    // zero. Submodules 2-4 run, and only submodule 5's own handler puts them back from
+    // SRAM. So the first submodule-5 frame the plugin sees still reads all files as empty,
+    // and a reading latched there can never correct itself: the file the player has just
+    // named is announced as empty until they move the cursor off it and back.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Naming file 1, then finishing.
+    p.on_frame(&name_entry_at_slot(26, 0, 4), 0);
+    p.on_frame(&name_entry_at_slot(26, 0, 4), 1);
+
+    // Back at the file select, cursor on the file just named, flags not yet restored.
+    let stale = name_in_save([false, false, false], [0x0B, 0x5F, 0x0D, 0x0A, 0x59, 0x59]);
+    let mut said: Vec<String> = p
+        .on_frame(&stale, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+
+    // FileSelect_Main has now run, so the flags are back and the name is there.
+    let settled = name_in_save([true, false, false], [0x0B, 0x5F, 0x0D, 0x0A, 0x59, 0x59]);
+    for f in 3..7 {
+        said.extend(p.on_frame(&settled, f).iter().map(|i| i.text.clone()));
+    }
+
+    assert!(
+        !said.iter().any(|t| t == "File 1, empty"),
+        "the file was just named, so it is never empty: {said:?}"
+    );
+    assert!(
+        said.iter().any(|t| t == "File 1, LINK"),
+        "and its name is what gets read: {said:?}"
+    );
+}
+
+/// Everything said over `n` frames of one unchanging RAM image, from a fresh plugin.
+///
+/// Needs more than two: the first on_frame returns early for want of a previous state, and
+/// the file select then spends MENU.SETTLE frames waiting for FileSelect_Main to put the
+/// file-exists flags and names in place before it trusts what it reads.
+fn speaks_over(r: &Registry, ram: &[u8], n: u64) -> Vec<String> {
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut out = Vec::new();
+    for f in 0..n {
+        out.extend(p.on_frame(ram, f).iter().map(|i| i.text.clone()));
+    }
+    out
+}
+
+#[test]
 fn alttp_the_file_select_reads_the_option_under_the_cursor() {
     let r = Registry::builtin();
-    let read = |at: u8, exists: [bool; 3]| -> Vec<String> {
-        let ram = file_select_frame(at, exists);
-        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-        p.on_frame(&ram, 0);
-        p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect()
-    };
+    let read = |at: u8, exists: [bool; 3]| speaks_over(&r, &file_select_frame(at, exists), 4);
 
     assert!(read(0, [false; 3]).iter().any(|t| t == "File 1, empty"));
     assert!(read(1, [false; 3]).iter().any(|t| t == "File 2, empty"));
@@ -4637,9 +4685,12 @@ fn alttp_a_menu_option_is_read_once_and_again_when_the_cursor_moves() {
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     let first = file_select_frame(0, [false; 3]);
     let second = file_select_frame(1, [false; 3]);
+    // Frame 0 returns early for want of a previous state, frame 1 is the settle frame the
+    // file select spends waiting for FileSelect_Main, so frame 2 is the first that speaks.
     p.on_frame(&first, 0);
+    p.on_frame(&first, 1);
     let said: Vec<String> = p
-        .on_frame(&first, 1)
+        .on_frame(&first, 2)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -4647,7 +4698,7 @@ fn alttp_a_menu_option_is_read_once_and_again_when_the_cursor_moves() {
 
     // Held still, it does not repeat.
     let again: Vec<String> = p
-        .on_frame(&first, 2)
+        .on_frame(&first, 3)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -4658,7 +4709,7 @@ fn alttp_a_menu_option_is_read_once_and_again_when_the_cursor_moves() {
 
     // Moved, it reads the new option.
     let moved: Vec<String> = p
-        .on_frame(&second, 3)
+        .on_frame(&second, 4)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -4848,9 +4899,7 @@ fn alttp_a_stored_name_decodes_through_the_same_table() {
     // identity range, which is exactly why the bug hid here — L, N and K decoded either way.
     let r = Registry::builtin();
     let ram = name_in_save([true, false, false], [0x0B, 0x5F, 0x0D, 0x0A, 0x59, 0x59]);
-    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    p.on_frame(&ram, 0);
-    let said: Vec<String> = p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect();
+    let said = speaks_over(&r, &ram, 4);
     assert!(
         said.iter().any(|t| t == "File 1, LINK"),
         "the file's name is read with the option: {said:?}"
@@ -4863,9 +4912,7 @@ fn alttp_a_name_from_the_far_end_of_the_grid_decodes() {
     // three of its five characters out there: Z 0x19, E 0x04, L 0x0B, D 0x03, A 0x00.
     let r = Registry::builtin();
     let ram = name_in_save([true, false, false], [0x19, 0x04, 0x0B, 0x03, 0x00, 0x59]);
-    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    p.on_frame(&ram, 0);
-    let said: Vec<String> = p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect();
+    let said = speaks_over(&r, &ram, 4);
     assert!(
         said.iter().any(|t| t == "File 1, ZELDA"),
         "the file's name is read with the option: {said:?}"
