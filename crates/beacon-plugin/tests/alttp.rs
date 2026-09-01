@@ -4588,3 +4588,88 @@ fn alttp_overworld_chain_waypoints_are_numbered_too() {
         "no route was computed, and the chain was drawn anyway"
     );
 }
+
+// ── Menus ───────────────────────────────────────────────────────────────────
+// A menu is unusable unheard: the whole content of the screen is which option the
+// cursor is on, and no tone can stand in for that.
+
+/// A file-select frame: module 0x01 submodule 0x05, cursor at `at`, and `exists`
+/// saying which of the three save files the screen found a signature for.
+fn file_select_frame(at: u8, exists: [bool; 3]) -> Vec<u8> {
+    let mut ram = vec![0u8; 128 * 1024];
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    set(0x7E0010, 0x01); // file select
+    set(0x7E0011, 0x05); // its main submodule
+    set(0x7E00C8, at); // the cursor
+    for (k, &e) in exists.iter().enumerate() {
+        set(0x7E00BF + k as u32 * 2, if e { 1 } else { 0 });
+    }
+    ram
+}
+
+#[test]
+fn alttp_the_file_select_reads_the_option_under_the_cursor() {
+    let r = Registry::builtin();
+    let read = |at: u8, exists: [bool; 3]| -> Vec<String> {
+        let ram = file_select_frame(at, exists);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect()
+    };
+
+    assert!(read(0, [false; 3]).iter().any(|t| t == "File 1, empty"));
+    assert!(read(1, [false; 3]).iter().any(|t| t == "File 2, empty"));
+    assert!(read(2, [false; 3]).iter().any(|t| t == "File 3, empty"));
+    // Cursor 3 enters the copy module and 4 the erase module (zelda3 FileSelect_Main).
+    assert!(read(3, [false; 3]).iter().any(|t| t == "Copy"));
+    assert!(read(4, [false; 3]).iter().any(|t| t == "Erase"));
+    // A file the screen found a signature for is not "empty", even with no name decoded.
+    let occupied = read(0, [true, false, false]);
+    assert!(
+        occupied.iter().any(|t| t == "File 1"),
+        "an existing file drops the empty qualifier: {occupied:?}"
+    );
+}
+
+#[test]
+fn alttp_a_menu_option_is_read_once_and_again_when_the_cursor_moves() {
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let first = file_select_frame(0, [false; 3]);
+    let second = file_select_frame(1, [false; 3]);
+    p.on_frame(&first, 0);
+    let said: Vec<String> = p
+        .on_frame(&first, 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(said.iter().any(|t| t == "File 1, empty"), "{said:?}");
+
+    // Held still, it does not repeat.
+    let again: Vec<String> = p
+        .on_frame(&first, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        !again.iter().any(|t| t.starts_with("File")),
+        "not repeated: {again:?}"
+    );
+
+    // Moved, it reads the new option.
+    let moved: Vec<String> = p
+        .on_frame(&second, 3)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(moved.iter().any(|t| t == "File 2, empty"), "{moved:?}");
+
+    // Critical, so a menu is never lost to the verbosity gate.
+    let one = p.on_frame(&file_select_frame(3, [false; 3]), 4);
+    assert!(
+        one.iter()
+            .any(|i| i.text == "Copy" && format!("{:?}", i.priority) == "Critical"),
+        "menus outrank the verbosity gate: {:?}",
+        one.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+}
