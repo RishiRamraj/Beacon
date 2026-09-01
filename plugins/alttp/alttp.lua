@@ -3502,13 +3502,9 @@ function MENU.file_name(k)
 end
 
 -- The name-entry picker (module 0x04, submodule 0x03). The highlighted cell is
--- REF.name_grid[var3 + var5 * 0x20] — the same lookup the game does to decide what a
--- button press types — and REF.name_chars turns its glyph code into something to say.
---
--- An unmapped code says its number rather than nothing. Only the capitals, the blank and
--- the two name-cursor controls are established; lowercase, digits and punctuation are
--- not, and a silent cell would be indistinguishable from a broken reader. Hearing "code
--- 42" is what lets the rest of the table be filled in by walking the grid once.
+-- REF.name_cells[var3 + var5 * 0x20], read by POSITION rather than by glyph code, because
+-- one code is two characters: 0x5F draws both capital I and lowercase l, so only where it
+-- sits says which is meant. Same lookup the game does to decide what a button press types.
 function MENU.name_entry_line()
   local at, row = mem.u8(0x7E0B10), mem.u8(0x7E0B15)
   if at == nil or row == nil then return nil end
@@ -3542,7 +3538,50 @@ function MENU.line(s)
   return (name and (label .. ", " .. name) or label), key
 end
 
+-- Cells that move the name cursor instead of typing. The game tells them apart by glyph
+-- code (0x5A back, 0x44 forward, 0x6F end) before it commits anything; here the label does.
+MENU.CONTROLS = { back = true, forward = true, ["end"] = true }
+
+-- The character just committed, or nil if nothing was.
+--
+-- The typed name itself is unreachable: the game writes it straight to SRAM, and `mem` is
+-- WRAM only. What is reachable is the name cursor, selectfile_var4 at $7E0B12 — the slot
+-- the next character lands in — and the game advances it on every commit. So a slot that
+-- moved means a button was pressed, and the cell under the grid cursor says what was typed.
+--
+-- `back` and `forward` move the slot too and type nothing, so the label has to be checked;
+-- otherwise walking the name cursor would announce whichever letter happened to be under
+-- the grid cursor. Reading the grid cursor on this frame is right rather than a frame late,
+-- because NameFile returns early once it has scrolled, so no frame both moves and commits.
+function MENU.name_selection()
+  local slot = mem.u8(0x7E0B12)
+  if slot == nil then return nil end
+  local was = MENU.slot
+  MENU.slot = slot
+  if was == nil or was == slot then return nil end
+  local at, row = mem.u8(0x7E0B10), mem.u8(0x7E0B15)
+  if at == nil or row == nil then return nil end
+  local cell = REF.name_cells[at + row * 0x20 + 1]
+  if cell == nil or cell == "" or MENU.CONTROLS[cell] then return nil end
+  return REF.name_spoken[cell] or cell
+end
+
 function MENU.update(s)
+  -- Forget the slot on the way out, or re-entering the picker reads the reset back to 0 as
+  -- a commit and speaks a character nobody typed.
+  local naming = s.module == 0x04 and mem.u8(0x7E0011) == 0x03
+  if not naming then MENU.slot = nil end
+
+  if naming then
+    local picked = MENU.name_selection()
+    if picked ~= nil then
+      -- Deliberately not touching MENU.said: the grid cursor has not moved, so the latch
+      -- still describes where it is and moving off this cell must still speak.
+      say(picked, { priority = "critical", category = "menu" })
+      return
+    end
+  end
+
   local line, key = MENU.line(s)
   if line == nil then MENU.said = nil; return end
   if MENU.said == key then return end

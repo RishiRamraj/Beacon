@@ -4685,6 +4685,107 @@ fn name_entry_frame(col: u8, row: u8) -> Vec<u8> {
     ram
 }
 
+/// The same screen with the name cursor (selectfile_var4) at a given slot. The game advances
+/// that slot on every commit, which is how a selection is detected at all.
+fn name_entry_at_slot(col: u8, row: u8, slot: u8) -> Vec<u8> {
+    let mut ram = name_entry_frame(col, row);
+    ram[wram_offset(0x7E0B12).unwrap()] = slot;
+    ram
+}
+
+#[test]
+fn alttp_selecting_a_character_speaks_it() {
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // Sit on capital A (col 26, row 0) long enough for the cursor line to be said and latched.
+    let holding = name_entry_at_slot(26, 0, 0);
+    p.on_frame(&holding, 0);
+    p.on_frame(&holding, 1);
+    let quiet: Vec<String> = p
+        .on_frame(&holding, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(quiet.is_empty(), "holding still is silent: {quiet:?}");
+
+    // Pressing A types it and advances the name cursor 0 -> 1, without moving the grid.
+    let typed: Vec<String> = p
+        .on_frame(&name_entry_at_slot(26, 0, 1), 3)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        typed.iter().any(|t| t == "A"),
+        "the typed character is spoken: {typed:?}"
+    );
+
+    // The grid cursor never moved, so its latch must be intact and moving off it still speaks.
+    let moved: Vec<String> = p
+        .on_frame(&name_entry_at_slot(27, 0, 1), 4)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        moved.iter().any(|t| t == "B"),
+        "the cursor still speaks after a commit: {moved:?}"
+    );
+}
+
+#[test]
+fn alttp_the_name_cursor_controls_type_nothing() {
+    // `back` and `forward` move the same slot a commit does, so a naive slot watch would
+    // announce whatever letter the grid cursor happened to be resting on.
+    let r = Registry::builtin();
+    for (col, row, label) in [(0u8, 3u8, "forward"), (11, 3, "back")] {
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        let holding = name_entry_at_slot(col, row, 2);
+        p.on_frame(&holding, 0);
+        p.on_frame(&holding, 1);
+        // Slot moves as the control does its job; nothing was typed, so nothing is said.
+        let after: Vec<String> = p
+            .on_frame(&name_entry_at_slot(col, row, 3), 2)
+            .iter()
+            .map(|i| i.text.clone())
+            .collect();
+        assert!(after.is_empty(), "{label} types nothing: {after:?}");
+    }
+}
+
+#[test]
+fn alttp_re_entering_the_picker_does_not_speak_a_phantom_character() {
+    // NameFile zeroes the slot on entry. Leaving with the cursor at slot 3 and coming back
+    // reads as 3 -> 0, which is a change, and would announce a character nobody typed.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let inside = name_entry_at_slot(26, 0, 3);
+    p.on_frame(&inside, 0);
+    p.on_frame(&inside, 1);
+    // Out to the file select, then back in with the slot reset and the cursor on a letter.
+    p.on_frame(&file_select_frame(0, [false, false, false]), 2);
+    let inside = name_entry_at_slot(26, 0, 0);
+    let back: Vec<String> = p
+        .on_frame(&inside, 3)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        back.iter().any(|t| t == "A"),
+        "re-entry announces the cursor: {back:?}"
+    );
+
+    // Both readings say "A", so the frame after is what tells them apart: the cursor line
+    // sets the latch and falls quiet, while a commit returns before setting it and repeats.
+    let held: Vec<String> = p
+        .on_frame(&inside, 4)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        held.is_empty(),
+        "that was the cursor, so holding still is silent: {held:?}"
+    );
+}
+
 #[test]
 fn alttp_the_name_picker_says_the_letter_under_the_cursor() {
     // The cell is REF.name_cells[col + row * 0x20], the same lookup the game does to
