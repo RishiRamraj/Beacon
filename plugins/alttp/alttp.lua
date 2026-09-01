@@ -544,6 +544,7 @@ TEXT = {
   ID = 0x7E1CF0, -- dialogue_message_index: which message is being shown
   MAX = 0x400, -- a bound, so a corrupt buffer cannot spin; messages are far shorter
   END = 0x7F,
+  read = {}, -- pages already spoken during this showing; see TEXT.update
 }
 
 -- The commands the renderer stops on to wait for the player, which is what makes a page a
@@ -711,8 +712,11 @@ function TEXT.update(s)
   end
 
   -- Track wherever the message is, but only speak while the box is up and the buffer is known
-  -- to match it.
-  if s.module ~= 0x0E or not TEXT.trust then return end
+  -- to match it. A closing box also ends a "showing": see TEXT.read.
+  if s.module ~= 0x0E or not TEXT.trust then
+    TEXT.read = {}
+    return
+  end
 
   if TEXT.spoke ~= nil then
     -- Said already. Nothing more until read_pos passes its break, which only happens when
@@ -733,9 +737,23 @@ function TEXT.update(s)
   TEXT.next_from = (stop > brk + 1) and stop or (brk + 1)
   if text ~= "" then
     TEXT.last = text
-    -- `always`: the game's own story is spoken at any verbosity. A low chatter setting trims
-    -- the guide's routine callouts, never the plot.
-    say(text, { priority = "navigation", category = "dialog", always = true })
+    -- Once per showing, however many times the game loads the message.
+    --
+    -- Module0E_Interface runs Sprite_Main while a box is up, and sprite code resets
+    -- messaging_module, sending the game back through Text_Initialize and so through
+    -- Text_LoadCharacterBuffer: the same message loaded again, read_pos back to 0, the box
+    -- never having closed. That is indistinguishable from a new message by read_pos alone,
+    -- and it read the text a second time — "You got the Lamp!" twice.
+    --
+    -- A closing box is what ends a showing, so this cannot silence a message deliberately
+    -- shown twice: reading a sign twice says it twice. Keyed on the words rather than the
+    -- page offsets, because a reload can renumber the pages but not change what they say.
+    if not TEXT.read[text] then
+      TEXT.read[text] = true
+      -- `always`: the game's own story is spoken at any verbosity. A low chatter setting trims
+      -- the guide's routine callouts, never the plot.
+      say(text, { priority = "navigation", category = "dialog", always = true })
+    end
   end
 end
 

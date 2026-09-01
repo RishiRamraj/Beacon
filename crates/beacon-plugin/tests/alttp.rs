@@ -5640,3 +5640,63 @@ fn alttp_a_swapped_buffer_is_noticed_without_read_pos_falling() {
         "the new buffer is read: {swapped:?}"
     );
 }
+
+#[test]
+fn alttp_a_page_is_not_read_twice_when_the_box_reloads_under_it() {
+    // Module0E_Interface runs Sprite_Main while a box is up, and sprite code resets
+    // messaging_module, which sends the game back through Text_Initialize and so through
+    // Text_LoadCharacterBuffer — the same message loaded again, read_pos back to 0, with the
+    // box never having closed. Read as a fresh message that plays the text a second time,
+    // which is what "You got the Lamp" doing it twice was.
+    let (buf, _) = dialog_buffer(&["You got the Lamp!", "<end>"]);
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let first = warm(&mut p, &dialog_frame(&buf, 8));
+    assert!(first.iter().any(|t| t == "You got the Lamp!"), "{first:?}");
+
+    // Reloaded under the same open box: read_pos to 0, then drawing again.
+    let mut again = Vec::new();
+    p.on_frame(&dialog_frame(&buf, 0), WARM);
+    for f in 1..5 {
+        again.extend(
+            p.on_frame(&dialog_frame(&buf, 2 + f as u16), WARM + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
+    assert!(
+        again.is_empty(),
+        "the same page is not read again: {again:?}"
+    );
+}
+
+#[test]
+fn alttp_a_box_shown_again_after_closing_is_read_again() {
+    // The limit of that: once the box has closed, showing the message again is a new showing
+    // and has to be read. Reading a sign twice should say it twice.
+    let (buf, _) = dialog_buffer(&["You got the Lamp!", "<end>"]);
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    warm(&mut p, &dialog_frame(&buf, 8));
+
+    // The box closes.
+    let mut closed = dialog_frame(&buf, 8);
+    closed[wram_offset(0x7E0010).unwrap()] = 0x07;
+    p.on_frame(&closed, WARM);
+
+    // And is opened again on the same message: a load, then drawing.
+    p.on_frame(&dialog_frame(&buf, 0), WARM + 1);
+    let mut reopened = Vec::new();
+    for f in 2..6 {
+        reopened.extend(
+            p.on_frame(&dialog_frame(&buf, 2 + f as u16), WARM + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
+    assert!(
+        reopened.iter().any(|t| t == "You got the Lamp!"),
+        "a second showing is read: {reopened:?}"
+    );
+}
