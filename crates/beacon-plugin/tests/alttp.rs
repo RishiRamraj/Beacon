@@ -4673,3 +4673,70 @@ fn alttp_a_menu_option_is_read_once_and_again_when_the_cursor_moves() {
         one.iter().map(|i| &i.text).collect::<Vec<_>>()
     );
 }
+
+/// A name-entry frame: module 0x04 submodule 0x03, picker cursor at (col, row).
+fn name_entry_frame(col: u8, row: u8) -> Vec<u8> {
+    let mut ram = vec![0u8; 128 * 1024];
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    set(0x7E0010, 0x04);
+    set(0x7E0011, 0x03);
+    set(0x7E0B10, col); // selectfile_var3
+    set(0x7E0B15, row); // selectfile_var5
+    ram
+}
+
+#[test]
+fn alttp_the_name_picker_says_the_letter_under_the_cursor() {
+    // The cell is REF.name_cells[col + row * 0x20], the same lookup the game does to
+    // decide what a button press types. Keyed by position rather than glyph code, because
+    // code 0x5F draws both capital I and lowercase l and only its place says which.
+    let r = Registry::builtin();
+    let says = |col: u8, row: u8| -> Vec<String> {
+        let ram = name_entry_frame(col, row);
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect()
+    };
+
+    // The three six-wide capital blocks, which the grid's own arithmetic predicted.
+    assert!(says(26, 0).iter().any(|t| t == "A"), "{:?}", says(26, 0));
+    assert!(says(31, 0).iter().any(|t| t == "F"));
+    assert!(says(26, 1).iter().any(|t| t == "K"));
+    assert!(says(31, 2).iter().any(|t| t == "Z"));
+    // The gap-fillers at the left edge.
+    assert!(says(0, 0).iter().any(|t| t == "G"));
+    assert!(says(3, 1).iter().any(|t| t == "T"));
+    // Lowercase, digits, punctuation.
+    assert!(says(6, 0).iter().any(|t| t == "a"));
+    assert!(says(11, 2).iter().any(|t| t == "z"));
+    assert!(says(18, 1).iter().any(|t| t == "5"));
+    assert!(says(18, 2).iter().any(|t| t == "!"));
+    // The same glyph, read by position: capital I on row 0, lowercase l on row 1.
+    assert!(says(2, 0).iter().any(|t| t == "I"), "{:?}", says(2, 0));
+    assert!(says(7, 1).iter().any(|t| t == "l"), "{:?}", says(7, 1));
+    // And the controls, named for what they do to the name cursor.
+    assert!(says(0, 3).iter().any(|t| t == "forward"));
+    assert!(says(11, 3).iter().any(|t| t == "back"));
+    assert!(says(4, 0).iter().any(|t| t == "space"));
+}
+
+#[test]
+fn alttp_a_stored_name_decodes_through_the_same_table() {
+    // A saved name is six characters staged into the VRAM upload buffer as code + 0x1800.
+    // "LINK" plus two blanks: L is 0x0B, I is 0x5F, N is 0x0D, K is 0x0A, blank is 0x59.
+    let r = Registry::builtin();
+    let mut ram = file_select_frame(0, [true, false, false]);
+    for (i, code) in [0x0Bu16, 0x5F, 0x0D, 0x0A, 0x59, 0x59].iter().enumerate() {
+        let t = code + 0x1800;
+        let at = 0x7E1002 + 8 + i as u32 * 2;
+        ram[wram_offset(at).unwrap()] = (t & 0xFF) as u8;
+        ram[wram_offset(at + 1).unwrap()] = (t >> 8) as u8;
+    }
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&ram, 0);
+    let said: Vec<String> = p.on_frame(&ram, 1).iter().map(|i| i.text.clone()).collect();
+    assert!(
+        said.iter().any(|t| t == "File 1, LINK"),
+        "the file's name is read with the option: {said:?}"
+    );
+}

@@ -3475,17 +3475,11 @@ end
 -- So the characters are read back off what the game is about to draw. Only staged for
 -- files that exist, which is why the caller checks first.
 --
--- What is NOT yet known is how a character code maps to a letter. It is not the dialogue
--- encoding: the text decoder's ALPHABET is indexed by message character, and running the
--- name-entry grid's codes through it produces nonsense (zelda3 stores a picked character
--- as (t & 0xFFF0) * 2 + (t & 0xF), and those values land on lowercase letters and
--- punctuation where the grid plainly shows a row of capitals). Rather than speak a wrong
--- name, MENU.name_codes hands the raw codes back so the table can be built from a file
--- with a known name, and file_name stays nil until it is.
+-- REF.name_chars turns a code into a character. It is not the dialogue encoding — the
+-- text decoder's ALPHABET is a different space entirely — so it was read out of the game
+-- by walking the name-entry picker and recording what each cell shows.
 MENU.NAME_OFFSETS = { 8, 0x5C, 0xB0 }
 MENU.NAME_LEN = 6
-MENU.CHARS = nil -- code -> letter, once established empirically
-
 function MENU.name_codes(k)
   local off = MENU.NAME_OFFSETS[k + 1]
   if off == nil then return nil end
@@ -3499,17 +3493,35 @@ function MENU.name_codes(k)
 end
 
 function MENU.file_name(k)
-  if MENU.CHARS == nil then return nil end
   local codes = MENU.name_codes(k)
   if codes == nil then return nil end
   local out = {}
-  for _, c in ipairs(codes) do out[#out + 1] = MENU.CHARS[c] or "" end
+  for _, c in ipairs(codes) do out[#out + 1] = REF.name_chars[c] or "" end
   local name = table.concat(out):gsub("%s+$", "")
   return name ~= "" and name or nil
 end
 
+-- The name-entry picker (module 0x04, submodule 0x03). The highlighted cell is
+-- REF.name_grid[var3 + var5 * 0x20] — the same lookup the game does to decide what a
+-- button press types — and REF.name_chars turns its glyph code into something to say.
+--
+-- An unmapped code says its number rather than nothing. Only the capitals, the blank and
+-- the two name-cursor controls are established; lowercase, digits and punctuation are
+-- not, and a silent cell would be indistinguishable from a broken reader. Hearing "code
+-- 42" is what lets the rest of the table be filled in by walking the grid once.
+function MENU.name_entry_line()
+  local at, row = mem.u8(0x7E0B10), mem.u8(0x7E0B15)
+  if at == nil or row == nil then return nil end
+  local said = REF.name_cells[at + row * 0x20 + 1]
+  if said == nil or said == "" then return nil end
+  return said
+end
+
 -- What the cursor is on, as a spoken line, or nil if this is not a menu we read.
 function MENU.line(s)
+  if s.module == 0x04 and mem.u8(0x7E0011) == 0x03 then
+    return MENU.name_entry_line()
+  end
   if s.module ~= 0x01 or mem.u8(0x7E0011) ~= 0x05 then return nil end
   local at = mem.u8(0x7E00C8)
   if at == nil then return nil end
