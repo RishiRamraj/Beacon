@@ -45,6 +45,10 @@ pub struct App {
     /// Handed to the adapter so it can wake the event loop when assistive technology
     /// asks for the tree or requests an action.
     access_proxy: EventLoopProxy<AccessEvent>,
+    /// The platform's own menu bar, where the platform has one. Kept alive because dropping
+    /// it takes the menu with it.
+    #[cfg(any(windows, target_os = "macos"))]
+    native: Option<crate::native::NativeMenu>,
     /// The menu as last published, so the tree is only pushed when it changes. Compared
     /// rather than diffed because a tree update is cheap and a comparison is cheaper than
     /// working out what moved.
@@ -114,6 +118,8 @@ impl App {
             map_shown: false,
             access: None,
             access_proxy,
+            #[cfg(any(windows, target_os = "macos"))]
+            native: None,
             published: None,
         }
     }
@@ -354,6 +360,39 @@ impl ApplicationHandler<AccessEvent> for App {
             }
         };
 
+        // The platform's own menu bar, built from the same entries the spoken menu walks.
+        //
+        // Once, at startup. Its slot labels therefore say what was true then — saving into an
+        // empty slot leaves the bar calling it empty until Beacon restarts. The spoken menu
+        // has no such gap because it builds each level as it is entered; closing this one
+        // means holding the item handles and calling set_text as occupancy changes, which is
+        // not worth guessing at before anyone has seen the bar work.
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let tree = crate::menu::full(&self.session.menu_context());
+            #[cfg(windows)]
+            {
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                match window.window_handle().map(|h| h.as_raw()) {
+                    Ok(RawWindowHandle::Win32(win32)) => {
+                        // Safe: the handle came from the window that is alive right here.
+                        match unsafe { crate::native::NativeMenu::attach(win32.hwnd.get(), &tree) }
+                        {
+                            Ok(menu) => self.native = Some(menu),
+                            Err(e) => eprintln!("could not attach the menu bar: {e}"),
+                        }
+                    }
+                    Ok(other) => eprintln!("no menu bar: unexpected window handle {other:?}"),
+                    Err(e) => eprintln!("no menu bar: {e}"),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            match crate::native::NativeMenu::attach_app(&tree) {
+                Ok(menu) => self.native = Some(menu),
+                Err(e) => eprintln!("could not install the application menu: {e}"),
+            }
+        }
+
         // Before the surface, so the adapter sees the window at its initial size.
         self.access = Some(Adapter::with_event_loop_proxy(
             event_loop,
@@ -479,6 +518,18 @@ impl ApplicationHandler<AccessEvent> for App {
         if self.session.in_config() || self.session.in_menu() {
             self.input.clear_keyboard();
         }
+        // Anything chosen from the platform's own menu. It does its own navigating and
+        // reports only what was picked, which lands on the same verbs a key does.
+        #[cfg(any(windows, target_os = "macos"))]
+        if let Some(native) = self.native.as_ref() {
+            while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+                if let Some(act) = native.act_for(&event.id) {
+                    self.session.perform(act);
+                }
+            }
+            self.honour_quit(event_loop);
+        }
+
         // After input and before frames: the menu's state is settled by now, whether it
         // moved by key, by pad, or by an agent over the control socket.
         self.publish_access();
