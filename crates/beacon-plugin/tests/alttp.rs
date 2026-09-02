@@ -6359,6 +6359,19 @@ fn choice_buffer() -> Vec<u8> {
     buf
 }
 
+/// The cursor-only message the game loads to move the marker, byte for byte as observed live:
+/// a Speed command, line 3, six blanks, line 2, four blanks, the cursor, then the Choose.
+fn cursor_only_message() -> Vec<u8> {
+    let mut buf = vec![0x7A, 0x00, TEXT_LINE3];
+    buf.extend(std::iter::repeat(0x59).take(6));
+    buf.push(TEXT_LINE2);
+    buf.extend(std::iter::repeat(0x59).take(4));
+    buf.push(0x44); // the cursor glyph
+    buf.push(TEXT_CHOOSE);
+    buf.push(TEXT_END);
+    buf
+}
+
 /// The choice frame with a given selection in choice_in_multiselect_box.
 fn choice_frame(buf: &[u8], pos: u16, choice: u8) -> Vec<u8> {
     let mut ram = dialog_frame(buf, pos);
@@ -6396,12 +6409,7 @@ fn alttp_moving_between_options_reads_the_one_moved_to() {
 
     // Down to the second option. The game reloads a cursor-only message to move the marker, so the
     // options are no longer in the buffer — they have to have been remembered.
-    let mut cursor_only = vec![TEXT_LINE2];
-    cursor_only.extend("     ".chars().map(text_byte));
-    cursor_only.push(TEXT_LINE3);
-    cursor_only.extend("  >".chars().map(text_byte));
-    cursor_only.push(TEXT_CHOOSE);
-    cursor_only.push(TEXT_END);
+    let cursor_only = cursor_only_message();
 
     let moved: Vec<String> = p
         .on_frame(&choice_frame(&cursor_only, 0, 1), WARM)
@@ -6436,10 +6444,7 @@ fn alttp_a_cursor_only_message_says_nothing_of_its_own() {
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     warm(&mut p, &choice_frame(&buf, brk, 0));
 
-    let mut cursor_only = vec![TEXT_LINE3];
-    cursor_only.extend("  >".chars().map(text_byte));
-    cursor_only.push(TEXT_CHOOSE);
-    cursor_only.push(TEXT_END);
+    let cursor_only = cursor_only_message();
 
     // Loaded with the selection unchanged: nothing to announce at all.
     let quiet = read_page(&mut p, &choice_frame(&cursor_only, 4, 0), WARM);
@@ -6457,5 +6462,43 @@ fn alttp_a_cursor_only_message_says_nothing_of_its_own() {
     assert!(
         moved.iter().any(|t| t == "Not at all"),
         "the options were not lost: {moved:?}"
+    );
+}
+
+#[test]
+fn alttp_moving_without_the_options_still_says_which_one() {
+    // Arriving part way through a choice — reloading the plugin while one is on screen — means
+    // never having seen the page that carries the options, and they are not in the buffer by then.
+    // The cursor still moves, and answering a keypress with silence reads as the reader having
+    // stopped working. So it says which option, even when it cannot say what it is called.
+    let cursor = cursor_only_message();
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Straight into the cursor-only message: no page with options has ever been read.
+    let quiet = warm(&mut p, &choice_frame(&cursor, 4, 0));
+    assert!(
+        !quiet.iter().any(|t| t.contains(">")),
+        "the marker itself is still not spoken: {quiet:?}"
+    );
+
+    let moved: Vec<String> = p
+        .on_frame(&choice_frame(&cursor, 4, 1), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        moved.iter().any(|t| t == "Option 2"),
+        "the move is answered: {moved:?}"
+    );
+
+    let back: Vec<String> = p
+        .on_frame(&choice_frame(&cursor, 4, 0), WARM + 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        back.iter().any(|t| t == "Option 1"),
+        "and so is moving back: {back:?}"
     );
 }
