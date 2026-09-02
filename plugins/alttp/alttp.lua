@@ -627,7 +627,7 @@ function TEXT.next_break(from)
     local b = mem.u8(TEXT.BUFFER + i)
     if b == nil then return nil end
     if TEXT.BREAKS[b] then return i end
-    i = i + ((b >= 0x67 and b <= 0x7E) and (CMD_LENGTHS[b - 0x67 + 1] or 1) or 1)
+    i = i + TEXT.step(b)
   end
   return nil
 end
@@ -640,9 +640,16 @@ function TEXT.page_at(pos)
     local b = mem.u8(TEXT.BUFFER + i)
     if b == nil then break end
     if TEXT.BREAKS[b] then from = i + 1 end
-    i = i + ((b >= 0x67 and b <= 0x7E) and (CMD_LENGTHS[b - 0x67 + 1] or 1) or 1)
+    i = i + TEXT.step(b)
   end
   return from
+end
+
+-- How far one byte of the buffer advances the read position: a command carries its parameter with
+-- it. Every walk over the buffer needs this, and a copy of it that fell out of step with the
+-- others would take a parameter byte for a command.
+function TEXT.step(b)
+  return (b >= 0x67 and b <= 0x7E) and (CMD_LENGTHS[b - 0x67 + 1] or 1) or 1
 end
 
 -- ── Choices ────────────────────────────────────────────────────────────────
@@ -674,7 +681,7 @@ function TEXT.lines(from, brk)
   while i < brk and i < TEXT.MAX do
     local b = mem.u8(TEXT.BUFFER + i)
     if b == nil then break end
-    local step = (b >= 0x67 and b <= 0x7E) and (CMD_LENGTHS[b - 0x67 + 1] or 1) or 1
+    local step = TEXT.step(b)
     if b == 0x73 or b == 0x74 or b == 0x75 or b == 0x76 then starts[#starts + 1] = i + step end
     i = i + step
   end
@@ -683,6 +690,42 @@ function TEXT.lines(from, brk)
     out[#out + 1] = TEXT.decode(starts[k], (k < #starts) and starts[k + 1] or brk)
   end
   return out
+end
+
+-- The options of the message that the cursor-only message was written over.
+--
+-- That message is seventeen bytes, and Text_LoadCharacterBuffer writes only as far as a message
+-- needs — so the prompt it replaced is still sitting behind it, options and all. This is the way
+-- back to the names when the page carrying them was never read, which is what arriving part way
+-- through a choice means, and reloading the plugin does exactly that.
+function TEXT.recover()
+  -- Where the message on top ends.
+  local i, top = 0, nil
+  while i < TEXT.MAX do
+    local b = mem.u8(TEXT.BUFFER + i)
+    if b == nil then return nil end
+    if b == TEXT.END then
+      top = i
+      break
+    end
+    i = i + TEXT.step(b)
+  end
+  if top == nil then return nil end
+
+  -- The message underneath runs from there to its own terminator, and its LAST Choose is the one
+  -- the options belong to. Bounded by that terminator, so older leftovers further back cannot
+  -- offer up a stray Choose of their own.
+  local last = nil
+  i = top + 1
+  while i < TEXT.MAX do
+    local b = mem.u8(TEXT.BUFFER + i)
+    if b == nil or b == TEXT.END then break end
+    if TEXT.CHOOSE[b] then last = i end
+    i = i + TEXT.step(b)
+  end
+  if last == nil then return nil end
+  local _, options = TEXT.choices(TEXT.page_at(last), last)
+  return options
 end
 
 -- The question and the options of a choice page, or nil if it holds no options — which is what a
@@ -844,6 +887,10 @@ function TEXT.update(s)
       -- on screen, though, which is enough to start watching the selection even with no names for
       -- it — the case where the page carrying them was never seen.
       TEXT.choice = TEXT.choice or mem.u8(TEXT.CHOICE) or 0
+      -- Short-circuited on purpose: when the options are already known this must not walk a
+      -- kilobyte of buffer every frame. It would find the same prompt sitting behind the cursor
+      -- message and reach the same answer, so the ordering is about cost, not correctness.
+      TEXT.options = TEXT.options or TEXT.recover()
       text = ""
     else
       TEXT.options = options
