@@ -709,7 +709,7 @@ function TEXT.update(s)
     local b = mem.u8(TEXT.BUFFER + TEXT.spoke)
     if b ~= nil and not TEXT.BREAKS[b] then
       TEXT.msg, TEXT.from, TEXT.spoke, TEXT.next_from, TEXT.last = id, nil, nil, nil, nil
-      TEXT.trust = false
+      TEXT.pending, TEXT.trust = nil, false
     end
   end
 
@@ -757,6 +757,30 @@ function TEXT.update(s)
   -- The next page starts after this one's break — or after the word that ran past it, when a
   -- word was split across it, so the half already spoken is not said again.
   TEXT.next_from = (stop > brk + 1) and stop or (brk + 1)
+
+  -- A page is spoken only once its text has held still for a frame, which covers two things.
+  --
+  -- The buffer can be caught MID-FILL. Text_LoadCharacterBuffer writes the message a piece at
+  -- a time and the terminator last of all, and an NMI lands wherever it lands, so a frame can show
+  -- a message half written over the one before it — with no terminator yet, the decode runs
+  -- straight on into the old text. That is the uncle's line coming out as "Don't leave tle. My
+  -- name is Zelda.", his message as far as it had been written plus the tail of Zelda's.
+  --
+  -- And read_pos can be stale while the buffer is new, because Text_LoadCharacterBuffer fills the
+  -- buffer before it zeroes read_pos. Locating a page from a position that belongs to the message
+  -- before landed in the LAST page and spoke that first: the map, the boomerang and the big key
+  -- all came out backwards. While that is going on the page under consideration keeps moving, so
+  -- its text never holds still either.
+  --
+  -- Both are the same shape — a buffer being read while something about it is still in flux — and
+  -- a settled buffer is stable by definition, so one frame of waiting covers both. It costs 16ms
+  -- nobody can hear.
+  if TEXT.pending ~= text then
+    TEXT.pending = text
+    TEXT.spoke, TEXT.next_from = nil, nil -- not settled yet: this page is still to be read
+    return
+  end
+
   if text ~= "" then
     TEXT.last = text
     -- Once per showing, however many times the game loads the message.
