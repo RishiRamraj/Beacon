@@ -134,6 +134,39 @@ impl App {
         }
     }
 
+    /// Translates a keyboard key, while the menu is open, to a session call.
+    ///
+    /// Nothing here binds or falls through to the game: a key with no meaning in the
+    /// menu is answered rather than swallowed, because a keypress that does nothing
+    /// and says nothing is indistinguishable from the menu having crashed.
+    fn menu_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Escape => self.session.menu_close(),
+            KeyCode::ArrowDown => self.session.menu_navigate(1),
+            KeyCode::ArrowUp => self.session.menu_navigate(-1),
+            KeyCode::ArrowRight | KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.session.menu_choose()
+            }
+            KeyCode::ArrowLeft | KeyCode::Backspace => self.session.menu_back(),
+            _ => self
+                .session
+                .say_now("Up and down to move, right to choose, left to go back."),
+        }
+    }
+
+    /// Translates a gamepad button, while the menu is open, so the whole menu works
+    /// from a controller alone — including reaching the ROM list and quitting.
+    fn menu_pad(&mut self, name: &str) {
+        match name {
+            "Pad:DPadDown" => self.session.menu_navigate(1),
+            "Pad:DPadUp" => self.session.menu_navigate(-1),
+            "Pad:DPadRight" | "Pad:South" => self.session.menu_choose(),
+            "Pad:DPadLeft" | "Pad:East" => self.session.menu_back(),
+            "Pad:Start" => self.session.menu_close(),
+            _ => {}
+        }
+    }
+
     /// Scales the emulator framebuffer into the window, nearest neighbour.
     fn present(&mut self) {
         let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
@@ -268,6 +301,12 @@ impl ApplicationHandler for App {
                         if pressed {
                             self.config_key(code);
                         }
+                    } else if self.session.in_menu() {
+                        if pressed {
+                            self.menu_key(code);
+                            // Exit is a menu entry, so quitting can come from here.
+                            self.honour_quit(event_loop);
+                        }
                     } else {
                         self.input.on_key(code, pressed);
                         // Actions fire on press, and never for a game key, so the
@@ -302,6 +341,8 @@ impl ApplicationHandler for App {
         for name in self.input.poll_gamepad() {
             if self.session.in_config() {
                 self.config_pad(name);
+            } else if self.session.in_menu() {
+                self.menu_pad(name);
             } else if !input::is_game_pad_name(name) {
                 // Game buttons are held state, handled by the frame loop; only
                 // the pad's extra buttons resolve to actions.
@@ -313,7 +354,7 @@ impl ApplicationHandler for App {
         // While configuring, keyboard key-ups route to the modal rather than to
         // button state, so held bits would otherwise linger. Zero them, so a key
         // held when the modal opened does not stick down on resume.
-        if self.session.in_config() {
+        if self.session.in_config() || self.session.in_menu() {
             self.input.clear_keyboard();
         }
         self.session.set_held_buttons(self.input.buttons());

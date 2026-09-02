@@ -36,6 +36,8 @@ pub enum Action {
     ToggleMap,
     /// Open the input configuration modal.
     OpenInputConfig,
+    /// Open the menu.
+    OpenMenu,
     /// Run a plugin command by id (scan, where, status, or a custom one).
     Command(String),
 }
@@ -63,6 +65,7 @@ impl Action {
             "frame_advance" => Action::FrameAdvance,
             "toggle_map" => Action::ToggleMap,
             "bind" => Action::OpenInputConfig,
+            "menu" => Action::OpenMenu,
             _ => return None,
         })
     }
@@ -81,7 +84,7 @@ pub struct Bindable {
 ///
 /// Ordered by how often they are reached for, not alphabetically: a player
 /// scrolling the list hears the common ones first.
-const BUILTIN: [(&str, &str); 13] = [
+const BUILTIN: [(&str, &str); 14] = [
     ("save_state", "Save state"),
     ("load_state", "Load state"),
     ("next_slot", "Next save slot"),
@@ -92,6 +95,7 @@ const BUILTIN: [(&str, &str); 13] = [
     ("toggle_map", "Show or hide the map"),
     ("cycle_verbosity", "Cycle verbosity"),
     ("repeat_last", "Repeat last announcement"),
+    ("menu", "Open menu"),
     ("bind", "Open input configuration"),
     ("quit", "Quit"),
     ("command:scan", "Scan, describe surroundings"),
@@ -155,6 +159,7 @@ mod tests {
             Action::from_id("command:coordinates"),
             Some(Action::Command("coordinates".to_string()))
         );
+        assert_eq!(Action::from_id("menu"), Some(Action::OpenMenu));
         assert_eq!(Action::from_id("no_such_action"), None);
     }
 
@@ -167,5 +172,8 @@ mod tests {
         assert!(ids.contains(&"command:where"));
         assert!(ids.contains(&"command:status"));
         assert!(ids.contains(&"frame_advance"));
+        // The menu is bindable like anything else, so a controller-only player can
+        // reach it without a keyboard.
+        assert!(ids.contains(&"menu"));
     }
 }

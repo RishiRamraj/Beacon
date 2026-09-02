@@ -391,6 +391,30 @@ fn dispatch(s: &mut Session, name: &str, args: &Value) -> Result<Value, String> 
             Ok(json!({ "spoken": s.take_speech() }))
         }
 
+        // The menu, driven the same way: every call speaks, and what it speaks is
+        // the whole of what a player gets, so an agent reads exactly what they hear.
+        "open_menu" => {
+            s.open_menu();
+            Ok(json!({ "spoken": s.take_speech() }))
+        }
+        "menu_navigate" => {
+            let delta = arg_i64(args, "delta").unwrap_or(1) as i32;
+            s.menu_navigate(delta);
+            Ok(json!({ "spoken": s.take_speech() }))
+        }
+        "menu_choose" => {
+            s.menu_choose();
+            Ok(json!({ "spoken": s.take_speech() }))
+        }
+        "menu_back" => {
+            s.menu_back();
+            Ok(json!({ "spoken": s.take_speech() }))
+        }
+        "menu_close" => {
+            s.menu_close();
+            Ok(json!({ "spoken": s.take_speech() }))
+        }
+
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -576,6 +600,27 @@ fn tool_defs() -> Vec<ToolDef> {
         ),
         ToolDef::new("config_clear", "Clear the selected action's bindings.", none()),
         ToolDef::new("config_close", "Close the input configuration and resume.", none()),
+        ToolDef::new(
+            "open_menu",
+            "Open the menu, as the player would. Returns the spoken help and first entry.",
+            none(),
+        ),
+        ToolDef::new(
+            "menu_navigate",
+            "Move the menu selection by delta (default 1); returns the entry landed on, its place in the list, and whether it is a submenu.",
+            obj(json!({ "delta": { "type": "integer" } }), &[]),
+        ),
+        ToolDef::new(
+            "menu_choose",
+            "Choose the selected menu entry: enters a submenu, or carries out its action and closes the menu.",
+            none(),
+        ),
+        ToolDef::new(
+            "menu_back",
+            "Go back a menu level, or close the menu if already at the top.",
+            none(),
+        ),
+        ToolDef::new("menu_close", "Close the menu and resume play.", none()),
     ]
 }
 
