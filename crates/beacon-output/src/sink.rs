@@ -384,3 +384,154 @@ mod tests {
         assert!(fan.speak(&utter("x", false)).is_err());
     }
 }
+
+/// Speaks through the screen reader the player is already running, on Windows.
+///
+/// The same principle as the speech-dispatcher sink, which exists so that Orca's user gets
+/// their own configured voice and rate rather than Beacon's idea of one. Windows has no
+/// speech-dispatcher; the equivalent is the screen reader itself, which is where a blind
+/// Windows user's voice, rate and punctuation settings live.
+///
+/// Two libraries are tried, in order:
+///
+/// - **Tolk**, a shim that speaks through NVDA, JAWS or Window-Eyes if one is running and
+///   falls back to SAPI if none is. Preferred because that fallback is the only way a player
+///   with no screen reader hears anything.
+/// - **NVDA's own controller client**, for a player who has NVDA but not Tolk.
+///
+/// Both are DLLs that ship beside the executable rather than link-time dependencies, so
+/// they are loaded by name at runtime and their absence is not an error — it just means this
+/// sink is unavailable and Beacon falls back to the JSON stream. That is also why this
+/// declares the three kernel32 entry points it needs by hand instead of taking a dependency:
+/// three `extern "system"` lines against a stable ABI is less to justify than a crate.
+///
+/// UNTESTED. Written on Linux, where it cannot run, and type-checked by cross-compiling.
+/// Nothing here has spoken a word.
+#[cfg(windows)]
+pub struct ScreenReaderSink {
+    /// Kept so the library stays loaded for the process's life; never called again.
+    _library: Handle,
+    speak: SpeakFn,
+    silence: SilenceFn,
+    name: &'static str,
+}
+
+#[cfg(windows)]
+type Handle = *mut core::ffi::c_void;
+
+/// `Tolk_Output(text, interrupt) -> bool`, or `nvdaController_speakText(text) -> u32`.
+///
+/// The two differ in arity, so each is wrapped in a closure-free enum-free way: the loader
+/// stores a small adapter rather than the raw pointer.
+#[cfg(windows)]
+enum SpeakFn {
+    /// Tolk: takes the interrupt flag itself.
+    Tolk(unsafe extern "system" fn(*const u16, bool) -> bool),
+    /// NVDA: cancelling is a separate call.
+    Nvda(unsafe extern "system" fn(*const u16) -> u32),
+}
+
+#[cfg(windows)]
+enum SilenceFn {
+    Tolk(unsafe extern "system" fn()),
+    Nvda(unsafe extern "system" fn() -> u32),
+}
+
+#[cfg(windows)]
+extern "system" {
+    fn LoadLibraryW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *const core::ffi::c_void;
+}
+
+/// A NUL-terminated wide string, as every Windows text API wants.
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+impl ScreenReaderSink {
+    /// Loads whichever library is present, or fails if neither is.
+    pub fn connect() -> io::Result<Self> {
+        unsafe {
+            // Tolk first: it covers the screen readers AND falls back to SAPI, so it is the
+            // only option that speaks for a player without a screen reader at all.
+            let tolk = LoadLibraryW(wide("Tolk.dll").as_ptr());
+            if !tolk.is_null() {
+                let load = GetProcAddress(tolk, c"Tolk_Load".as_ptr() as *const u8);
+                let out = GetProcAddress(tolk, c"Tolk_Output".as_ptr() as *const u8);
+                let silence = GetProcAddress(tolk, c"Tolk_Silence".as_ptr() as *const u8);
+                if !load.is_null() && !out.is_null() && !silence.is_null() {
+                    // Tolk_Load picks the screen reader; without it Tolk_Output says nothing.
+                    let load: unsafe extern "system" fn() = core::mem::transmute(load);
+                    load();
+                    return Ok(ScreenReaderSink {
+                        _library: tolk,
+                        speak: SpeakFn::Tolk(core::mem::transmute(out)),
+                        silence: SilenceFn::Tolk(core::mem::transmute(silence)),
+                        name: "Tolk",
+                    });
+                }
+            }
+
+            let nvda = LoadLibraryW(wide("nvdaControllerClient64.dll").as_ptr());
+            if !nvda.is_null() {
+                let speak = GetProcAddress(nvda, c"nvdaController_speakText".as_ptr() as *const u8);
+                let cancel =
+                    GetProcAddress(nvda, c"nvdaController_cancelSpeech".as_ptr() as *const u8);
+                if !speak.is_null() && !cancel.is_null() {
+                    return Ok(ScreenReaderSink {
+                        _library: nvda,
+                        speak: SpeakFn::Nvda(core::mem::transmute(speak)),
+                        silence: SilenceFn::Nvda(core::mem::transmute(cancel)),
+                        name: "NVDA",
+                    });
+                }
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no Tolk.dll or nvdaControllerClient64.dll beside the executable",
+        ))
+    }
+}
+
+#[cfg(windows)]
+impl SpeechSink for ScreenReaderSink {
+    fn speak(&mut self, utterance: &Utterance) -> io::Result<()> {
+        let text = wide(&utterance.text);
+        unsafe {
+            match self.speak {
+                SpeakFn::Tolk(f) => {
+                    f(text.as_ptr(), utterance.interrupt);
+                }
+                SpeakFn::Nvda(f) => {
+                    // NVDA has no interrupt flag, so cancelling first is what makes an
+                    // interrupting utterance interrupt.
+                    if utterance.interrupt {
+                        self.cancel()?;
+                    }
+                    f(text.as_ptr());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn cancel(&mut self) -> io::Result<()> {
+        unsafe {
+            match self.silence {
+                SilenceFn::Tolk(f) => f(),
+                SilenceFn::Nvda(f) => {
+                    f();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}

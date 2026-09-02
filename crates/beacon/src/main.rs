@@ -175,6 +175,28 @@ fn build_speech(settings: &Settings, args: &Args) -> Fanout {
         }
     }
 
+    // Windows has no speech-dispatcher. The equivalent is the player's screen reader, which
+    // is where their voice, rate and punctuation settings live — so Beacon speaks through it
+    // rather than choosing a voice of its own, the same principle as inheriting Orca's.
+    //
+    // Both libraries are DLLs that ship beside the executable, so a missing one is ordinary
+    // rather than an error: Beacon says so and carries on with the JSON stream, which is
+    // exactly what that stream is the insurance policy for.
+    #[cfg(windows)]
+    {
+        use beacon_output::sink::ScreenReaderSink;
+        match ScreenReaderSink::connect() {
+            Ok(sink) => {
+                eprintln!("speech: {}", sink.name());
+                fanout.push(Box::new(sink));
+            }
+            Err(e) => eprintln!(
+                "speech unavailable: {e}\n  (put Tolk.dll, or nvdaControllerClient64.dll, \
+                 beside beacon.exe)"
+            ),
+        }
+    }
+
     fanout
 }
 
