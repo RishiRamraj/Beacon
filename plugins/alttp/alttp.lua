@@ -713,7 +713,12 @@ function TEXT.update(s)
 
   -- Track wherever the message is, but only speak while the box is up and the buffer is known
   -- to match it. A closing box also ends a "showing": see TEXT.read.
-  if s.module ~= 0x0E or not TEXT.trust then
+  --
+  -- Module 0x0E is not only text boxes — kMessagingSubmodules dispatches on submodule_index,
+  -- and 1 is Hud_Module_Run, the pause screen. The buffer there holds whatever the last box
+  -- left in it, so the pause screen has to be excluded by name or opening it can read the
+  -- previous message aloud.
+  if s.module ~= 0x0E or mem.u8(0x7E0011) == 0x01 or not TEXT.trust then
     TEXT.read = {}
     return
   end
@@ -755,6 +760,83 @@ function TEXT.update(s)
       say(text, { priority = "navigation", category = "dialog", always = true })
     end
   end
+end
+
+-- ── The pause screen ────────────────────────────────────────────────────────
+-- Name the item the cursor is on, on every press of a direction.
+--
+-- Module 0x0E submodule 1, kMessagingSubmodules[1] being Hud_Module_Run, with the HUD running
+-- a state machine of its own in overworld_map_state. Only state 4, Hud_NormalMenu, is the item
+-- grid being navigated; the earlier states are building it, and hud_cur_item is not settled
+-- until Hud_Init has picked a starting item.
+PAUSE = {
+  STATE = 0x7E0200, -- overworld_map_state, the HUD's own step
+  GRID = 4, -- Hud_NormalMenu
+  ITEM = 0x7E0202, -- hud_cur_item: 1-20 across the grid, 0 when nothing is owned
+  OWNED = 0x7EF340, -- link_item_bow; slot n's own byte is this + (n - 1)
+  PRESS = 0x7E00F4, -- filtered_joypad_H, the buttons newly pressed
+  DIRS = 0x0F, -- kJoypadH_AnyDir
+}
+
+-- The grid, in hud_cur_item order. Not guesswork about the layout: Hud_DoWeHaveThisItem tests
+-- (&link_item_bow)[item - 1], so slot n IS the byte at $7EF340 + n - 1, and kHudItemBoxGfxPtrs
+-- lists them in this order. Slot 11 the game calls Torch internally, but "Lamp" is the name it
+-- gives the player when they pick it up, so that is the name to say.
+PAUSE.ITEMS = {
+  "Bow", "Boomerang", "Hookshot", "Bombs", "Mushroom",
+  "Fire Rod", "Ice Rod", "Bombos", "Ether", "Quake",
+  "Lamp", "Hammer", "Flute", "Bug Net", "Book of Mudora",
+  "Bottle", "Cane of Somaria", "Cane of Byrna", "Magic Cape", "Magic Mirror",
+}
+
+-- Slots holding more than one thing, named by the slot's own value — Hud_GetIconForItem picks
+-- the icon the same way, from kHudItemBoxGfxPtrs[slot][value], and the variant counts here are
+-- those arrays' lengths less their empty entry. The shovel and the flute sharing a slot is the
+-- one that would actively mislead, being two unrelated items.
+PAUSE.VARIANTS = {
+  [1] = { "Bow", "Bow and Arrows", "Silver Bow", "Silver Bow and Arrows" },
+  [2] = { "Boomerang", "Red Boomerang" },
+  [5] = { "Mushroom", "Magic Powder" },
+  [13] = { "Shovel", "Flute", "Flute" },
+}
+
+function PAUSE.name(slot)
+  if slot == nil or slot < 1 or slot > #PAUSE.ITEMS then return nil end
+  local variants = PAUSE.VARIANTS[slot]
+  if variants ~= nil then
+    local held = mem.u8(PAUSE.OWNED + slot - 1)
+    if held ~= nil and variants[held] ~= nil then return variants[held] end
+  end
+  return PAUSE.ITEMS[slot]
+end
+
+function PAUSE.update(s)
+  local on = s.module == 0x0E
+    and mem.u8(0x7E0011) == 0x01
+    and mem.u8(PAUSE.STATE) == PAUSE.GRID
+  if not on then
+    PAUSE.open, PAUSE.dirs = false, nil
+    return
+  end
+
+  -- Every press, not every move. With one item owned the cursor has nowhere to go, and a
+  -- reader that only spoke on movement would say nothing at all — so this follows the button
+  -- rather than the cursor. Held directions auto-repeat and re-announce, which is what pressing
+  -- again should do. Edge-triggered on the direction bits appearing, so that a press cannot be
+  -- counted twice if filtered_joypad_H is still standing on the following frame.
+  local dirs = (mem.u8(PAUSE.PRESS) or 0) & PAUSE.DIRS
+  local pressed = dirs ~= 0 and (PAUSE.dirs or 0) == 0
+  PAUSE.dirs = dirs
+
+  -- Opening the menu announces once too, or the player has to press something to learn where
+  -- the cursor already is.
+  if PAUSE.open and not pressed then return end
+  PAUSE.open = true
+
+  -- Critical, like the other menus: a menu with nothing spoken cannot be used, and a fresh
+  -- press should cut off the last announcement rather than queue behind it.
+  local name = PAUSE.name(mem.u8(PAUSE.ITEM))
+  say(name or "No items", { priority = "critical", category = "menu" })
 end
 
 -- The map's collision colours. A tile attribute describes what a tile *is* for
@@ -2240,6 +2322,9 @@ function on_frame(frame)
   -- Game text likewise: it is read as the game draws each page, so it has to be watched
   -- every frame rather than at a module change, and a text box is not in-play either.
   TEXT.update(now)
+
+  -- The pause screen shares module 0x0E with the text box and is likewise not in play.
+  PAUSE.update(now)
 
   -- Turn navigation on by itself at the very start of the quest — once Link is up
   -- out of bed and controllable in his house — so the opening guidance leads without
