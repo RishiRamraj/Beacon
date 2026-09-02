@@ -808,12 +808,15 @@ function TEXT.update(s)
   -- so the option is the whole of what there is to say — and it is said on every move, since
   -- landing back on one the player has already heard is still a move they need confirmed.
   local choice = mem.u8(TEXT.CHOICE)
-  if TEXT.options ~= nil and choice ~= nil and choice ~= TEXT.choice then
+  if choice ~= nil and TEXT.choice ~= nil and choice ~= TEXT.choice then
     TEXT.choice = choice
-    local option = TEXT.options[choice + 1]
-    if option ~= nil then
-      say(option, { priority = "critical", category = "menu" })
-    end
+    -- Naming it needs the page that carried the options, and there are ways of never having seen
+    -- one: reloading the plugin part way through a choice is the obvious one, since the options
+    -- are not in the buffer by then. Say WHICH option anyway. Silence is the worst answer to a
+    -- keypress — it reads as the reader having stopped working, and leaves the player with no idea
+    -- where the cursor now is.
+    local option = (TEXT.options or {})[choice + 1] or ("Option " .. (choice + 1))
+    say(option, { priority = "critical", category = "menu" })
   end
 
   if TEXT.spoke ~= nil then
@@ -837,7 +840,10 @@ function TEXT.update(s)
     local ask, options = TEXT.choices(TEXT.from, brk)
     if options == nil then
       -- A cursor-only message, loaded to move the marker. Nothing of its own to say, and it must
-      -- not be allowed to replace the options it was drawn on top of.
+      -- not be allowed to replace the options it was drawn on top of. It does tell us a choice is
+      -- on screen, though, which is enough to start watching the selection even with no names for
+      -- it — the case where the page carrying them was never seen.
+      TEXT.choice = TEXT.choice or mem.u8(TEXT.CHOICE) or 0
       text = ""
     else
       TEXT.options = options
