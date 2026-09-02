@@ -6363,9 +6363,9 @@ fn choice_buffer() -> Vec<u8> {
 /// a Speed command, line 3, six blanks, line 2, four blanks, the cursor, then the Choose.
 fn cursor_only_message() -> Vec<u8> {
     let mut buf = vec![0x7A, 0x00, TEXT_LINE3];
-    buf.extend(std::iter::repeat(0x59).take(6));
+    buf.extend([0x59u8; 6]);
     buf.push(TEXT_LINE2);
-    buf.extend(std::iter::repeat(0x59).take(4));
+    buf.extend([0x59u8; 4]);
     buf.push(0x44); // the cursor glyph
     buf.push(TEXT_CHOOSE);
     buf.push(TEXT_END);
