@@ -5407,10 +5407,17 @@ fn alttp_reopening_a_box_starts_from_its_first_page() {
     warm(&mut p, &dialog_frame(&buf, first_wait));
     p.on_frame(&dialog_frame(&buf, end), WARM);
 
-    // Out of the text module and back in, the message starting over.
-    p.on_frame(&dungeon_frame((100, 100), (120, 100), &[]), WARM + 1);
+    // The box closes. Built from the same frame, because leaving a box does not clear the
+    // message index or read_pos — only the module changes.
+    let mut closed = dialog_frame(&buf, end);
+    closed[wram_offset(0x7E0010).unwrap()] = 0x07;
+    p.on_frame(&closed, WARM + 1);
+
+    // And is opened again, which runs Text_Initialize and so Text_LoadCharacterBuffer: read_pos
+    // back to 0 with the box up. That load is what earns the reader the right to read it.
+    p.on_frame(&dialog_frame(&buf, 0), WARM + 2);
     let again: Vec<String> = p
-        .on_frame(&dialog_frame(&buf, first_wait), WARM + 2)
+        .on_frame(&dialog_frame(&buf, first_wait), WARM + 3)
         .iter()
         .map(|i| i.text.clone())
         .collect();
@@ -5627,14 +5634,23 @@ fn alttp_a_box_opening_on_a_leftover_buffer_reads_nothing() {
 }
 
 #[test]
-fn alttp_a_swapped_buffer_is_noticed_without_read_pos_falling() {
-    // Loading a save state replaces all of WRAM at once, while the plugin's own Lua state
-    // carries on. read_pos need not fall — it can land further along — so the recorded page
-    // break is the check: a byte that is no longer a break means a different buffer. Latching
-    // to a page that no longer exists is what makes the reader go quiet for good.
+fn alttp_a_swapped_buffer_is_read_from_its_first_page_not_its_last() {
+    // Reported from play: the map, the boomerang and the big key were all read BACK TO FRONT,
+    // last page first, some with a page of nonsense ahead of them.
+    //
+    // Text_LoadCharacterBuffer fills the buffer BEFORE it zeroes read_pos, so there is a window
+    // holding the new text at the old message's position. Reading from that position picks
+    // whichever page it happens to land in — the last one — and if it lands beyond the new
+    // message's terminator, a page of leftover bytes from the longer message before it.
+    //
+    // So a swap detected that way is not a load. There is nothing to read from it, and the reader
+    // waits for read_pos to come back before deciding where it is.
     let (before, bstarts) = dialog_buffer(&["Help me!", "<wait>", "<scroll>", "Please!", "<end>"]);
     let (after, _) = dialog_buffer(&[
-        "It is dangerous to go alone and a good deal further than this one.",
+        "You got the Big Key! It can open many",
+        "<wait>",
+        "<scroll>",
+        "locks that small keys cannot.",
         "<end>",
     ]);
 
@@ -5643,18 +5659,43 @@ fn alttp_a_swapped_buffer_is_noticed_without_read_pos_falling() {
     let said = warm(&mut p, &dialog_frame(&before, bstarts[1]));
     assert!(said.iter().any(|t| t == "Help me!"), "{said:?}");
 
-    // The state loads: a different buffer, and read_pos FORWARD of where it was, so nothing
-    // about read_pos alone says anything happened.
-    let swapped: Vec<String> = p
-        .on_frame(&dialog_frame(&after, bstarts[1] + 20), WARM)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    // The swap: a different buffer with read_pos still where the last message left it. Past the
+    // recorded break, which is the case that bites — a position at it merely waits, whereas a
+    // position beyond it looks like the page having been turned, so the reader would advance into
+    // the new buffer at an offset that means nothing in it.
+    let stale = bstarts[1] + 12;
+    let mut during = Vec::new();
+    for f in 0..3 {
+        during.extend(
+            p.on_frame(&dialog_frame(&after, stale), WARM + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
     assert!(
-        swapped
+        during.is_empty(),
+        "a half-loaded buffer is not read at all: {during:?}"
+    );
+
+    // read_pos comes back, and the message is read from the top, in order.
+    p.on_frame(&dialog_frame(&after, 0), WARM + 4);
+    let mut heard = Vec::new();
+    for f in 5..9 {
+        heard.extend(
+            p.on_frame(&dialog_frame(&after, 4), WARM + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
+    assert!(
+        heard
             .iter()
-            .any(|t| t == "It is dangerous to go alone and a good deal further than this one."),
-        "the new buffer is read: {swapped:?}"
+            .any(|t| t == "You got the Big Key! It can open many"),
+        "the first page is what gets read: {heard:?}"
+    );
+    assert!(
+        !heard.iter().any(|t| t.contains("locks that small keys")),
+        "and not the last page ahead of it: {heard:?}"
     );
 }
 
@@ -6152,4 +6193,62 @@ fn alttp_an_objective_that_wobbles_is_still_announced_only_once() {
     );
     assert!(chests <= 1, "and so is the chest: {heard:?}");
     assert!(keys + chests >= 1, "something was announced: {heard:?}");
+}
+
+#[test]
+fn alttp_a_box_opening_before_its_load_reads_nothing() {
+    // From a log of real play: three utterances of nonsense — "V", "o", "pw2ZfLPDHAAA?" — landing
+    // immediately before each real message, and identical both times, so deterministic buffer
+    // content rather than noise.
+    //
+    // Trust outlives the moment it was earned. A read_pos that falls while no box is up — which
+    // is what loading a save state looks like, and this session does that a lot — was taken as a
+    // load and granted trust. Trust then survived every frame of walking around, and the frame a
+    // box OPENS still shows the previous buffer, because Text_Initialize has not run yet. So the
+    // reader worked its way through whatever was in there, page by page, until the real load
+    // finally arrived.
+    let (old, _) = dialog_buffer(&["Take my sword and shield.", "<end>"]);
+    let (fresh, _) = dialog_buffer(&["I will give 100 Rupees.", "<end>"]);
+
+    let in_play = |buf: &[u8], pos: u16| -> Vec<u8> {
+        let mut ram = dialog_frame(buf, pos);
+        ram[wram_offset(0x7E0010).unwrap()] = 0x07; // no box
+        ram
+    };
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // In play, the previous message still in the buffer with read_pos left at its end.
+    for f in 0..3 {
+        p.on_frame(&in_play(&old, 25), f);
+    }
+    // A save state loads: read_pos lands lower, with no box in sight. Not a message starting.
+    p.on_frame(&in_play(&old, 4), 3);
+
+    // Now a box opens. Text_Initialize has not run, so this frame still shows the old buffer.
+    let mut opening = Vec::new();
+    for f in 0..3 {
+        opening.extend(
+            p.on_frame(&dialog_frame(&old, 6 + f as u16), 4 + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
+    assert!(
+        opening.is_empty(),
+        "nothing is read until the box's own load: {opening:?}"
+    );
+
+    // The load arrives, and the message that actually opened the box is read.
+    p.on_frame(&dialog_frame(&fresh, 0), 8);
+    let said: Vec<String> = p
+        .on_frame(&dialog_frame(&fresh, 4), 9)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        said.iter().any(|t| t == "I will give 100 Rupees."),
+        "and then the real message: {said:?}"
+    );
 }
