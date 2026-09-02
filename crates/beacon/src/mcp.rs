@@ -20,6 +20,7 @@
 //! shared mutable state and no lock — the emulator is single-threaded, as it must
 //! be.
 
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
@@ -112,7 +113,19 @@ pub fn run(mut session: Session) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// --- The control socket, on Unix ------------------------------------------
+//
+// A Unix domain socket, which is the whole of why these three are Unix-only: Rust's std
+// exposes no `UnixStream` on Windows even though the OS has had AF_UNIX since Windows 10,
+// and a named pipe is a different enough API to be its own piece of work rather than a cfg.
+//
+// So `--control` and `--connect` are Unix-only for now, and say so rather than silently
+// doing nothing. Nothing else about Beacon depends on them: the stdio MCP server in `run`
+// is portable, and it is the one an agent uses when it owns the session rather than
+// attaching to a window the player already has open.
+
 /// The conventional control-socket path for this session.
+#[cfg(unix)]
 ///
 /// Under the runtime dir so it is per-user and cleaned up by the system, with a
 /// predictable name so an agent knows where to attach.
@@ -130,6 +143,7 @@ pub(crate) fn control_socket_path() -> PathBuf {
 /// window is restarted and the socket drops — so the MCP client sees the server
 /// die and respawns it, and the fresh bridge reattaches to the new window. Left
 /// hanging instead, a window restart would silently strand the connection.
+#[cfg(unix)]
 pub(crate) fn connect_bridge() -> std::io::Result<()> {
     use std::os::unix::net::UnixStream;
 
@@ -182,6 +196,7 @@ pub(crate) fn connect_bridge() -> std::io::Result<()> {
 /// Concurrency here is safe because a connection never touches the session: every
 /// call goes down the same channel and is run, one at a time, by whichever thread
 /// owns the session.
+#[cfg(unix)]
 pub(crate) fn serve_socket(path: &Path) -> std::io::Result<Receiver<Request>> {
     use std::os::unix::net::UnixListener;
 
@@ -624,7 +639,7 @@ fn tool_defs() -> Vec<ToolDef> {
     ]
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};

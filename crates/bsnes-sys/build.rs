@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Builds bsnes-jg as a static library, then compiles the C ABI shim against it.
@@ -14,24 +14,53 @@ fn main() {
         .canonicalize()
         .expect("vendor/bsnes-jg missing - run `git submodule update --init`");
 
-    let src = vendor.join("src");
-    let lib = vendor.join("objs/libbsnes.a");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let target = std::env::var("TARGET").unwrap();
+
+    // Each target builds the core in its own copy of the vendored tree.
+    //
+    // The makefile pins its object directory with `override OBJDIR := objs`, inside its own
+    // tree, so it cannot be redirected from the command line and two targets would overwrite
+    // each other's objects. That is not theoretical: the first Windows cross-build linked the
+    // Linux library and failed on every symbol in it. Copying the tree — 25MB, once per
+    // target — is the cheap way to isolate them without patching a vendored makefile.
+    let tree = out.join(format!("bsnes-jg-{target}"));
+    let src = tree.join("src");
+    let lib = tree.join("objs/libbsnes.a");
+
+    if !tree.exists() {
+        copy_tree(&vendor, &tree);
+    }
 
     println!("cargo:rerun-if-changed=csrc/shim.cpp");
     println!("cargo:rerun-if-changed=csrc/shim.h");
-    println!("cargo:rerun-if-changed={}", src.join("bsnes.hpp").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        vendor.join("src/bsnes.hpp").display()
+    );
 
     if !lib.exists() {
         let jobs = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
 
+        // The target's own toolchain, not the host's. `cc` already knows how to find it —
+        // including a cross prefix like x86_64-w64-mingw32- — so asking it beats guessing,
+        // and the makefile takes all three as ordinary `?=` variables.
+        let probe = cc::Build::new();
+        let cc_tool = probe.get_compiler();
+        let cxx_tool = cc::Build::new().cpp(true).get_compiler();
+        let ar_tool = probe.get_archiver();
+
         let status = Command::new("make")
-            .current_dir(&vendor)
+            .current_dir(&tree)
             .args([
                 "ENABLE_STATIC=1",
                 "DISABLE_MODULE=1",
                 "USE_VENDORED_SAMPLERATE=1",
+                &format!("CC={}", cc_tool.path().display()),
+                &format!("CXX={}", cxx_tool.path().display()),
+                &format!("AR={}", ar_tool.get_program().to_string_lossy()),
                 &format!("-j{jobs}"),
             ])
             .status()
@@ -59,9 +88,35 @@ fn main() {
 
     // `cc` links the C++ runtime for code it compiles itself, but libbsnes.a is
     // prebuilt by make, so nothing else pulls the standard library in.
-    if cfg!(target_os = "macos") {
-        println!("cargo:rustc-link-lib=dylib=c++");
-    } else if !cfg!(target_env = "msvc") {
-        println!("cargo:rustc-link-lib=dylib=stdc++");
+    //
+    // From the TARGET, not from `cfg!`. In a build script `cfg!` describes the machine doing
+    // the building, so cross-compiling to Windows from Linux asked for libstdc++ by accident
+    // and would have asked for the wrong one entirely from a Mac.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    match target_os.as_str() {
+        "macos" | "ios" => println!("cargo:rustc-link-lib=dylib=c++"),
+        _ if target_env == "msvc" => {}
+        _ => println!("cargo:rustc-link-lib=dylib=stdc++"),
+    }
+}
+
+/// Copies the vendored source tree, skipping git metadata and any objects already built for
+/// another target.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("could not create the build tree");
+    for entry in std::fs::read_dir(from).expect("could not read the vendored tree") {
+        let entry = entry.expect("could not read a vendored entry");
+        let name = entry.file_name();
+        // `.git` is a submodule pointer and `objs` belongs to whoever built it.
+        if name == ".git" || name == "objs" {
+            continue;
+        }
+        let dest = to.join(&name);
+        if entry.file_type().expect("could not stat").is_dir() {
+            copy_tree(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), &dest).expect("could not copy a vendored file");
+        }
     }
 }

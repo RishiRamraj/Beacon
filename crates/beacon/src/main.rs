@@ -256,7 +256,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The stdio<->socket bridge needs nothing else — no ROM, emulator, or plugin.
     if args.connect {
+        #[cfg(unix)]
         return mcp::connect_bridge().map_err(Into::into);
+        // Refused rather than ignored: an agent harness that asked to bridge and got a
+        // silently ordinary startup would wait for a protocol that is never coming.
+        #[cfg(not(unix))]
+        {
+            eprintln!("--connect needs a Unix socket and is not available on this platform");
+            std::process::exit(2);
+        }
     }
 
     let settings = match Settings::default_path() {
@@ -309,6 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // With --control, an agent can attach to this live windowed session over a
     // local socket and drive it while the player keeps playing.
+    #[cfg(unix)]
     let control_rx = if args.control {
         let path = mcp::control_socket_path();
         match mcp::serve_socket(&path) {
@@ -322,6 +331,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
+        None
+    };
+    // Said out loud, because a player following instructions that mention --control should
+    // hear why it did nothing rather than wonder whether it worked.
+    #[cfg(not(unix))]
+    let control_rx = {
+        if args.control {
+            eprintln!("--control needs a Unix socket and is not available on this platform");
+        }
         None
     };
 
