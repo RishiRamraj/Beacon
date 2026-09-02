@@ -1878,11 +1878,11 @@ fn alttp_forced_kill_room_leads_to_the_guard_then_the_chest() {
         "leads to the guard"
     );
 
-    // Guard gone, room quiet: the chest sub-goal announces (on the first such
-    // frame) and takes over.
+    // Guard gone and the room quiet long enough to believe it: the chest sub-goal announces
+    // and takes over. It does not pounce on the first quiet frame, because a blinking sprite
+    // slot produces those in the middle of a fight.
     let clear = frame(false);
-    let out2 = plugin.on_frame(&clear, 3);
-    let texts2: Vec<String> = out2.iter().map(|i| i.text.clone()).collect();
+    let texts2 = settle_quiet(&mut plugin, &clear, 3);
     assert!(
         texts2.iter().any(|t| t.contains("Open the chest")),
         "then the chest sub-goal takes over: {texts2:?}"
@@ -2148,8 +2148,10 @@ fn alttp_escape_room_0x71_chest_is_a_routing_objective() {
     plugin.on_frame(&near, 0);
     plugin.on_frame(&near, 1);
     plugin.command("advance", &near);
-    let out = plugin.on_frame(&near, 2);
-    let texts: Vec<String> = out.iter().map(|i| i.text.clone()).collect();
+    // This room's kill tag never clears while its far pit is uncleared, so the chest becomes
+    // available on the room being QUIET rather than on the tag — after QUIET_FRAMES of nothing
+    // reachable to fight.
+    let texts = settle_quiet(&mut plugin, &near, 2);
     assert!(
         texts.iter().any(|t| t.contains("Open the chest")),
         "the room-0x71 chest is a routing objective when reached: {texts:?}"
@@ -2268,6 +2270,21 @@ fn sweep_room(link: (u16, u16), room: u8) -> Vec<u8> {
 }
 
 /// Writes sprite slot `slot`: state, kind, world position, health.
+/// Frames a room must go without anything to fight before an objective may treat it as quiet —
+/// QUIET.NEEDED in the plugin. A sprite slot blinks, so no single frame is evidence either way,
+/// and the chest objective waits this long rather than pouncing on one quiet frame.
+const QUIET_FRAMES: u64 = 20;
+
+/// Runs `ram` until the room has been quiet long enough for that to count, returning what was
+/// said along the way.
+fn settle_quiet(p: &mut LuaPlugin, ram: &[u8], from: u64) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in 0..=QUIET_FRAMES {
+        out.extend(p.on_frame(ram, from + f).iter().map(|i| i.text.clone()));
+    }
+    out
+}
+
 fn sprite_slot(ram: &mut [u8], slot: u32, kind: u8, tile: (u16, u16), hp: u8) {
     let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
     let (x, y) = (tile.0 * 8 + 4, tile.1 * 8 + 4);
@@ -6021,4 +6038,118 @@ fn alttp_a_different_save_loaded_mid_session_is_not_a_pickup() {
             .any(|t| t.contains("rupee") || t.contains("Heart") || t.contains("magic")),
         "a different save is not a pickup: {rich:?}"
     );
+}
+
+#[test]
+fn alttp_a_blinking_enemy_slot_does_not_hand_the_room_to_the_chest() {
+    // From a real log: "Defeat all enemies." / "Open the chest." / "Defeat all enemies." while
+    // the room's actual objective was the fight and the key it drops.
+    //
+    // The two objectives disagreed about what makes a room busy. `kill` needs a countable enemy,
+    // `chest` needs there to be none — so in any frame where the enemy is momentarily NOT
+    // countable, and a sprite slot blinks for all sorts of reasons, kill went inactive and chest
+    // went active in the same frame. Worse, the spoken latch held only the last objective, so
+    // every wobble was a fresh announcement.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Room 0x72 with a chest and a guard, as the log's room was.
+    let frame = |alive: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7EF3C5, 2);
+        set(0x7E040C, 0x02);
+        set(0x7E00A0, 0x72);
+        set(0x7F2000 + 20 * 64 + 34, 0x58); // an unopened chest
+        set(0x7E0DD0, if alive { 0x09 } else { 0x00 });
+        set(0x7E0E20, 65); // Green Soldier
+        set(0x7E0D10, 0xF4);
+        set(0x7E0D00, 0xA4);
+        set(0x7E0E50, 4);
+        ram
+    };
+
+    let live = frame(true);
+    p.on_frame(&live, 0);
+    p.on_frame(&live, 1);
+    p.command("advance", &live);
+    let started: Vec<String> = p
+        .on_frame(&live, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        started.iter().any(|t| t.contains("Defeat all enemies")),
+        "the fight is the objective: {started:?}"
+    );
+
+    // One frame with the slot blinked out, then back — the guard has not been killed.
+    let mut heard = Vec::new();
+    for f in 3..12 {
+        let blink = f % 3 == 0; // a slot that flickers, not one that dies
+        heard.extend(p.on_frame(&frame(!blink), f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        !heard.iter().any(|t| t.contains("Open the chest")),
+        "a blink is not the room going quiet: {heard:?}"
+    );
+    assert!(
+        !heard.iter().any(|t| t.contains("Defeat all enemies")),
+        "and the fight is not re-announced: {heard:?}"
+    );
+}
+
+#[test]
+fn alttp_an_objective_that_wobbles_is_still_announced_only_once() {
+    // QUIET stops the fight-versus-chest wobble at source, but it does not cover every pair. A
+    // dropped key is a sprite too, and a blinking slot flips the room between "grab the key" and
+    // "open the chest". A latch holding only the LAST objective announced calls each flip new,
+    // because each is always different from the one before it — so it remembers all of them.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Room 0x72, no enemies, an unopened chest, and a dropped small key that blinks.
+    let frame = |key_there: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((20, 20), (20, 6), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7EF3C5, 2);
+            set(0x7E040C, 0x02);
+            set(0x7E00A0, 0x72);
+            set(0x7E00AE, 0x00); // no kill tag
+            set(0x7F2000 + 20 * 64 + 34, 0x58); // an unopened chest
+        }
+        if key_there {
+            sprite_slot(&mut ram, 0, 228, (26, 20), 0); // a dropped small key
+        }
+        ram
+    };
+
+    let present = frame(true);
+    p.on_frame(&present, 0);
+    p.on_frame(&present, 1);
+    p.command("advance", &present);
+
+    // Let the room settle, then flip the key slot on and off for a while.
+    let mut heard = settle_quiet(&mut p, &present, 2);
+    let base = 2 + QUIET_FRAMES + 1;
+    for f in 0..12u64 {
+        heard.extend(
+            p.on_frame(&frame(f % 2 == 0), base + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
+
+    let keys = heard.iter().filter(|t| t.contains("Grab the key")).count();
+    let chests = heard
+        .iter()
+        .filter(|t| t.contains("Open the chest"))
+        .count();
+    assert!(
+        keys <= 1,
+        "the key is announced once, not per flip: {heard:?}"
+    );
+    assert!(chests <= 1, "and so is the chest: {heard:?}");
+    assert!(keys + chests >= 1, "something was announced: {heard:?}");
 }
