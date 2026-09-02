@@ -685,14 +685,32 @@ function TEXT.update(s)
   local reloaded = TEXT.at ~= nil and pos < TEXT.at
   TEXT.at = pos
 
-  -- The buffer can also change without read_pos falling at all: loading a save state replaces
-  -- the whole of WRAM while the plugin's own Lua state carries on regardless. The break we
-  -- recorded for the page being read is a cheap check on that — it is a break in the buffer we
-  -- were reading, so if the byte there is no longer one, this is a different buffer. Without
-  -- this the reader stays latched to a page that no longer exists and goes quiet for good.
+  -- Is a text box up? Module 0x0E is not only text boxes: kMessagingSubmodules dispatches on
+  -- submodule_index, and 1 is Hud_Module_Run, the pause screen, whose buffer is whatever the
+  -- last box left there.
+  local boxed = s.module == 0x0E and mem.u8(0x7E0011) ~= 0x01
+  -- The buffer can change WITHOUT read_pos falling, and when it does, the position on record
+  -- belongs to the message that has gone. Text_LoadCharacterBuffer fills the buffer before it
+  -- zeroes read_pos, and loading a save state replaces both at once — either way there is a
+  -- window holding the new text at the old position.
+  --
+  -- Reading from that position picked the wrong page. The map, the boomerang and the big key all
+  -- came out back to front, last page first, and where the stale position sat beyond the new
+  -- message's terminator the reader got a page of leftover bytes: "HA?AjAAA", then "locks that
+  -- small keys cannot.", then "You got the Big Key!".
+  --
+  -- The recorded break is how the swap is spotted: it is a break in the buffer that was being
+  -- read, so a byte there that is no longer one means a different buffer. Nothing can be read
+  -- from that state, so it forgets where it was and waits for read_pos to come back — rather
+  -- than treating it as a load and trusting a position that is not about this message. Without
+  -- noticing at all, the reader stays latched to a page that no longer exists and goes quiet
+  -- for good.
   if not reloaded and TEXT.spoke ~= nil then
     local b = mem.u8(TEXT.BUFFER + TEXT.spoke)
-    if b ~= nil and not TEXT.BREAKS[b] then reloaded = true end
+    if b ~= nil and not TEXT.BREAKS[b] then
+      TEXT.msg, TEXT.from, TEXT.spoke, TEXT.next_from, TEXT.last = id, nil, nil, nil, nil
+      TEXT.trust = false
+    end
   end
 
   -- Progress is deliberately NOT forgotten when the module stops being 0x0E. The screen can
@@ -705,20 +723,19 @@ function TEXT.update(s)
     -- as a plugin reload mid-scene does, should read the page it is on and not everything
     -- before it. For a freshly loaded message read_pos is 0 and this is 0 too.
     TEXT.from = TEXT.page_at(pos)
-    -- Having watched the load, the buffer certainly holds this message. On a first sighting
-    -- that is only knowable if a box is already up, because then the buffer is what is on
-    -- screen; with no box it is leftover from the last one and must not be read.
-    TEXT.trust = reloaded or s.module == 0x0E
+    -- Trust is earned only while a box is up, because that is the only time the buffer is
+    -- known to hold what is on screen. A fall in read_pos is NOT enough on its own: loading a
+    -- save state looks exactly like one, and granting trust there let it outlive the moment —
+    -- it survived every frame of walking around, and then the frame a box opened, still showing
+    -- the previous buffer, was read out. That is where "V", "o", "pw2ZfLPDHAAA?" came from,
+    -- three pages of a stale buffer before the real message. A genuine load always happens
+    -- inside module 0x0E, Text_Initialize being a submodule handler, so nothing real is lost.
+    TEXT.trust = boxed
   end
 
-  -- Track wherever the message is, but only speak while the box is up and the buffer is known
-  -- to match it. A closing box also ends a "showing": see TEXT.read.
-  --
-  -- Module 0x0E is not only text boxes — kMessagingSubmodules dispatches on submodule_index,
-  -- and 1 is Hud_Module_Run, the pause screen. The buffer there holds whatever the last box
-  -- left in it, so the pause screen has to be excluded by name or opening it can read the
-  -- previous message aloud.
-  if s.module ~= 0x0E or mem.u8(0x7E0011) == 0x01 or not TEXT.trust then
+  -- Track wherever the message is, but only speak while a box is up and the buffer is known to
+  -- match it. A closing box also ends a "showing": see TEXT.read.
+  if not boxed or not TEXT.trust then
     TEXT.read = {}
     return
   end
