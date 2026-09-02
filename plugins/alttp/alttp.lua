@@ -3714,7 +3714,7 @@ local room_obj_announced = nil
 -- Bookkeeping for the room objective, global so it costs the main chunk no locals.
 -- `said` is the spoken latch (one cue per objective per room), `lapse` counts frames
 -- with no target so a flicker is not mistaken for the objective being finished.
-ROOMOBJ = { room = nil, said = nil, lapse = 0, arrived = nil }
+ROOMOBJ = { room = nil, said = {}, lapse = 0, arrived = nil }
 ROOMOBJ.LAPSE = 30 -- half a second of no target before believing it is over
 
 -- Aim the guide at the current quest goal from wherever Link stands. One line now:
@@ -4430,6 +4430,37 @@ function SWEEP.set(kind)
   return SWEEP.MODES[kind].on
 end
 
+-- How long this room has had nothing to fight, in frames.
+--
+-- A sprite slot blinks for all sorts of reasons: dying, respawning, mid-spawn on room entry,
+-- crossing the reachable boundary as it walks. So any one frame can report "nothing to fight
+-- here" while the fight is very much on, and no objective may conclude the room is quiet from a
+-- single frame — it has to have been quiet for a while.
+--
+-- Two objectives reading that raw frame is what went wrong: `kill` needs a countable enemy and
+-- `chest` needed there to be none, so a blink made kill inactive and chest active in the SAME
+-- frame. The guide announced the chest in the middle of a fight, then announced the fight again
+-- on the next frame, over and over.
+QUIET = { room = nil, frames = 0 }
+QUIET.NEEDED = 20 -- a third of a second, well past any blink
+
+function QUIET.update(s)
+  -- A room's first frames are its sprites spawning, so entering one is never quiet.
+  if QUIET.room ~= s.dungeon_room then
+    QUIET.room, QUIET.frames = s.dungeon_room, 0
+    return
+  end
+  if nearest_pending_enemy(s) ~= nil or overlords_pending() then
+    QUIET.frames = 0
+  else
+    QUIET.frames = QUIET.frames + 1
+  end
+end
+
+function QUIET.settled()
+  return QUIET.frames >= QUIET.NEEDED
+end
+
 local ROOM_OBJECTIVES = {
   -- The enemy carrying the key comes first: go for it, then its dropped key, then the
   -- rest. Gated off the Zelda escort out (like the dropped-key objective), since the
@@ -4492,10 +4523,14 @@ local ROOM_OBJECTIVES = {
   -- fight between here and there — it takes over only once Link reaches it.
   { id = "chest",
     cue = "Open the chest.",
+    -- Quiet for a WHILE, not quiet this frame: see QUIET. This is also what still lets the
+    -- chest be aimed at in a room whose kill tag never clears — room 0x71, where the tag stands
+    -- while the far pit is uncleared and there is nothing reachable to fight from the near one.
+    -- Gating the chest on the tag instead would leave that chest permanently unreachable.
     active = function(s)
       local c = nearest_chest_tile(s)
       return CHEST_ROOMS[s.dungeon_room] and c ~= nil and on_screen(c[1] - s.x, c[2] - s.y)
-        and nearest_pending_enemy(s) == nil and not overlords_pending()
+        and QUIET.settled()
     end,
     target = function(s)
       local c = nearest_chest_tile(s)
@@ -4661,8 +4696,9 @@ nav_update = function(s)
   -- what the guide actually committed to leading Link toward.
   -- Saying it again is a fresh room's business, not a fresh frame's.
   if ROOMOBJ.room ~= s.dungeon_room then
-    ROOMOBJ.room, ROOMOBJ.said, ROOMOBJ.lapse, ROOMOBJ.arrived = s.dungeon_room, nil, 0, nil
+    ROOMOBJ.room, ROOMOBJ.said, ROOMOBJ.lapse, ROOMOBJ.arrived = s.dungeon_room, {}, 0, nil
   end
+  QUIET.update(s)
   local ro = room_aim(s)
   if ro then
     local key = s.dungeon_room .. ":" .. ro.id
@@ -4672,9 +4708,15 @@ nav_update = function(s)
     -- field, so a single frame with no target cleared it and the next frame said the cue
     -- again — "defeat all enemies" over and over. ROOMOBJ.said only resets when the room
     -- does, so a lapse cannot buy a second announcement.
-    if ROOMOBJ.said ~= key then
+    --
+    -- And it is a SET of everything said in this room, not just the last thing. Holding one
+    -- value meant an objective that wobbled between two — a blinking sprite slot flipping the
+    -- room between its fight and its chest — re-announced on every flip, because each was
+    -- always "different from the last one". QUIET should stop that wobble at source; this makes
+    -- a wobble cost nothing if one gets through.
+    if not ROOMOBJ.said[key] then
       nav_say(ro.cue)
-      ROOMOBJ.said = key
+      ROOMOBJ.said[key] = true
     end
     return
   end
