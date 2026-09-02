@@ -154,6 +154,58 @@ fn slot_entries(ctx: &Context, act: impl Fn(u8) -> Act) -> Vec<Entry> {
         .collect()
 }
 
+/// The whole menu as a tree.
+///
+/// The stack above is for a menu Beacon navigates itself, one level at a time, because that
+/// is what a menu read aloud has to be. A native menu bar is the opposite: the platform owns
+/// the navigation and wants the whole thing up front, so it can open, traverse and close it
+/// with the conventions its users already have. Same entries either way, from the same
+/// [`entries`], so the two can never drift into describing different menus.
+//
+// Only the platforms with a native menu bar build a caller for these, so on Linux the binary
+// has none — hence the allow. Not dead: the tests exercise them everywhere, which is what
+// keeps the native menu's entries honest on a machine that cannot build it.
+#[cfg_attr(
+    not(any(windows, target_os = "macos")),
+    allow(dead_code, reason = "only the native menu bar calls these")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Node {
+    /// A line that does something.
+    Act { label: String, act: Act },
+    /// A line that opens a menu of its own.
+    Menu { label: String, children: Vec<Node> },
+}
+
+/// The menu, expanded in full.
+#[cfg_attr(
+    not(any(windows, target_os = "macos")),
+    allow(dead_code, reason = "only the native menu bar calls this")
+)]
+pub fn full(ctx: &Context) -> Vec<Node> {
+    expand(Level::Root, ctx)
+}
+
+#[cfg_attr(
+    not(any(windows, target_os = "macos")),
+    allow(dead_code, reason = "only the native menu bar calls this")
+)]
+fn expand(level: Level, ctx: &Context) -> Vec<Node> {
+    entries(level, ctx)
+        .into_iter()
+        .map(|entry| match entry.does {
+            Does::Enter(inner) => Node::Menu {
+                label: entry.label,
+                children: expand(inner, ctx),
+            },
+            Does::Act(act) => Node::Act {
+                label: entry.label,
+                act,
+            },
+        })
+        .collect()
+}
+
 /// One level being shown, and where the cursor is in it.
 struct Frame {
     level: Level,
@@ -330,6 +382,73 @@ mod tests {
                 ("Metroid".to_string(), PathBuf::from("/roms/metroid.sfc")),
             ],
         }
+    }
+
+    #[test]
+    fn the_full_tree_holds_the_same_entries_as_walking_it() {
+        // A native menu bar gets the whole thing at once. It has to be the SAME menu — built
+        // from the same entries — or the platform's menu and the spoken one would drift.
+        let ctx = ctx();
+        let tree = full(&ctx);
+        assert_eq!(tree.len(), 4);
+
+        let Node::Menu { label, children } = &tree[0] else {
+            panic!("File is a menu: {:?}", tree[0]);
+        };
+        assert_eq!(label, "File");
+        // Open is a menu of ROMs; Exit acts.
+        assert!(matches!(&children[0], Node::Menu { label, children }
+            if label == "Open" && children.len() == ctx.roms.len()));
+        assert_eq!(
+            children[1],
+            Node::Act {
+                label: "Exit".into(),
+                act: Act::Exit
+            }
+        );
+
+        // Save and Load carry a slot each, labelled as the spoken menu labels them.
+        let Node::Menu {
+            children: saves, ..
+        } = &tree[1]
+        else {
+            panic!("Save is a menu");
+        };
+        assert_eq!(
+            saves[0],
+            Node::Act {
+                label: "Slot 0, occupied".into(),
+                act: Act::SaveSlot(0)
+            }
+        );
+        let Node::Menu {
+            children: loads, ..
+        } = &tree[2]
+        else {
+            panic!("Load is a menu");
+        };
+        assert_eq!(
+            loads[1],
+            Node::Act {
+                label: "Slot 1, empty".into(),
+                act: Act::LoadSlot(1)
+            }
+        );
+
+        // And Input reaches the key mapping.
+        let Node::Menu {
+            children: input, ..
+        } = &tree[3]
+        else {
+            panic!("Input is a menu");
+        };
+        assert_eq!(
+            input[0],
+            Node::Act {
+                label: "Map keys".into(),
+                act: Act::MapKeys
+            }
+        );
     }
 
     #[test]

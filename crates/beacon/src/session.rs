@@ -507,7 +507,7 @@ impl Session {
     ///
     /// Gathered fresh each time a level is entered, so a slot that filled since the
     /// menu opened reads as occupied.
-    fn menu_context(&self) -> menu::Context {
+    pub(crate) fn menu_context(&self) -> menu::Context {
         menu::Context {
             slots: (0..SLOTS).map(|s| self.slots.occupied(s)).collect(),
             roms: self
@@ -605,7 +605,9 @@ impl Session {
         self.say_now("Menu closed.");
     }
 
-    fn perform(&mut self, act: Act) {
+    /// Carries out a menu act. Public so a platform's own menu — which does its own
+    /// navigating and reports only what was chosen — reaches the same verbs.
+    pub(crate) fn perform(&mut self, act: Act) {
         match act {
             Act::Exit => {
                 self.say_now("Goodbye.");
