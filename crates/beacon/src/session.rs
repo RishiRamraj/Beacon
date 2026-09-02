@@ -818,6 +818,12 @@ impl Session {
     /// and the key is free and not a game control. A user's own binding — of the
     /// command or of the key — always wins. Not persisted; it is a runtime
     /// default, re-applied each launch.
+    /// Gives any built-in action the player has never bound its default keys.
+    /// The rule itself is in [`action::apply_defaults`].
+    pub fn apply_builtin_default_keys(&mut self) {
+        action::apply_defaults(&mut self.settings.keymap);
+    }
+
     pub fn apply_plugin_default_keys(&mut self) {
         // Collect first, so the plugin borrow ends before the keymap is touched.
         let suggestions: Vec<(String, String)> = self
