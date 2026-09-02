@@ -4753,14 +4753,28 @@ fn name_entry_frame(col: u8, row: u8) -> Vec<u8> {
     ram
 }
 
+/// Everything said while `ram` is shown for two frames from `frame`.
+///
+/// Two, because a page is spoken only once its text has held still for a frame: the message
+/// buffer can be caught half written, and a half-written one differs from one frame to the next
+/// where a finished one does not. Tests that walk pages by hand have to give each page both.
+fn read_page(p: &mut LuaPlugin, ram: &[u8], frame: u64) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in 0..2 {
+        out.extend(p.on_frame(ram, frame + f).iter().map(|i| i.text.clone()));
+    }
+    out
+}
+
 /// Frames a fresh plugin needs before a screen's first reading is spoken.
 ///
 /// Three, for two unrelated reasons. The first on_frame returns early for want of a previous
 /// state, so the reader never runs. The next is the frame MENU.SETTLE spends waiting for the
 /// screen's own submodule handler to have run — until it has, the file-exists flags and the
 /// staged names still describe whatever was on screen before. The third is the one that
-/// speaks. Any test that walks frames by hand has to start after these.
-const WARM: u64 = 3;
+/// speaks — plus one more, because a page waits for its text to hold still. Any test that walks
+/// frames by hand has to start after these.
+const WARM: u64 = 4;
 
 /// Run a plugin up to and including its first reading of `ram`, returning what it said.
 fn warm(p: &mut LuaPlugin, ram: &[u8]) -> Vec<String> {
@@ -5227,6 +5241,10 @@ fn text_byte(c: char) -> u8 {
         '!' => 0x3E,
         '.' => 0x41,
         ',' => 0x42,
+        '?' => 0x3F,
+        '(' => 0x45,
+        ')' => 0x46,
+        '\'' => 0x50,
         ' ' => 0x59,
         _ => panic!("no encoding for {c:?}"),
     }
@@ -5294,18 +5312,10 @@ fn alttp_a_paginated_message_is_read_one_page_at_a_time() {
     );
 
     // Held at the same break, it does not repeat.
-    let held: Vec<String> = p
-        .on_frame(&dialog_frame(&buf, first_wait), WARM)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let held = read_page(&mut p, &dialog_frame(&buf, first_wait), WARM);
     assert!(held.is_empty(), "one announcement per page: {held:?}");
 
-    let page2: Vec<String> = p
-        .on_frame(&dialog_frame(&buf, second_wait), WARM + 1)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let page2 = read_page(&mut p, &dialog_frame(&buf, second_wait), WARM + 1);
     assert!(page2.iter().any(|t| t == "I am a prisoner."), "{page2:?}");
     assert!(
         !page2
@@ -5315,11 +5325,7 @@ fn alttp_a_paginated_message_is_read_one_page_at_a_time() {
     );
 
     // The last page has no Waitkey after it; the terminator is its break.
-    let page3: Vec<String> = p
-        .on_frame(&dialog_frame(&buf, end), WARM + 2)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let page3 = read_page(&mut p, &dialog_frame(&buf, end), WARM + 2);
     assert!(page3.iter().any(|t| t == "My name is Zelda."), "{page3:?}");
 }
 
@@ -5340,11 +5346,7 @@ fn alttp_a_word_split_across_a_page_break_is_read_whole() {
         "the word is finished across the break: {page1:?}"
     );
 
-    let page2: Vec<String> = p
-        .on_frame(&dialog_frame(&buf, end), WARM)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let page2 = read_page(&mut p, &dialog_frame(&buf, end), WARM);
     assert!(
         page2.iter().any(|t| t == "of the castle."),
         "and is not said again: {page2:?}"
@@ -5416,11 +5418,7 @@ fn alttp_reopening_a_box_starts_from_its_first_page() {
     // And is opened again, which runs Text_Initialize and so Text_LoadCharacterBuffer: read_pos
     // back to 0 with the box up. That load is what earns the reader the right to read it.
     p.on_frame(&dialog_frame(&buf, 0), WARM + 2);
-    let again: Vec<String> = p
-        .on_frame(&dialog_frame(&buf, first_wait), WARM + 3)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let again = read_page(&mut p, &dialog_frame(&buf, first_wait), WARM + 3);
     assert!(
         again.iter().any(|t| t == "Help me!"),
         "the first page is read again: {again:?}"
@@ -5449,11 +5447,7 @@ fn alttp_a_page_ending_in_punctuation_does_not_swallow_the_next_word() {
     );
 
     // And that word is still there to be read when the page is turned.
-    let page2: Vec<String> = p
-        .on_frame(&dialog_frame(&buf, end), WARM)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let page2 = read_page(&mut p, &dialog_frame(&buf, end), WARM);
     assert!(page2.iter().any(|t| t == "Now go."), "{page2:?}");
 }
 
@@ -5477,20 +5471,24 @@ fn alttp_a_message_is_not_re_read_when_the_screen_comes_back() {
 
     let r = Registry::builtin();
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // Every page genuinely read before the lights come on — a page needs its settle frame, and
+    // giving it one frame and discarding the result would leave it unread while looking read.
     warm(&mut p, &dialog_frame(&buf, first_wait));
-    p.on_frame(&dialog_frame(&buf, second_wait), WARM);
-    p.on_frame(&dialog_frame(&buf, end), WARM + 1);
+    let two = read_page(&mut p, &dialog_frame(&buf, second_wait), WARM);
+    assert!(two.iter().any(|t| t == "I am a prisoner."), "{two:?}");
+    let three = read_page(&mut p, &dialog_frame(&buf, end), WARM + 2);
+    assert!(three.iter().any(|t| t == "My name is Zelda."), "{three:?}");
 
     // The lights go on: out of the text module and back. Built from the same frame so the
     // message index and read_pos persist across it, which is what the game does — only the
     // module changes.
     let mut lit = dialog_frame(&buf, end);
     lit[wram_offset(0x7E0010).unwrap()] = 0x07;
-    p.on_frame(&lit, WARM + 2);
+    p.on_frame(&lit, WARM + 4);
     let mut after = Vec::new();
     for f in 0..6 {
         after.extend(
-            p.on_frame(&dialog_frame(&buf, end), WARM + 3 + f)
+            p.on_frame(&dialog_frame(&buf, end), WARM + 5 + f)
                 .iter()
                 .map(|i| i.text.clone()),
         );
@@ -5554,11 +5552,7 @@ fn alttp_a_new_message_is_not_read_out_of_the_old_buffer() {
     let r = Registry::builtin();
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     warm(&mut p, &dialog_frame(&zelda, zstarts[1]));
-    let ended: Vec<String> = p
-        .on_frame(&dialog_frame(&zelda, zstarts[4]), WARM)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let ended = read_page(&mut p, &dialog_frame(&zelda, zstarts[4]), WARM);
     assert!(ended.iter().any(|t| t == "Please help me!"), "{ended:?}");
 
     // The uncle's message is named, but the buffer and read_pos are still Zelda's.
@@ -5577,11 +5571,11 @@ fn alttp_a_new_message_is_not_read_out_of_the_old_buffer() {
     );
 
     // Now it is loaded: read_pos back near the start, the buffer the uncle's.
-    let loaded: Vec<String> = p
-        .on_frame(&with_msg_id(dialog_frame(&uncle, 4), 0x2A), WARM + 5)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let loaded = read_page(
+        &mut p,
+        &with_msg_id(dialog_frame(&uncle, 4), 0x2A),
+        WARM + 5,
+    );
     assert!(
         loaded.iter().any(|t| t == "Link, I am going out."),
         "and then it is read: {loaded:?}"
@@ -5622,11 +5616,7 @@ fn alttp_a_box_opening_on_a_leftover_buffer_reads_nothing() {
     );
 
     // Once the load is visible, the new message is read.
-    let loaded: Vec<String> = p
-        .on_frame(&with_msg_id(dialog_frame(&fresh, 4), 0x2A), 7)
-        .iter()
-        .map(|i| i.text.clone())
-        .collect();
+    let loaded = read_page(&mut p, &with_msg_id(dialog_frame(&fresh, 4), 0x2A), 7);
     assert!(
         loaded.iter().any(|t| t == "It is dangerous to go alone."),
         "{loaded:?}"
@@ -6242,13 +6232,108 @@ fn alttp_a_box_opening_before_its_load_reads_nothing() {
 
     // The load arrives, and the message that actually opened the box is read.
     p.on_frame(&dialog_frame(&fresh, 0), 8);
-    let said: Vec<String> = p
-        .on_frame(&dialog_frame(&fresh, 4), 9)
+    let said = read_page(&mut p, &dialog_frame(&fresh, 4), 9);
+    assert!(
+        said.iter().any(|t| t == "I will give 100 Rupees."),
+        "and then the real message: {said:?}"
+    );
+}
+
+#[test]
+fn alttp_a_stale_read_pos_does_not_pick_the_last_page_first() {
+    // The map came out as "of the dungeon (Press )." and only then "You got the Map! ... the
+    // rest" — its two pages, backwards. Text_LoadCharacterBuffer fills the buffer before it
+    // zeroes read_pos, so there is a window with the new text at the old message's position;
+    // locating a page from there lands in the LAST one.
+    //
+    // read_pos has to be inside the page being read, the renderer being what draws it. Beyond
+    // the page's own break, the position is not about this page, and the page is passed over
+    // rather than spoken.
+    let (old, ostarts) = dialog_buffer(&["Take my sword and shield and listen to me.", "<end>"]);
+    let (map, _) = dialog_buffer(&[
+        "You got the Map! You can use it to see the rest",
+        "<wait>",
+        "<scroll>",
+        "of the dungeon (Press ).",
+        "<end>",
+    ]);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let said = warm(&mut p, &dialog_frame(&old, ostarts[1]));
+    assert!(said.iter().any(|t| t.contains("Take my sword")), "{said:?}");
+
+    // The map's text arrives while read_pos still sits where the message before it left off.
+    // Deliberately INSIDE the map's second page rather than past the end of it: a position past
+    // the end finds no break at all and stops for that reason, which would prove nothing about
+    // locating a page from a position that does not belong to it.
+    let stale = 52;
+    let mut window = Vec::new();
+    for f in 0..4 {
+        window.extend(
+            p.on_frame(&dialog_frame(&map, stale), WARM + f)
+                .iter()
+                .map(|i| i.text.clone()),
+        );
+    }
+    assert!(
+        !window.iter().any(|t| t.contains("of the dungeon")),
+        "the last page is not spoken first: {window:?}"
+    );
+
+    // read_pos catches up, and the map reads from its first page.
+    p.on_frame(&dialog_frame(&map, 0), WARM + 5);
+    let first = read_page(&mut p, &dialog_frame(&map, 4), WARM + 6);
+    assert!(
+        first
+            .iter()
+            .any(|t| t == "You got the Map! You can use it to see the rest"),
+        "the first page leads: {first:?}"
+    );
+}
+
+#[test]
+fn alttp_a_half_written_buffer_is_not_read() {
+    // The uncle's line came out as "Link, I'm going out for a while. I'll be back by morning.
+    // Don't leave tle. My name is Zelda." — his message as far as it had been written, and then
+    // the tail of the message before it, because the terminator is written LAST and the decode
+    // ran straight past where it should have been.
+    //
+    // A half-written buffer differs from one frame to the next; a finished one does not. So a
+    // page is spoken only once its text has held still for a frame.
+    let (whole, _) = dialog_buffer(&["Do not leave the house.", "<end>"]);
+
+    // The same message with its terminator not yet written, so the decode runs on into the
+    // leftovers of a longer message behind it.
+    let mut half = whole.clone();
+    let cut = whole.len() - 8;
+    half.truncate(cut);
+    half.extend("tle. My name is Zelda.".chars().map(text_byte));
+    half.push(TEXT_END);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // The load lands, and the very next frame catches the buffer mid-write.
+    p.on_frame(&dialog_frame(&half, 0), 0);
+    let caught: Vec<String> = p
+        .on_frame(&dialog_frame(&half, 4), 1)
         .iter()
         .map(|i| i.text.clone())
         .collect();
     assert!(
-        said.iter().any(|t| t == "I will give 100 Rupees."),
-        "and then the real message: {said:?}"
+        !caught.iter().any(|t| t.contains("Zelda")),
+        "a half-written page is not spoken: {caught:?}"
+    );
+
+    // The write completes, and what is spoken is the finished message.
+    let done = read_page(&mut p, &dialog_frame(&whole, 4), 2);
+    assert!(
+        done.iter().any(|t| t == "Do not leave the house."),
+        "the finished message is: {done:?}"
+    );
+    assert!(
+        !done.iter().any(|t| t.contains("Zelda")),
+        "without the leftovers: {done:?}"
     );
 }
