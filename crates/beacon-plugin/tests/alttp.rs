@@ -5871,3 +5871,154 @@ fn alttp_the_pause_screen_does_not_read_leftover_dialogue() {
     );
     assert!(said.iter().any(|t| t == "Lamp"), "the item is: {said:?}");
 }
+
+// ── Pickups ─────────────────────────────────────────────────────────────────
+
+/// An in-play frame with the three pickup accumulators set: link_rupees_goal ($7EF360, u16),
+/// link_hearts_filler ($7EF372) and link_magic_filler ($7EF373).
+fn pickup_frame(rupees: u16, hearts_filler: u8, magic_filler: u8) -> Vec<u8> {
+    let mut ram = dungeon_frame((100, 100), (120, 100), &[]);
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    set(0x7EF360, (rupees & 0xFF) as u8);
+    set(0x7EF361, (rupees >> 8) as u8);
+    set(0x7EF372, hearts_filler);
+    set(0x7EF373, magic_filler);
+    ram
+}
+
+/// What a plugin already settled in play says when these three values change.
+fn after_pickup(r: &Registry, before: (u16, u8, u8), after: (u16, u8, u8)) -> Vec<String> {
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let start = pickup_frame(before.0, before.1, before.2);
+    for f in 0..3 {
+        p.on_frame(&start, f);
+    }
+    p.on_frame(&pickup_frame(after.0, after.1, after.2), 3)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect()
+}
+
+#[test]
+fn alttp_a_rupee_says_how_much_it_was_worth() {
+    // kRupeesAbsorption is {1, 5, 20} for green, blue and red, and chests give more. The amount
+    // comes free in the delta, so there is no reason to say only "rupee".
+    let r = Registry::builtin();
+    for (amount, line) in [
+        (1u16, "1 rupee."),
+        (5, "5 rupees."),
+        (20, "20 rupees."),
+        (300, "300 rupees."),
+    ] {
+        let said = after_pickup(&r, (0, 0, 0), (amount, 0, 0));
+        assert!(said.iter().any(|t| t == line), "{amount}: {said:?}");
+    }
+}
+
+#[test]
+fn alttp_a_heart_and_a_fairy_are_told_apart() {
+    // Both credit link_hearts_filler — a heart adds 8, a fairy 56 — so naming it "heart" either
+    // way would be wrong for one of them.
+    let r = Registry::builtin();
+    let heart = after_pickup(&r, (0, 0, 0), (0, 8, 0));
+    assert!(heart.iter().any(|t| t == "Heart."), "{heart:?}");
+    let fairy = after_pickup(&r, (0, 0, 0), (0, 56, 0));
+    assert!(fairy.iter().any(|t| t == "Fairy."), "{fairy:?}");
+    assert!(
+        !fairy.iter().any(|t| t == "Heart."),
+        "a fairy is not a heart: {fairy:?}"
+    );
+}
+
+#[test]
+fn alttp_a_magic_jar_says_whether_it_was_a_full_one() {
+    // A small jar adds 0x10; a full one sets the filler to 0x80.
+    let r = Registry::builtin();
+    let small = after_pickup(&r, (0, 0, 0), (0, 0, 0x10));
+    assert!(small.iter().any(|t| t == "Magic."), "{small:?}");
+    let full = after_pickup(&r, (0, 0, 0), (0, 0, 0x80));
+    assert!(full.iter().any(|t| t == "Full magic."), "{full:?}");
+}
+
+#[test]
+fn alttp_a_draining_filler_is_not_a_pickup() {
+    // This is why the fillers are the right thing to watch and also the trap in watching them:
+    // they fall every frame as they drain into health and magic, and rupees fall when spent.
+    // None of that is something Link picked up.
+    let r = Registry::builtin();
+    let drained = after_pickup(&r, (100, 40, 0x40), (60, 16, 0x10));
+    assert!(
+        !drained
+            .iter()
+            .any(|t| t.contains("rupee") || t.contains("Heart") || t.contains("Magic")),
+        "spending and draining say nothing: {drained:?}"
+    );
+}
+
+#[test]
+fn alttp_several_pickups_on_one_frame_are_all_named() {
+    // A dropped heart and a rupee can be absorbed on the same frame, and each is worth saying.
+    let r = Registry::builtin();
+    let said = after_pickup(&r, (0, 0, 0), (5, 8, 0x10));
+    for line in ["5 rupees.", "Heart.", "Magic."] {
+        assert!(said.iter().any(|t| t == line), "{line} among {said:?}");
+    }
+}
+
+#[test]
+fn alttp_arriving_in_play_is_not_a_pickup() {
+    // A game loading restores all three at once. The baseline is dropped whenever Link is not in
+    // play, so the first in-play frame has nothing to compare against and says nothing.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Not in play: the file select, all three reading zero as they do before a save is loaded.
+    let menu = file_select_frame(0, [true, false, false]);
+    for f in 0..3 {
+        p.on_frame(&menu, f);
+    }
+
+    // Then in play, the save's purse and fillers appearing all at once. Every one of them is
+    // higher than it was a frame ago, and none of it was picked up — which is why the baseline
+    // has to be dropped rather than carried across the boundary.
+    let arrived: Vec<String> = p
+        .on_frame(&pickup_frame(0x2C, 40, 0x80), 3)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        !arrived
+            .iter()
+            .any(|t| t.contains("rupee") || t.contains("Heart") || t.contains("magic")),
+        "arriving in play announces no pickups: {arrived:?}"
+    );
+}
+
+#[test]
+fn alttp_a_different_save_loaded_mid_session_is_not_a_pickup() {
+    // The baseline has to be DROPPED on leaving play, not merely left unset. Being in play
+    // records it; going to the file select and loading a different save comes back with a bigger
+    // purse and fuller bottles, and the difference is a different Link, not an acquisition.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // In play, with a modest purse, long enough for the baseline to be taken.
+    let poor = pickup_frame(10, 0, 0);
+    for f in 0..3 {
+        p.on_frame(&poor, f);
+    }
+
+    // Out to the file select and back in on a save that is further along.
+    p.on_frame(&file_select_frame(0, [true, false, false]), 3);
+    let rich: Vec<String> = p
+        .on_frame(&pickup_frame(900, 40, 0x80), 4)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        !rich
+            .iter()
+            .any(|t| t.contains("rupee") || t.contains("Heart") || t.contains("magic")),
+        "a different save is not a pickup: {rich:?}"
+    );
+}

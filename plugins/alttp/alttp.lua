@@ -839,6 +839,79 @@ function PAUSE.update(s)
   say(name or "No items", { priority = "critical", category = "menu" })
 end
 
+-- ── Pickups ─────────────────────────────────────────────────────────────────
+-- Say what was just picked up off the floor.
+--
+-- Sprite_HandleAbsorptionByPlayer is where every floor pickup lands, and hearts and magic do
+-- not go into the value the HUD shows. They go into a FILLER, which drains into the real value
+-- over the frames that follow — so watching health itself reports the DRAIN, several frames
+-- late and spread over many of them, rather than the moment of contact. The fillers jump the
+-- instant Link touches the thing, by an amount that says which thing it was.
+--
+-- Rupees work the other way round and need the other address of the pair: link_rupees_goal is
+-- credited whole on contact, and link_rupees_actual is what ticks up to meet it for the HUD.
+PICKUP = {
+  RUPEES = 0x7EF360, -- link_rupees_goal, u16
+  HEARTS = 0x7EF372, -- link_hearts_filler
+  MAGIC = 0x7EF373, -- link_magic_filler
+}
+
+-- kRupeesAbsorption is {1, 5, 20} for the green, blue and red ones, and chests give 50, 100 or
+-- 300 — so the amount is worth saying rather than just "rupee", and it comes free in the delta.
+function PICKUP.rupee_line(delta)
+  if delta == 1 then return "1 rupee." end
+  return string.format("%d rupees.", delta)
+end
+
+-- A heart adds 8 (health counts in eighths) and a fairy adds 56, both through the same filler,
+-- so naming it "heart" either way would be wrong for the fairy. Anything else is a bottle or a
+-- full refill, and is worth saying as an amount.
+function PICKUP.heart_line(delta)
+  if delta == 8 then return "Heart." end
+  if delta == 56 then return "Fairy." end
+  return string.format("%.1f hearts.", hearts(delta))
+end
+
+-- A small jar adds 0x10; a full one SETS the filler to 0x80, so the delta is larger unless the
+-- filler was already nearly full. Distinguishing them is worth it — a full refill changes what
+-- you can afford to cast.
+function PICKUP.magic_line(delta)
+  if delta > 0x10 then return "Full magic." end
+  return "Magic."
+end
+
+function PICKUP.update(s)
+  -- Out of play, forget the baseline: the values are restored wholesale when a game loads, and
+  -- a difference across that is not something Link picked up.
+  if not in_play(s) then
+    PICKUP.rupees, PICKUP.hearts, PICKUP.magic = nil, nil, nil
+    return
+  end
+
+  local rupees, hrts, magic = mem.u16(PICKUP.RUPEES), mem.u8(PICKUP.HEARTS), mem.u8(PICKUP.MAGIC)
+  local was_r, was_h, was_m = PICKUP.rupees, PICKUP.hearts, PICKUP.magic
+  PICKUP.rupees, PICKUP.hearts, PICKUP.magic = rupees, hrts, magic
+
+  -- Only ever an increase. All three fall in normal play — rupees when spent, the fillers as
+  -- they drain into health and magic — and none of that is an acquisition.
+  local lines = {}
+  if rupees ~= nil and was_r ~= nil and rupees > was_r then
+    lines[#lines + 1] = PICKUP.rupee_line(rupees - was_r)
+  end
+  if hrts ~= nil and was_h ~= nil and hrts > was_h then
+    lines[#lines + 1] = PICKUP.heart_line(hrts - was_h)
+  end
+  if magic ~= nil and was_m ~= nil and magic > was_m then
+    lines[#lines + 1] = PICKUP.magic_line(magic - was_m)
+  end
+
+  for _, line in ipairs(lines) do
+    -- Interaction, so a low chatter setting trims these before it trims navigation: they are
+    -- frequent, and a rupee is the least of what a player needs told.
+    say(line, { priority = "interaction", category = "pickup" })
+  end
+end
+
 -- The map's collision colours. A tile attribute describes what a tile *is* for
 -- collision; only a few classes are worth drawing, and the rest is open floor,
 -- left as background. Ported from the tile classes in alttp-navi's map_renderer.
@@ -2366,7 +2439,11 @@ function on_frame(frame)
     end
   end
 
-  -- Healing is worth knowing about too, quietly.
+  -- What was just picked up, named from the fillers it credited.
+  PICKUP.update(now)
+
+  -- Healing is worth knowing about too, quietly. Distinct from the pickup above, which says
+  -- what arrived; this says where it leaves you, as the filler drains into health.
   if in_play(now) and now.health > was.health then
     say(
       string.format("%.1f hearts.", hearts(now.health)),
