@@ -5242,6 +5242,7 @@ fn text_byte(c: char) -> u8 {
         '.' => 0x41,
         ',' => 0x42,
         '?' => 0x3F,
+        '>' => 0x44,
         '(' => 0x45,
         ')' => 0x46,
         '\'' => 0x50,
@@ -6335,5 +6336,126 @@ fn alttp_a_half_written_buffer_is_not_read() {
     assert!(
         !done.iter().any(|t| t.contains("Zelda")),
         "without the leftovers: {done:?}"
+    );
+}
+
+// ── Choices ─────────────────────────────────────────────────────────────────
+
+const TEXT_CHOOSE: u8 = 0x68;
+const TEXT_LINE2: u8 = 0x75;
+const TEXT_LINE3: u8 = 0x76;
+
+/// The sanctuary priest's closing page, as the message itself is laid out: the question, then the
+/// options on their own lines with the cursor glyph against the first, then a Choose command.
+fn choice_buffer() -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend("Do you understand?".chars().map(text_byte));
+    buf.push(TEXT_LINE2);
+    buf.extend("  > Yes".chars().map(text_byte));
+    buf.push(TEXT_LINE3);
+    buf.extend("  Not at all".chars().map(text_byte));
+    buf.push(TEXT_CHOOSE);
+    buf.push(TEXT_END);
+    buf
+}
+
+/// The choice frame with a given selection in choice_in_multiselect_box.
+fn choice_frame(buf: &[u8], pos: u16, choice: u8) -> Vec<u8> {
+    let mut ram = dialog_frame(buf, pos);
+    ram[wram_offset(0x7E1CE8).unwrap()] = choice;
+    ram
+}
+
+#[test]
+fn alttp_a_choice_reads_the_question_and_the_option_under_the_cursor() {
+    // Reading every option gives away a choice the player has not made. The question and the
+    // option they are on is what the screen is telling them.
+    let buf = choice_buffer();
+    let brk = (buf.len() - 2) as u16; // the Choose command
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let said = warm(&mut p, &choice_frame(&buf, brk, 0));
+    assert!(
+        said.iter().any(|t| t == "Do you understand? Yes"),
+        "the question and the selected option: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|t| t.contains("Not at all")),
+        "and not the one not selected: {said:?}"
+    );
+}
+
+#[test]
+fn alttp_moving_between_options_reads_the_one_moved_to() {
+    let buf = choice_buffer();
+    let brk = (buf.len() - 2) as u16;
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    warm(&mut p, &choice_frame(&buf, brk, 0));
+
+    // Down to the second option. The game reloads a cursor-only message to move the marker, so the
+    // options are no longer in the buffer — they have to have been remembered.
+    let mut cursor_only = vec![TEXT_LINE2];
+    cursor_only.extend("     ".chars().map(text_byte));
+    cursor_only.push(TEXT_LINE3);
+    cursor_only.extend("  >".chars().map(text_byte));
+    cursor_only.push(TEXT_CHOOSE);
+    cursor_only.push(TEXT_END);
+
+    let moved: Vec<String> = p
+        .on_frame(&choice_frame(&cursor_only, 0, 1), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        moved.iter().any(|t| t == "Not at all"),
+        "the option moved to is read: {moved:?}"
+    );
+    assert!(
+        !moved.iter().any(|t| t.contains("understand")),
+        "without asking the question again: {moved:?}"
+    );
+
+    // And back up again.
+    let back: Vec<String> = p
+        .on_frame(&choice_frame(&cursor_only, 0, 0), WARM + 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(back.iter().any(|t| t == "Yes"), "and back: {back:?}");
+}
+
+#[test]
+fn alttp_a_cursor_only_message_says_nothing_of_its_own() {
+    // Blanks and a ">" is not something to read out, and it must not be allowed to replace the
+    // options it was drawn on top of — otherwise the next move has nothing to name.
+    let buf = choice_buffer();
+    let brk = (buf.len() - 2) as u16;
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    warm(&mut p, &choice_frame(&buf, brk, 0));
+
+    let mut cursor_only = vec![TEXT_LINE3];
+    cursor_only.extend("  >".chars().map(text_byte));
+    cursor_only.push(TEXT_CHOOSE);
+    cursor_only.push(TEXT_END);
+
+    // Loaded with the selection unchanged: nothing to announce at all.
+    let quiet = read_page(&mut p, &choice_frame(&cursor_only, 4, 0), WARM);
+    assert!(
+        !quiet.iter().any(|t| t.contains(">")),
+        "the marker is not spoken: {quiet:?}"
+    );
+
+    // The options survived it, so moving still names one.
+    let moved: Vec<String> = p
+        .on_frame(&choice_frame(&cursor_only, 4, 1), WARM + 3)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        moved.iter().any(|t| t == "Not at all"),
+        "the options were not lost: {moved:?}"
     );
 }

@@ -645,6 +645,70 @@ function TEXT.page_at(pos)
   return from
 end
 
+-- ── Choices ────────────────────────────────────────────────────────────────
+-- A page ending in a Choose command asks something and offers options, and both are part of the
+-- message. The sanctuary priest's last page is three lines — "Do you understand?", "  > Yes",
+-- "  Not at all" — with the Choose at the end of the last. The cursor glyph is what marks where
+-- the options start: everything before it is the question.
+--
+-- The options have to be taken while that page is up, because they are not there afterwards.
+-- Moving between them makes the game load a message consisting of nothing but blanks and a ">" —
+-- messages 1 to 3, or 6 to 12 depending on which Choose it is — purely to redraw the marker. So
+-- from the first keypress onward the buffer no longer holds the options at all, and the selection
+-- has to be read from choice_in_multiselect_box against what was remembered.
+TEXT.CHOOSE = {
+  [0x68] = true, -- Choose
+  [0x69] = true, -- Item
+  [0x6F] = true, -- Selchg
+  [0x71] = true, -- Choose3
+  [0x72] = true, -- Choose2
+}
+TEXT.CHOICE = 0x7E1CE8 -- choice_in_multiselect_box
+TEXT.CURSOR = ">"
+
+-- A page's lines, as the message itself breaks them. The line and scroll commands are the breaks;
+-- decode flattens them to spaces, which is right for reading a page aloud and wrong for telling
+-- one option from the next.
+function TEXT.lines(from, brk)
+  local starts, i = { from }, from
+  while i < brk and i < TEXT.MAX do
+    local b = mem.u8(TEXT.BUFFER + i)
+    if b == nil then break end
+    local step = (b >= 0x67 and b <= 0x7E) and (CMD_LENGTHS[b - 0x67 + 1] or 1) or 1
+    if b == 0x73 or b == 0x74 or b == 0x75 or b == 0x76 then starts[#starts + 1] = i + step end
+    i = i + step
+  end
+  local out = {}
+  for k = 1, #starts do
+    out[#out + 1] = TEXT.decode(starts[k], (k < #starts) and starts[k + 1] or brk)
+  end
+  return out
+end
+
+-- The question and the options of a choice page, or nil if it holds no options — which is what a
+-- cursor-only message looks like, and why the caller must not let one overwrite what it knows.
+function TEXT.choices(from, brk)
+  local lines, at = TEXT.lines(from, brk), nil
+  for k, line in ipairs(lines) do
+    if line:find(TEXT.CURSOR, 1, true) then
+      at = k
+      break
+    end
+  end
+  if at == nil then return nil end
+  local ask, options = {}, {}
+  for k, line in ipairs(lines) do
+    if k < at then
+      if line ~= "" then ask[#ask + 1] = line end
+    else
+      local opt = line:gsub(TEXT.CURSOR, ""):match("^%s*(.-)%s*$")
+      if opt ~= "" then options[#options + 1] = opt end
+    end
+  end
+  if #options == 0 then return nil end
+  return table.concat(ask, " "), options
+end
+
 -- The whole of the page being shown, for reading on demand. The whole page rather than the
 -- part drawn so far: it is all in the buffer, and the player asking wants the page, not a
 -- race with the typewriter.
@@ -736,8 +800,20 @@ function TEXT.update(s)
   -- Track wherever the message is, but only speak while a box is up and the buffer is known to
   -- match it. A closing box also ends a "showing": see TEXT.read.
   if not boxed or not TEXT.trust then
-    TEXT.read = {}
+    TEXT.read, TEXT.options, TEXT.choice = {}, nil, nil
     return
+  end
+
+  -- Moving between the options of a choice. The game redraws only the marker, not the question,
+  -- so the option is the whole of what there is to say — and it is said on every move, since
+  -- landing back on one the player has already heard is still a move they need confirmed.
+  local choice = mem.u8(TEXT.CHOICE)
+  if TEXT.options ~= nil and choice ~= nil and choice ~= TEXT.choice then
+    TEXT.choice = choice
+    local option = TEXT.options[choice + 1]
+    if option ~= nil then
+      say(option, { priority = "critical", category = "menu" })
+    end
   end
 
   if TEXT.spoke ~= nil then
@@ -753,6 +829,24 @@ function TEXT.update(s)
   if brk == nil then return end
 
   local text, stop = TEXT.decode(TEXT.from, brk)
+
+  -- A page that ends in a Choose offers options, and reading them all out gives away a choice the
+  -- player has not made. So it asks the question and names the one under the cursor; the rest are
+  -- heard by moving to them.
+  if TEXT.CHOOSE[mem.u8(TEXT.BUFFER + brk) or 0] then
+    local ask, options = TEXT.choices(TEXT.from, brk)
+    if options == nil then
+      -- A cursor-only message, loaded to move the marker. Nothing of its own to say, and it must
+      -- not be allowed to replace the options it was drawn on top of.
+      text = ""
+    else
+      TEXT.options = options
+      TEXT.choice = mem.u8(TEXT.CHOICE) or 0
+      local option = options[TEXT.choice + 1] or options[1]
+      text = (ask ~= "" and (ask .. " " .. option)) or option
+    end
+  end
+
   TEXT.spoke = brk
   -- The next page starts after this one's break — or after the word that ran past it, when a
   -- word was split across it, so the half already spoken is not said again.
