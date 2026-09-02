@@ -858,6 +858,11 @@ PICKUP = {
 
 -- kRupeesAbsorption is {1, 5, 20} for the green, blue and red ones, and chests give 50, 100 or
 -- 300 — so the amount is worth saying rather than just "rupee", and it comes free in the delta.
+--
+-- Every rupee is announced, floor ones included, and the player has confirmed that saying the
+-- amount from a chest is what they want. The open question if it ever grates in play is volume
+-- rather than wording: floor rupees are everywhere, and the answer would be to add up the ones
+-- absorbed close together and say one total. Not done, because it is not known to be a problem.
 function PICKUP.rupee_line(delta)
   if delta == 1 then return "1 rupee." end
   return string.format("%d rupees.", delta)
@@ -875,6 +880,10 @@ end
 -- A small jar adds 0x10; a full one SETS the filler to 0x80, so the delta is larger unless the
 -- filler was already nearly full. Distinguishing them is worth it — a full refill changes what
 -- you can afford to cast.
+--
+-- "Magic" and not "Potion", settled with the player. The request called it a potion, but in this
+-- game that word is the bottled red, green and blue potions, which are a different thing and
+-- drunk rather than walked over; the jar has no name of its own in any text the game shows.
 function PICKUP.magic_line(delta)
   if delta > 0x10 then return "Full magic." end
   return "Magic."
