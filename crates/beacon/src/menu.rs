@@ -166,6 +166,19 @@ pub struct Menu {
     stack: Vec<Frame>,
 }
 
+/// One entry as something outside the menu can see it.
+///
+/// The speech this module returns is Beacon's own voice. This is the same content in a
+/// form the platform's accessibility layer can be handed instead, so a screen reader
+/// announces the menu itself, in its own words and conventions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown {
+    pub label: String,
+    /// Whether it leads to another level, which a screen reader renders its own way —
+    /// as a submenu, rather than by the word being read out.
+    pub submenu: bool,
+}
+
 /// What choosing an entry did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Chosen {
@@ -227,6 +240,28 @@ impl Menu {
         format!("{}. {}", self.top().level.title(), self.announce())
     }
 
+    /// The name of the level on show, for labelling the menu.
+    pub fn title(&self) -> &'static str {
+        self.top().level.title()
+    }
+
+    /// The entries on show, in order.
+    pub fn shown(&self) -> Vec<Shown> {
+        self.top()
+            .entries
+            .iter()
+            .map(|entry| Shown {
+                label: entry.label.clone(),
+                submenu: matches!(entry.does, Does::Enter(_)),
+            })
+            .collect()
+    }
+
+    /// Which entry is selected, as an index into [`Menu::shown`].
+    pub fn selected(&self) -> usize {
+        self.top().index
+    }
+
     /// Moves the cursor, wrapping, and returns the new selection's announcement.
     pub fn navigate(&mut self, delta: i32) -> String {
         let frame = self
@@ -236,6 +271,20 @@ impl Menu {
         let n = frame.entries.len() as i32;
         if n > 0 {
             frame.index = (((frame.index as i32 + delta) % n + n) % n) as usize;
+        }
+        self.announce()
+    }
+
+    /// Moves the cursor to an absolute position, for assistive technology driving the
+    /// menu by node rather than by direction. Out of range is ignored, since a stale node
+    /// id from a level that has since changed must not put the cursor nowhere.
+    pub fn select(&mut self, index: usize) -> String {
+        let frame = self
+            .stack
+            .last_mut()
+            .expect("the root frame is never popped");
+        if index < frame.entries.len() {
+            frame.index = index;
         }
         self.announce()
     }
@@ -284,6 +333,54 @@ mod tests {
     }
 
     #[test]
+    fn the_structure_is_readable_from_outside_for_the_platform_to_publish() {
+        // Same content as the spoken form, without the words: a screen reader says "submenu"
+        // and the position in its own way, so handing it prose would have it read twice.
+        let ctx = ctx();
+        let mut menu = Menu::open(&ctx);
+        assert_eq!(menu.title(), "Menu");
+        assert_eq!(menu.selected(), 0);
+        assert_eq!(
+            menu.shown(),
+            vec![
+                Shown {
+                    label: "File".into(),
+                    submenu: true
+                },
+                Shown {
+                    label: "Save".into(),
+                    submenu: true
+                },
+                Shown {
+                    label: "Load".into(),
+                    submenu: true
+                },
+                Shown {
+                    label: "Input".into(),
+                    submenu: true
+                },
+            ]
+        );
+
+        menu.navigate(1);
+        assert_eq!(menu.selected(), 1);
+
+        menu.choose(&ctx); // into Save
+        assert_eq!(menu.title(), "Save");
+        assert_eq!(menu.selected(), 0);
+        let slots = menu.shown();
+        assert_eq!(slots[0].label, "Slot 0, occupied");
+        assert!(
+            !slots[0].submenu,
+            "a slot acts rather than leading anywhere"
+        );
+
+        menu.choose(&ctx); // File, Open: a level whose entries are files
+        menu.back();
+        assert_eq!(menu.title(), "Menu");
+    }
+
+    #[test]
     fn every_announcement_says_where_it_is_in_the_list() {
         // Length and position are what a sighted user gets for free and a listener
         // does not, so they are in every line rather than in a separate one.
@@ -301,6 +398,15 @@ mod tests {
         menu.choose(&ctx()); // into File
         assert_eq!(menu.announce(), "Open, 1 of 2, submenu.");
         assert_eq!(menu.navigate(1), "Exit, 2 of 2.");
+    }
+
+    #[test]
+    fn selecting_by_position_ignores_one_out_of_range() {
+        // A screen reader can name a node from a level that has since changed under it.
+        // Landing on nothing would be worse than staying put.
+        let mut menu = Menu::open(&ctx());
+        assert_eq!(menu.select(2), "Load, 3 of 4, submenu.");
+        assert_eq!(menu.select(99), "Load, 3 of 4, submenu.");
     }
 
     #[test]

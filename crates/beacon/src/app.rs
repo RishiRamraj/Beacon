@@ -9,12 +9,14 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 
+use accesskit_winit::{Adapter, Event as AccessEvent, WindowEvent as AccessWindowEvent};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::access;
 use crate::input::{self, Input};
 use crate::mcp;
 use crate::session::Session;
@@ -36,6 +38,17 @@ pub struct App {
     map_only: bool,
     /// Tracks the map's visibility so the window is resized when it toggles.
     map_shown: bool,
+
+    /// Publishes Beacon's accessibility tree, so the platform's own screen reader can
+    /// read the menu. `None` until the window exists.
+    access: Option<Adapter>,
+    /// Handed to the adapter so it can wake the event loop when assistive technology
+    /// asks for the tree or requests an action.
+    access_proxy: EventLoopProxy<AccessEvent>,
+    /// The menu as last published, so the tree is only pushed when it changes. Compared
+    /// rather than diffed because a tree update is cheap and a comparison is cheaper than
+    /// working out what moved.
+    published: Option<(String, Vec<String>, usize)>,
 }
 
 /// The base game panel size, the SNES 256x224 scaled up.
@@ -88,6 +101,7 @@ impl App {
         input: Input,
         map_only: bool,
         control_rx: Option<Receiver<mcp::Request>>,
+        access_proxy: EventLoopProxy<AccessEvent>,
     ) -> Self {
         App {
             session,
@@ -98,6 +112,74 @@ impl App {
             context: None,
             map_only,
             map_shown: false,
+            access: None,
+            access_proxy,
+            published: None,
+        }
+    }
+
+    /// Carries out an action a screen reader asked for.
+    ///
+    /// Its user's own habits, not Beacon's keys: clicking an item, or expanding one, or
+    /// moving the reader's focus. Each is the same verb the keyboard drives, so the menu
+    /// behaves identically however it is reached — including still speaking in Beacon's
+    /// voice, which is what keeps it usable with the reader turned off.
+    fn access_action(&mut self, request: accesskit::ActionRequest) {
+        use accesskit::Action;
+        let Some(index) = access::entry_index(request.target_node) else {
+            return;
+        };
+        match request.action {
+            Action::Focus => self.session.menu_select(index),
+            Action::Click | Action::Expand => {
+                self.session.menu_select(index);
+                self.session.menu_choose();
+            }
+            Action::Collapse => self.session.menu_back(),
+            _ => {}
+        }
+    }
+
+    /// Beacon's accessibility tree as it stands: the window, and the menu if one is open.
+    fn tree(&self) -> accesskit::TreeUpdate {
+        let size = self
+            .window
+            .as_ref()
+            .map(|w| {
+                let s = w.inner_size();
+                (s.width as f64, s.height as f64)
+            })
+            .unwrap_or((0.0, 0.0));
+        match self.session.menu() {
+            Some(menu) => access::menu_tree("Beacon", size, menu),
+            None => access::window_only("Beacon", size),
+        }
+    }
+
+    /// Publishes the tree if the menu has changed since it was last published.
+    ///
+    /// Called once per wake rather than at each place the menu is touched, so a change
+    /// made by an agent over the control socket reaches the screen reader the same way a
+    /// keypress does. Nothing is published while no assistive technology is listening —
+    /// `update_if_active` is what decides that, not this.
+    fn publish_access(&mut self) {
+        let now = self.session.menu().map(|menu| {
+            (
+                menu.title().to_string(),
+                menu.shown()
+                    .into_iter()
+                    .map(|e| e.label)
+                    .collect::<Vec<_>>(),
+                menu.selected(),
+            )
+        });
+        if now == self.published {
+            return;
+        }
+        self.published = now;
+        let update = self.tree();
+        if let Some(adapter) = self.access.as_mut() {
+            adapter.update_if_active(|| update);
         }
     }
 
@@ -250,7 +332,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<AccessEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -272,6 +354,13 @@ impl ApplicationHandler for App {
             }
         };
 
+        // Before the surface, so the adapter sees the window at its initial size.
+        self.access = Some(Adapter::with_event_loop_proxy(
+            event_loop,
+            &window,
+            self.access_proxy.clone(),
+        ));
+
         match softbuffer::Context::new(Rc::clone(&window))
             .and_then(|ctx| softbuffer::Surface::new(&ctx, Rc::clone(&window)).map(|s| (ctx, s)))
         {
@@ -291,6 +380,12 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // The adapter needs focus and size changes to keep the platform's view of the
+        // window in step. It reads only; keys are still handled below as before.
+        if let (Some(adapter), Some(window)) = (self.access.as_mut(), self.window.as_ref()) {
+            adapter.process_event(window, &event);
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -327,6 +422,33 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// Requests from assistive technology, which arrive on this thread by way of the proxy.
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AccessEvent) {
+        match event.window_event {
+            // Asked for on activation, and whenever a screen reader attaches later. The
+            // whole tree, since the platform has nothing yet to update against.
+            AccessWindowEvent::InitialTreeRequested => {
+                let update = self.tree();
+                if let Some(adapter) = self.access.as_mut() {
+                    adapter.update_if_active(|| update);
+                }
+            }
+            // A screen reader driving the menu itself — clicking an item, or moving focus
+            // with its own review keys. Honoured, so the menu works the way its user's
+            // reader works and not only the way Beacon's keys do.
+            AccessWindowEvent::ActionRequested(request) => {
+                self.access_action(request);
+                // File, Exit is reachable from here too, so a quit asked for by a screen
+                // reader has to be honoured like one asked for by a key.
+                self.honour_quit(event_loop);
+            }
+            // Nothing is listening any more. The next request builds the tree again, so
+            // there is nothing to tear down; forgetting what was published means a reader
+            // that comes back is sent the tree rather than skipped as unchanged.
+            AccessWindowEvent::AccessibilityDeactivated => self.published = None,
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Run any control-socket requests first, so an attached agent stays
         // responsive even while the game is paused (this wake still fires).
@@ -357,6 +479,10 @@ impl ApplicationHandler for App {
         if self.session.in_config() || self.session.in_menu() {
             self.input.clear_keyboard();
         }
+        // After input and before frames: the menu's state is settled by now, whether it
+        // moved by key, by pad, or by an agent over the control socket.
+        self.publish_access();
+
         self.session.set_held_buttons(self.input.buttons());
         self.session.run_frames();
 

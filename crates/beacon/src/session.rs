@@ -540,12 +540,29 @@ impl Session {
         self.menu.is_some()
     }
 
+    /// The open menu, for the shell to publish to the platform's accessibility layer.
+    pub fn menu(&self) -> Option<&Menu> {
+        self.menu.as_ref()
+    }
+
     /// Moves the selection, announcing what it landed on.
     pub fn menu_navigate(&mut self, delta: i32) {
         let Some(open) = self.menu.as_mut() else {
             return;
         };
         let said = open.navigate(delta);
+        self.say_now(said);
+    }
+
+    /// Moves the selection to an absolute position, announcing what it landed on.
+    ///
+    /// For assistive technology, which drives a menu by naming a node rather than a
+    /// direction: a reader's own review keys, or a click on an item.
+    pub fn menu_select(&mut self, index: usize) {
+        let Some(open) = self.menu.as_mut() else {
+            return;
+        };
+        let said = open.select(index);
         self.say_now(said);
     }
 

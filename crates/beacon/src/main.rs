@@ -1,5 +1,6 @@
 //! Beacon: a SNES emulator with accessibility as a first class feature.
 
+mod access;
 mod action;
 mod app;
 mod audio;
@@ -302,10 +303,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let mut app = app::App::new(session, input::Input::new(), args.map_only, control_rx);
-
-    let event_loop = winit::event_loop::EventLoop::new()?;
+    // A user-event loop, because the accessibility adapter wakes it: assistive technology
+    // asks for the tree from its own thread, and the reply has to come from this one.
+    let event_loop =
+        winit::event_loop::EventLoop::<accesskit_winit::Event>::with_user_event().build()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    let mut app = app::App::new(
+        session,
+        input::Input::new(),
+        args.map_only,
+        control_rx,
+        event_loop.create_proxy(),
+    );
     event_loop.run_app(&mut app)?;
     Ok(())
 }

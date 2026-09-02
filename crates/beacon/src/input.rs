@@ -162,6 +162,21 @@ const ACTION_PAD: &[(Button, &str)] = &[
     (Button::Z, "Pad:Z"),
 ];
 
+/// Whether a device gilrs offered is actually a game controller.
+///
+/// It is not always: gilrs enumerates evdev devices by their capabilities, and on this
+/// machine it presented a keyboard's System Control collection — "sporewoh minipeg48
+/// System Control" — as a gamepad. Its phantom button presses were resolving to actions
+/// nobody asked for, which showed up as commands firing on their own and, once the menu
+/// was bound to a pad button, as the menu opening by itself and freezing the game.
+///
+/// An SDL mapping is what tells them apart. A recognised controller has one, matched from
+/// the SDL database by device id; anything gilrs is guessing at from raw driver
+/// capabilities reports `Driver` instead, which is what that keyboard reported.
+fn is_controller(pad: &gilrs::Gamepad) -> bool {
+    pad.mapping_source() == gilrs::MappingSource::SdlMappings
+}
+
 /// The stable name for a gamepad button, or `None` for one Beacon ignores.
 pub fn pad_button_name(b: Button) -> Option<&'static str> {
     GAME_PAD
@@ -279,9 +294,13 @@ impl Input {
             return Vec::new();
         };
 
-        // Drain events, capturing button-down edges for the action layer.
+        // Drain events, capturing button-down edges for the action layer. Only from devices
+        // that are really controllers: see `is_controller`.
         let mut pressed = Vec::new();
         while let Some(ev) = gilrs.next_event() {
+            if !is_controller(&gilrs.gamepad(ev.id)) {
+                continue;
+            }
             if let gilrs::EventType::ButtonPressed(b, _) = ev.event {
                 if let Some(name) = pad_button_name(b) {
                     pressed.push(name);
@@ -291,7 +310,7 @@ impl Input {
 
         // Rebuild the held SNES mask from the first connected pad.
         let mut mask = 0u16;
-        if let Some((_id, pad)) = gilrs.gamepads().next() {
+        if let Some((_id, pad)) = gilrs.gamepads().find(|(_, pad)| is_controller(pad)) {
             for (b, _, bit) in GAME_PAD {
                 if pad.is_pressed(*b) {
                     mask |= *bit;
