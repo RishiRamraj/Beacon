@@ -6502,3 +6502,51 @@ fn alttp_moving_without_the_options_still_says_which_one() {
         "and so is moving back: {back:?}"
     );
 }
+
+#[test]
+fn alttp_options_are_recovered_from_the_message_underneath() {
+    // Arriving part way through a choice means never having read the page with the options on it.
+    // They are still in the buffer though: the cursor-only message is seventeen bytes and
+    // Text_LoadCharacterBuffer writes only as far as a message needs, so the prompt it replaced is
+    // sitting right behind it. Observed live — the priest's "Do you understand? > Yes / Not at
+    // all" was still readable from byte 17 on, while byte 0 held the cursor message.
+    let mut buf = cursor_only_message();
+    // The prompt underneath, as the buffer really lays it out: a page break, the question, the
+    // options, the Choose, and its own terminator.
+    buf.push(TEXT_WAITKEY);
+    buf.push(TEXT_SCROLL);
+    buf.extend("Do you understand?".chars().map(text_byte));
+    buf.push(TEXT_SCROLL);
+    buf.extend("    > Yes".chars().map(text_byte));
+    buf.push(TEXT_SCROLL);
+    buf.extend("       Not at all".chars().map(text_byte));
+    buf.push(TEXT_CHOOSE);
+    buf.push(TEXT_END);
+
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Straight into the cursor message, exactly as a reload mid-choice does.
+    let quiet = warm(&mut p, &choice_frame(&buf, 4, 0));
+    assert!(
+        !quiet.iter().any(|t| t.contains("understand")),
+        "the question is not re-asked: {quiet:?}"
+    );
+
+    // Moving now names the option, rather than falling back to "Option 2".
+    let moved: Vec<String> = p
+        .on_frame(&choice_frame(&buf, 4, 1), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        moved.iter().any(|t| t == "Not at all"),
+        "the name is recovered: {moved:?}"
+    );
+    let back: Vec<String> = p
+        .on_frame(&choice_frame(&buf, 4, 0), WARM + 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(back.iter().any(|t| t == "Yes"), "and the other: {back:?}");
+}
