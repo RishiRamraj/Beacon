@@ -51,10 +51,11 @@ action keys (default, all rebindable):
   c   scan              e   where am I      h   status
   t   save state        g   load state      n/b next/prev slot
   p   pause             f   frame advance   v   cycle verbosity
+  j   mute
   r   repeat last       k   input config    esc quit
-  o   menu
+  tab menu
 
-The menu (o, or the guide button on a pad) reaches File (open a ROM, exit), Save
+The menu (tab, or the guide button on a pad) reaches File (open a ROM, exit), Save
 and Load by slot, and Input. Up and down move, right or enter chooses, left goes
 back, escape closes. Every entry says where it is in its list and whether it
 leads to a submenu, so the shape of the menu is audible.
@@ -267,8 +268,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         sha1.as_deref().unwrap_or("unknown"),
     );
-    // Fill any keys the plugin suggests for its commands, without overriding the
-    // user's own bindings.
+    // Fill any keys a built-in action or the plugin suggests, without overriding the
+    // user's own bindings. Built-ins first, so a plugin command cannot take the key a
+    // new host action was about to get.
+    session.apply_builtin_default_keys();
     session.apply_plugin_default_keys();
     if args.map || args.map_only {
         session.show_map_at_start();

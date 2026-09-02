@@ -218,10 +218,11 @@ impl Default for Keymap {
         bind("KeyN", "next_slot");
         bind("KeyB", "prev_slot");
         bind("KeyP", "pause");
+        bind("KeyJ", "mute");
         bind("KeyF", "frame_advance");
         bind("KeyM", "toggle_map");
         bind("KeyK", "bind");
-        bind("KeyO", "menu");
+        bind("Tab", "menu");
 
         // Gamepad defaults, on the pad's extra buttons so a controller-only
         // player can reach the essentials and the configuration without a
