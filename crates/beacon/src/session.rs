@@ -13,6 +13,7 @@
 //! keyboard, a gamepad, or an agent is supplying them.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use beacon_config::Settings;
@@ -25,6 +26,8 @@ use crate::action::{self, Action, Bindable};
 use crate::audio::Audio;
 use crate::beacons::BeaconMixer;
 use crate::config_modal::{Bound, ConfigModal};
+use crate::menu::{self, Act, Backed, Chosen, Menu};
+use crate::rom;
 use crate::state::{SlotStore, SLOTS};
 
 /// How many recent spoken lines to retain for an agent to read back. Bounded so
@@ -46,6 +49,9 @@ pub struct Session {
     reload_spec: Option<PluginSpec>,
     /// The headerless ROM, handed to the plugin on load and reload.
     rom: std::rc::Rc<Vec<u8>>,
+    /// Where the ROM came from. Kept for two things the menu needs: the directory
+    /// to offer other ROMs from, and something to call the one that is running.
+    rom_path: PathBuf,
     settings: Settings,
 
     slots: SlotStore,
@@ -56,6 +62,12 @@ pub struct Session {
     timing_disturbed: bool,
     /// `Some` while the input configuration is open; the game is suspended then.
     config: Option<ConfigModal>,
+    /// `Some` while the menu is open; the game is suspended then, for the same
+    /// reason — nothing should walk into a pit while a list is being read.
+    menu: Option<Menu>,
+    /// Whether the game was already paused when the menu opened, so closing it puts
+    /// things back rather than starting a game the player deliberately stopped.
+    paused_before_menu: bool,
     /// Whether the plugin's map view is showing.
     show_map: bool,
     /// The plugin's navigation state last frame, so the map can be brought up on
@@ -97,6 +109,7 @@ impl Session {
         plugin: Box<dyn Plugin>,
         reload_spec: Option<PluginSpec>,
         rom: std::rc::Rc<Vec<u8>>,
+        rom_path: PathBuf,
         settings: Settings,
         rom_id: &str,
     ) -> Self {
@@ -108,12 +121,15 @@ impl Session {
             plugin,
             reload_spec,
             rom,
+            rom_path,
             settings,
             slots: SlotStore::new(rom_id),
             active_slot: 0,
             paused: false,
             timing_disturbed: false,
             config: None,
+            menu: None,
+            paused_before_menu: false,
             show_map: false,
             nav_was_active: false,
             map_buffer: Vec::new(),
@@ -319,6 +335,7 @@ impl Session {
             Action::Mute => self.toggle_mute(),
             Action::ToggleMap => self.toggle_map(),
             Action::OpenInputConfig => self.open_input_config(),
+            Action::OpenMenu => self.open_menu(),
             Action::Command(name) => self.run_command(&name),
         }
     }
@@ -481,6 +498,163 @@ impl Session {
     /// The last rendered map pixels, for encoding by the MCP server.
     pub fn map_pixels(&self) -> &[u32] {
         &self.map_buffer
+    }
+
+    // --- Menu -------------------------------------------------------------
+
+    /// What the menu needs to list its levels: which slots are taken, and the ROMs
+    /// sitting beside the one that is running.
+    ///
+    /// Gathered fresh each time a level is entered, so a slot that filled since the
+    /// menu opened reads as occupied.
+    fn menu_context(&self) -> menu::Context {
+        menu::Context {
+            slots: (0..SLOTS).map(|s| self.slots.occupied(s)).collect(),
+            roms: self
+                .rom_path
+                .parent()
+                .map(rom::files_in)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn open_menu(&mut self) {
+        // Freeze the game. Reading a list by ear takes as long as it takes, and
+        // nothing should be walking into a pit meanwhile. Remembered, because a
+        // player who had already paused did so on purpose and closing a menu is no
+        // reason to set the game going again.
+        self.paused_before_menu = self.paused;
+        self.paused = true;
+        self.timing_disturbed = true;
+        self.held_buttons = 0;
+
+        let open = Menu::open(&self.menu_context());
+        let first = open.announce();
+        self.menu = Some(open);
+        self.say_now(menu::HELP);
+        self.say_now(first);
+    }
+
+    /// Whether the menu is open.
+    pub fn in_menu(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    /// Moves the selection, announcing what it landed on.
+    pub fn menu_navigate(&mut self, delta: i32) {
+        let Some(open) = self.menu.as_mut() else {
+            return;
+        };
+        let said = open.navigate(delta);
+        self.say_now(said);
+    }
+
+    /// Chooses the selected entry: descends a level, or carries out its act.
+    pub fn menu_choose(&mut self) {
+        let ctx = self.menu_context();
+        let Some(open) = self.menu.as_mut() else {
+            return;
+        };
+        let chosen = open.choose(&ctx);
+        match chosen {
+            Chosen::Moved(said) | Chosen::Nothing(said) => self.say_now(said),
+            Chosen::Act(act) => {
+                // Choosing finishes with the menu. Every act either leaves Beacon,
+                // replaces what is running, or is done the moment it is spoken, and
+                // none of them wants a list still open behind it.
+                self.menu = None;
+                self.paused = self.paused_before_menu;
+                self.perform(act);
+            }
+        }
+    }
+
+    /// Goes back a level, or closes if already at the top.
+    pub fn menu_back(&mut self) {
+        let Some(open) = self.menu.as_mut() else {
+            return;
+        };
+        match open.back() {
+            Backed::Moved(said) => self.say_now(said),
+            Backed::Close => self.menu_close(),
+        }
+    }
+
+    /// Closes the menu and resumes play.
+    pub fn menu_close(&mut self) {
+        self.menu = None;
+        self.held_buttons = 0;
+        self.paused = self.paused_before_menu;
+        self.say_now("Menu closed.");
+    }
+
+    fn perform(&mut self, act: Act) {
+        match act {
+            Act::Exit => {
+                self.say_now("Goodbye.");
+                self.quit = true;
+            }
+            // Through the active slot rather than around it, so the slot the menu
+            // acted on is the one the save and load KEYS then act on. Two ways to
+            // reach the same slots that disagreed about which was current would be
+            // worse than either alone.
+            Act::SaveSlot(slot) => {
+                self.active_slot = slot;
+                self.save_state();
+            }
+            Act::LoadSlot(slot) => {
+                self.active_slot = slot;
+                self.load_state();
+            }
+            Act::MapKeys => self.open_input_config(),
+            Act::OpenRom(path) => self.open_rom(&path),
+        }
+    }
+
+    /// Replaces what is running with another ROM.
+    ///
+    /// Everything derived from the old ROM goes with it: the emulator, the plugin
+    /// its hash chose, and the save slots, which are per game. Keeping any of them
+    /// would be worse than refusing — a state from one game loaded into another is
+    /// not a save, and a plugin reading another game's memory narrates nonsense.
+    ///
+    /// A ROM that will not load leaves the session exactly as it was, so a mistyped
+    /// or corrupt file costs the player nothing but the announcement.
+    pub fn open_rom(&mut self, path: &Path) {
+        let emu = match Emulator::load(path) {
+            Ok(emu) => emu,
+            Err(e) => {
+                eprintln!("open {}: {e}", path.display());
+                self.say_now("Could not open that ROM.");
+                return;
+            }
+        };
+        let bytes = rom::read(path);
+        let sha1 = (!bytes.is_empty()).then(|| beacon_plugin::rom_sha1(&bytes));
+        let (plugin, spec) = rom::select_plugin(sha1.as_deref(), &bytes);
+
+        self.emu = emu;
+        self.plugin = plugin;
+        self.reload_spec = spec;
+        self.rom = bytes;
+        self.slots = SlotStore::new(sha1.as_deref().unwrap_or("unknown"));
+        self.rom_path = path.to_path_buf();
+        self.active_slot = 0;
+        self.frames = 0;
+        self.held_buttons = 0;
+        self.paused = false;
+        self.show_map = false;
+        self.nav_was_active = false;
+        self.timing_disturbed = true;
+        self.apply_plugin_default_keys();
+
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("that ROM");
+        // The plugin is named too, and "no plugin" is the important case: it is the
+        // difference between a game that will describe itself and one that will not.
+        self.say_now(format!("Loaded {name}. {}.", self.plugin.name()));
     }
 
     // --- Input configuration ---------------------------------------------

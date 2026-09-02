@@ -221,11 +221,13 @@ impl Default for Keymap {
         bind("KeyF", "frame_advance");
         bind("KeyM", "toggle_map");
         bind("KeyK", "bind");
+        bind("KeyO", "menu");
 
         // Gamepad defaults, on the pad's extra buttons so a controller-only
         // player can reach the essentials and the configuration without a
         // keyboard. Everything else they bind themselves.
         bind("Pad:LeftThumb", "bind");
+        bind("Pad:Mode", "menu");
         bind("Pad:RightThumb", "command:scan");
         bind("Pad:LeftTrigger2", "command:where");
         bind("Pad:RightTrigger2", "command:status");
