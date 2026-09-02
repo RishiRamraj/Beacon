@@ -5700,3 +5700,174 @@ fn alttp_a_box_shown_again_after_closing_is_read_again() {
         "a second showing is read: {reopened:?}"
     );
 }
+
+// ── The pause screen ────────────────────────────────────────────────────────
+
+/// The item grid up and navigable: module 0x0E submodule 1 (Hud_Module_Run) with the HUD's own
+/// state machine at 4 (Hud_NormalMenu). `owned` are the slot bytes from $7EF340 on.
+fn pause_frame(slot: u8, dirs: u8, owned: &[(u8, u8)]) -> Vec<u8> {
+    let mut ram = vec![0u8; 128 * 1024];
+    let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+    set(0x7E0010, 0x0E);
+    set(0x7E0011, 0x01);
+    set(0x7E0200, 4); // overworld_map_state: Hud_NormalMenu
+    set(0x7E0202, slot); // hud_cur_item
+    set(0x7E00F4, dirs); // filtered_joypad_H
+    for (n, v) in owned {
+        set(0x7EF340 + *n as u32 - 1, *v);
+    }
+    ram
+}
+
+const UP: u8 = 0x08;
+const DOWN: u8 = 0x04;
+const LEFT: u8 = 0x02;
+const RIGHT: u8 = 0x01;
+
+#[test]
+fn alttp_the_pause_screen_names_the_item_on_every_press() {
+    // The case that prompted this: only the Lamp is owned, so no direction moves the cursor.
+    // A reader that spoke on movement would say nothing at all, which is why this follows the
+    // button rather than the cursor.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let lamp = &[(11u8, 1u8)][..];
+
+    // Opening the menu says where the cursor already is, without a press.
+    let opened = warm(&mut p, &pause_frame(11, 0, lamp));
+    assert!(opened.iter().any(|t| t == "Lamp"), "{opened:?}");
+
+    // Held still, it does not repeat.
+    let still: Vec<String> = p
+        .on_frame(&pause_frame(11, 0, lamp), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(still.is_empty(), "holding still is silent: {still:?}");
+
+    // Every direction says it again, though the cursor cannot move.
+    let mut frame = WARM + 1;
+    for (dir, label) in [(UP, "up"), (DOWN, "down"), (LEFT, "left"), (RIGHT, "right")] {
+        let said: Vec<String> = p
+            .on_frame(&pause_frame(11, dir, lamp), frame)
+            .iter()
+            .map(|i| i.text.clone())
+            .collect();
+        assert!(
+            said.iter().any(|t| t == "Lamp"),
+            "{label} re-reads it: {said:?}"
+        );
+        // The press ends; the direction bits clear.
+        p.on_frame(&pause_frame(11, 0, lamp), frame + 1);
+        frame += 2;
+    }
+}
+
+#[test]
+fn alttp_a_press_standing_for_two_frames_is_one_announcement() {
+    // Edge-triggered on the direction bits appearing, so a press cannot be counted twice if
+    // filtered_joypad_H is still standing on the next frame.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let lamp = &[(11u8, 1u8)][..];
+    warm(&mut p, &pause_frame(11, 0, lamp));
+
+    let first: Vec<String> = p
+        .on_frame(&pause_frame(11, UP, lamp), WARM)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(first.iter().any(|t| t == "Lamp"), "{first:?}");
+    let second: Vec<String> = p
+        .on_frame(&pause_frame(11, UP, lamp), WARM + 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(second.is_empty(), "one press, one announcement: {second:?}");
+}
+
+#[test]
+fn alttp_the_pause_screen_names_each_slot_it_lands_on() {
+    // Slot n is the byte at $7EF340 + n - 1, which is what Hud_DoWeHaveThisItem tests, so the
+    // grid order is pinned rather than assumed. A few spread across it, including the corners.
+    let r = Registry::builtin();
+    let owned: Vec<(u8, u8)> = (1..=20).map(|n| (n, 1u8)).collect();
+    let read = |slot: u8| speaks_over(&r, &pause_frame(slot, 0, &owned), 4);
+
+    for (slot, name) in [
+        (1u8, "Bow"),
+        (4, "Bombs"),
+        (11, "Lamp"),
+        (12, "Hammer"),
+        (15, "Book of Mudora"),
+        (20, "Magic Mirror"),
+    ] {
+        let said = read(slot);
+        assert!(
+            said.iter().any(|t| t == name),
+            "slot {slot} is {name}: {said:?}"
+        );
+    }
+}
+
+#[test]
+fn alttp_a_shared_slot_is_named_by_what_is_in_it() {
+    // Slot 13 holds the Shovel or the Flute, two unrelated items, and Hud_GetIconForItem tells
+    // them apart by the slot's own value. Naming the slot instead of the item would be wrong
+    // half the time here — and slot 5 is Mushroom before it is Magic Powder.
+    let r = Registry::builtin();
+    for (slot, value, name) in [
+        (13u8, 1u8, "Shovel"),
+        (13, 2, "Flute"),
+        (5, 1, "Mushroom"),
+        (5, 2, "Magic Powder"),
+        (2, 1, "Boomerang"),
+        (2, 2, "Red Boomerang"),
+        (1, 3, "Silver Bow"),
+    ] {
+        let said = speaks_over(&r, &pause_frame(slot, 0, &[(slot, value)]), 4);
+        assert!(
+            said.iter().any(|t| t == name),
+            "slot {slot} value {value} is {name}: {said:?}"
+        );
+    }
+}
+
+#[test]
+fn alttp_the_pause_screen_is_not_read_while_it_is_being_built() {
+    // hud_cur_item is not settled until Hud_Init has chosen a starting item, and the HUD spends
+    // its earlier states building the grid. Only state 4 is the grid being navigated.
+    let r = Registry::builtin();
+    for state in [0u8, 1, 2, 3] {
+        let mut ram = pause_frame(11, 0, &[(11, 1)]);
+        ram[wram_offset(0x7E0200).unwrap()] = state;
+        let said = speaks_over(&r, &ram, 4);
+        assert!(
+            !said.iter().any(|t| t == "Lamp"),
+            "state {state} is not the grid: {said:?}"
+        );
+    }
+}
+
+#[test]
+fn alttp_the_pause_screen_does_not_read_leftover_dialogue() {
+    // The pause screen shares module 0x0E with the text box — kMessagingSubmodules dispatches on
+    // submodule_index, 1 being the HUD and 2 the text. The message buffer still holds whatever
+    // the last box left in it, so without excluding the HUD by name, opening the menu reads the
+    // previous message aloud.
+    let (buf, _) = dialog_buffer(&["You got the Lamp!", "<end>"]);
+    let r = Registry::builtin();
+    let mut ram = pause_frame(11, 0, &[(11, 1)]);
+    for (i, b) in buf.iter().enumerate() {
+        ram[wram_offset(0x7F1200 + i as u32).unwrap()] = *b;
+    }
+    // read_pos part way in, as it would be left after that message was drawn.
+    ram[wram_offset(0x7E1CD9).unwrap()] = 8;
+
+    let said = speaks_over(&r, &ram, 4);
+    assert!(
+        !said.iter().any(|t| t.contains("Lamp!")),
+        "the message buffer is not read here: {said:?}"
+    );
+    assert!(said.iter().any(|t| t == "Lamp"), "the item is: {said:?}");
+}
