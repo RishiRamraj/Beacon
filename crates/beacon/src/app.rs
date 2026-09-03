@@ -422,6 +422,20 @@ impl ApplicationHandler<AccessEvent> for App {
         #[cfg(any(windows, target_os = "macos"))]
         let attrs = attrs.with_visible(false);
 
+        // Windows: no OLE drag and drop, because Beacon's voice comes first.
+        //
+        // winit calls OleInitialize for drag and drop, which demands the thread be a
+        // single-threaded apartment, and PANICS if it is not. Tolk — loaded before the window,
+        // because speech is set up before anything is drawn — takes the main thread as
+        // multi-threaded on its way to SAPI, so the two cannot both have their way. Beacon
+        // handles no dropped files, so there is nothing here to lose: a ROM dragged onto
+        // `beacon.exe` arrives as an argument from the shell, which is untouched by this.
+        #[cfg(windows)]
+        let attrs = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_drag_and_drop(false)
+        };
+
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
