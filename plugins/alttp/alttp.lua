@@ -1906,6 +1906,11 @@ local pathfind_wp = 1
 local pathfind_area = nil
 local pathfind_replan_in = 0
 local pathfind_arrival = nil -- what to say on reaching the goal, else a generic line
+-- Some destinations are a place AND a way to face: a chest opens only from below, the
+-- throne room's mantle is shoved from its west side. Standing in the right square facing
+-- the wrong way is not arriving, so the guide keeps sounding until he has turned.
+local pathfind_face = nil    -- required facing at the goal (a DIRS code), or nil
+local pathfind_told = false  -- arrival line said once per arming, not once per turn
 
 -- Three tones and nothing else to learn: HIGH means the way you are facing is the way to
 -- walk, MID means the route is off to one side, LOW means you are facing away from it. So
@@ -1961,6 +1966,23 @@ local function aim_path_beacon(s, w, duck)
   })
 end
 
+-- Aim the guide at the way Link must FACE, rather than at somewhere to walk.
+--
+-- Standing on the spot, the same three tones mean turn-this-way instead of go-this-way:
+-- the offset is a whole tile on one axis and nothing on the other, so the dominant axis
+-- is the required facing exactly, whatever Link's position within his own tile.
+local function aim_face_beacon(s, dir, duck)
+  local d = DIRS[dir]
+  if d == nil then beacon.clear("path"); return end
+  local dx, dy = d.dx * 16, d.dy * 16
+  beacon.set("path", {
+    x = dx, y = dy,
+    pitch = path_tone(s.direction, dx, dy),
+    volume = duck and PATH_VOLUME * PATH_DUCK or PATH_VOLUME,
+    tremolo = PATH_PING_HZ, ping = true,
+  })
+end
+
 local function area_id(s)
   return (s.indoors == 1) and ("d" .. s.dungeon_room) or ("o" .. s.ow_screen)
 end
@@ -2004,14 +2026,17 @@ end
 -- Begin guiding Link to a world-pixel destination. `arrival`, if given, is spoken
 -- on reaching it in place of the generic line. `level` is the destination's floor in
 -- a two-level room (nil = Link's current floor); the route crosses floors to reach
--- it. Global for MCP / other cues.
-function pathfind_to(wx, wy, arrival, level)
+-- it. `face`, if given, is the direction he must be facing there for the errand to be
+-- possible at all — the guide goes on sounding until he is. Global for MCP / other cues.
+function pathfind_to(wx, wy, arrival, level, face)
   local s = prev
   if s == nil or not in_play(s) then
     say("Cannot navigate now.", { priority = "navigation", category = "on-demand" })
     return false
   end
   pathfind_arrival = arrival
+  pathfind_face = face
+  pathfind_told = false
   pathfind_goal = { wx >> 3, wy >> 3, level }
   if pathfind_replan(s) then
     pathfind_active = true
@@ -2029,6 +2054,8 @@ function pathfind_stop()
   pathfind_path = nil
   pathfind_goal = nil
   pathfind_arrival = nil
+  pathfind_face = nil
+  pathfind_told = false
   beacon.clear("path")
 end
 
@@ -2067,7 +2094,22 @@ local function pathfind_update(s)
   local path = pathfind_path
   pathfind_wp = route_advance(path, pathfind_wp, s.x, s.y)
   if pathfind_wp > #path then
-    if pathfind_arrival then
+    -- On the spot. If the errand also needs him pointed a particular way, that is the
+    -- rest of arriving: say what to do and which way once, then keep the guide sounding
+    -- so the tone can be turned into a high one. The FACE cue names what he is looking at
+    -- when he gets there, which is the confirmation the tone cannot give.
+    if pathfind_face ~= nil and s.direction ~= pathfind_face then
+      if not pathfind_told then
+        pathfind_told = true
+        local word = (DIRS[pathfind_face] or {}).word
+        local line = pathfind_arrival and (pathfind_arrival .. " ") or ""
+        say(line .. "Face " .. (word or "north") .. ".",
+            { priority = "navigation", category = "on-demand" })
+      end
+      aim_face_beacon(s, pathfind_face, combat_engaged)
+      return
+    end
+    if pathfind_arrival and not pathfind_told then
       say(pathfind_arrival, { priority = "navigation", category = "on-demand" })
     end
     pathfind_stop()
@@ -2153,7 +2195,8 @@ local function nearest_chest_tile(s)
         local d = math.abs(x - ltx) + math.abs(y - lty)
         if best_d == nil or d < best_d then
           local sx, sy = chest_stand(s, ox + x, oy + y, nil)
-          best_d, best = d, { sx, sy }
+          -- The third value is the facing the errand needs: north, into the chest.
+          best_d, best = d, { sx, sy, 0 }
         end
       end
     end
@@ -2341,8 +2384,12 @@ local function room_path(from, to)
 end
 
 -- Aim the local pathfinder at a world-pixel spot, quietly (no per-room chatter).
-local function route_set_goal(s, wx, wy, level)
+local function route_set_goal(s, wx, wy, level, face)
   pathfind_goal = { wx >> 3, wy >> 3, level }
+  if pathfind_face ~= face then
+    pathfind_face = face
+    pathfind_told = false
+  end
   if pathfind_replan(s) then pathfind_active = true; return true end
   return false
 end
@@ -3469,6 +3516,8 @@ KIND.enemy = {
 -- the tile Link stands on to reach it.
 KIND.chest = {
   cue = "Open the chest.",
+  -- North: the guide stands him below it, and below is the only side it opens from.
+  face = 0,
   -- Two values, like every other kind's target: the callers unpack them.
   target = function(s, wp) return chest_stand(s, wp.tx, wp.ty, wp.level) end,
   done = function(s, wp)
@@ -3507,6 +3556,17 @@ end
 -- Where to lead for this waypoint, as world pixels, or nil if nowhere yet.
 function KIND.target(s, wp)
   return KIND.of(wp).target(s, wp)
+end
+
+-- Which way Link must be facing there, or nil if it does not matter.
+--
+-- Authored on the waypoint, else the kind's own rule. `push` is read as a facing too:
+-- it already said which way the shove goes (the throne room's mantle is pushed east),
+-- and being told to face that way is the same instruction said out loud.
+function KIND.face(wp)
+  if wp.face ~= nil then return wp.face end
+  if wp.push ~= nil then return wp.push end
+  return KIND.of(wp).face
 end
 
 -- Is this waypoint's errand carried out? An authored clause wins over the kind's
@@ -3641,7 +3701,7 @@ local function chain_aim(s)
     -- Ask the kind where to lead: a room-clear has no place of its own, so its target
     -- is whichever enemy is nearest, and it may be nowhere at all this instant.
     local gx, gy = KIND.target(s, wp)
-    if gx then route_set_goal(s, gx, gy, wp.level) end
+    if gx then route_set_goal(s, gx, gy, wp.level, KIND.face(wp)) end
   elseif wp.tx then
     ow_route_to(wp.tx * 8 + 4, wp.ty * 8 + 4)
   end
@@ -3882,7 +3942,9 @@ local function route_to(s, g, v)
     -- In the target room: home on the sprite/tile there.
     if s.module == 0x07 and s.dungeon_room == g.room then
       local p = goal_point(s, g)
-      if p then pathfind_to(p[1], p[2], g.arrival) end
+      -- p[3], where a goal has one, is the direction he must face there (a chest opens
+      -- from below only): the same location-and-facing pair the authored waypoints carry.
+      if p then pathfind_to(p[1], p[2], g.arrival, nil, p[3]) end
       if g.lead then nav_say(g.lead) end
       return
     end
@@ -4452,11 +4514,14 @@ end
 -- whenever Link walks into one.
 FACE = { said = nil }
 
--- One tile ahead, by facing: the reach the bush cue has always used.
-function FACE.ahead(s)
+-- One tile ahead, by facing: the reach the bush cue has always used. `step` (default 1)
+-- looks that many tiles further along, for a class whose object is bigger than a tile.
+function FACE.ahead(s, step)
   local dir = s.direction
-  return s.x + 8 + (dir == 4 and -12 or dir == 6 and 12 or 0),
-         s.y + 12 + (dir == 0 and -12 or dir == 2 and 12 or 0)
+  local n = ((step or 1) - 1) * 8
+  local dx = (dir == 4 and -12 - n) or (dir == 6 and 12 + n) or 0
+  local dy = (dir == 0 and -12 - n) or (dir == 2 and 12 + n) or 0
+  return s.x + 8 + dx, s.y + 12 + dy
 end
 
 FACE.CLASSES = {
@@ -4469,7 +4534,11 @@ FACE.CLASSES = {
   -- pointing the right way. Ungated, unlike the bush: what you have walked into is worth
   -- knowing whether or not anything is leading you. An opened chest stops reading as one,
   -- so the cue goes quiet by itself.
-  { say = "Chest.", test = function(a) return SWEEP.is_chest(a) end },
+  -- Two tiles of reach, unlike the rest. A chest is drawn 2x2 and is approached from
+  -- below, where exactly which row counts as "the tile ahead" depends on pixel offsets
+  -- that are the game's own business; naming a chest a tile early is right anyway, since
+  -- what he is looking at IS the chest and the guide has just stood him under it.
+  { say = "Chest.", reach = 2, test = function(a) return SWEEP.is_chest(a) end },
   -- 0x27 is TileBehavior_Hookshottables, and it is what a shoved block becomes at its
   -- new position: the tile stops being manipulable, so the push machinery rightly goes
   -- quiet, but the thing is still standing there and still worth naming. Statues, logs
@@ -4481,11 +4550,15 @@ FACE.CLASSES = {
 
 function FACE.update(s)
   if s == nil or not in_play(s) then FACE.said = nil; return end
-  local ax, ay = FACE.ahead(s)
-  local a = tile_attr_at(s, ax, ay)
   local hit
   for _, c in ipairs(FACE.CLASSES) do
-    if (not c.guided or nav_active) and c.test(a) then hit = c; break end
+    if not c.guided or nav_active then
+      for step = 1, (c.reach or 1) do
+        local ax, ay = FACE.ahead(s, step)
+        if c.test(tile_attr_at(s, ax, ay)) then hit = c; break end
+      end
+      if hit then break end
+    end
   end
   if hit == nil then FACE.said = nil; return end
   if FACE.said ~= hit.say then

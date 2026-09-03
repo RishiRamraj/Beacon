@@ -6865,3 +6865,76 @@ fn alttp_facing_a_chest_names_it() {
         "an opened chest is not still announced: {after:?}"
     );
 }
+
+#[test]
+fn alttp_a_destination_can_require_a_facing_as_well_as_a_place() {
+    // A chest opens from below; the throne room's mantle is shoved from its west side.
+    // Standing in the right square facing the wrong way is not arriving, so the guide goes
+    // on sounding — and the same three tones then mean turn-this-way rather than
+    // go-this-way, high only when he is pointed the way the errand needs.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Link standing where the guide puts him for a chest — the tile below it — first
+    // facing south (away from it), then north (into it). 0 north, 2 south.
+    let at_chest = |dir: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((32, 41), (10, 10), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x04);
+        set(0x7E00A1, 0x01); // room 0x0104, the intro house
+        set(0x7EF34A, 0); // Lamp still in the chest
+        set(0x7E005D, 0x00); // awake
+        set(0x7E002F, dir);
+        // The chest, a 2x2 as the game draws them, immediately north of him.
+        for (tx, ty) in [(32, 39), (33, 39), (32, 40), (33, 40)] {
+            set(0x7F2000 + ty * 64 + tx, 0x58);
+        }
+        ram
+    };
+
+    let facing_away = at_chest(2);
+    plugin.on_frame(&facing_away, 0);
+    let said: Vec<String> = plugin
+        .on_frame(&facing_away, 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        said.iter().any(|t| t.contains("Face north")),
+        "told which way to turn, once: {said:?}"
+    );
+
+    // Still guiding, and the tone is NOT the high one: he is on the spot facing away.
+    let beacons = plugin.beacons();
+    let path = beacons
+        .iter()
+        .find(|b| b.id == "path")
+        .expect("the guide keeps sounding until he has turned");
+    let facing_wrong = path.pitch;
+
+    // Turned to face it: the tone rises to the high one and the guide stands down.
+    let facing_it = at_chest(0);
+    // Both frames: the cue names what he faces on the first one and then latches, so
+    // collecting only the second would miss it.
+    let mut names: Vec<String> = plugin
+        .on_frame(&facing_it, 2)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    names.extend(plugin.on_frame(&facing_it, 3).iter().map(|i| i.text.clone()));
+    let path_now = plugin.beacons().into_iter().find(|b| b.id == "path");
+    match path_now {
+        // Either it has stood down, or it is sounding the high tone — both say "this is it".
+        None => {}
+        Some(b) => assert!(
+            b.pitch > facing_wrong,
+            "facing the chest is the high tone: {} vs {facing_wrong}",
+            b.pitch
+        ),
+    }
+    // And the cue that names what he is looking at confirms it, which the tone cannot.
+    assert!(
+        names.iter().any(|t| t == "Chest."),
+        "facing it names it: {names:?}"
+    );
+}
