@@ -82,3 +82,11 @@ the code exactly:
 - **More than one beacon.** The alttp plugin now drives per-class beacons (enemy / item / person,
   each with its own gain and tremolo signature) and a **sonar path beacon** that leads along the
   navigation route, in addition to the original nearest-enemy tone.
+- **The path beacon steers by pitch, not by pan** (2026-09-02, after play). Stereo placement is
+  where the route *is*; what a player needs is which way to *face*, and translating the one into
+  the other while walking turned out to be the hard part — reported as the navigation audio being
+  difficult to use. So the guide now carries three pitches against Link's facing: high when he is
+  facing the way to walk, mid when the route is off to a side, low when he is facing away. Turn
+  until the tone rises, then walk. The pan is still there and still world-relative, which is a
+  known inconsistency: it does not rotate with the player, so pan and pitch can disagree about
+  which side the route is on. Left as it is until pitch alone has been played with.

@@ -1881,29 +1881,55 @@ local pathfind_area = nil
 local pathfind_replan_in = 0
 local pathfind_arrival = nil -- what to say on reaching the goal, else a generic line
 
-local PATH_PITCH = 3.0         -- a high, distinct navigation tone
-local PATH_ALIGNED_PITCH = 3.4 -- brighter when Link faces the way to go
-local PATH_VOLUME = 0.30        -- kept well under the object beacons so threats read over the guide
+-- Three tones and nothing else to learn: HIGH means the way you are facing is the way to
+-- walk, MID means the route is off to one side, LOW means you are facing away from it. So
+-- steering is one rule — turn until the tone goes up, then walk — instead of listening to
+-- a stereo image and working out which way that means to face.
+--
+-- The three sit in the gap between the item tone (2.0) and the pit warning (4.0), because
+-- the vocabulary has to stay legible as a whole, and they are spaced by equal ratios so
+-- the step from LOW to MID sounds like the step from MID to HIGH.
+local PATH_TONE = { ahead = 3.5, side = 2.9, behind = 2.4 }
+local PATH_VOLUME = 0.38        -- still under the object beacons, so threats read over the guide
 local PATH_DUCK = 0.35          -- nav volume scale while an enemy is engaged: ducked, not silenced
 local PATH_PING_HZ = 0.5        -- sonar: a ping every 2 seconds over a soft steady tone
 local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
 local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 
+-- Which of the three navigation tones Link's facing earns, against the way he must walk.
+--
+-- The way to walk is the dominant axis toward the corner — the one with the most ground
+-- left to cover — which is the axis the router lays its waypoints out along, so aiming at
+-- it is aiming at the route rather than at a diagonal the walls do not allow.
+--
+-- Global so it can be probed directly, and because the file is at Lua's local limit.
+function path_tone(direction, dx, dy)
+  local d = DIRS[direction]
+  -- Standing on the corner, or facing something the game does not name: the tone says
+  -- nothing rather than guessing, which is what the middle of the three means anyway.
+  if d == nil or (dx == 0 and dy == 0) then return PATH_TONE.side end
+
+  local want_dx, want_dy = 0, 0
+  if math.abs(dx) > math.abs(dy) then
+    want_dx = (dx > 0) and 1 or -1
+  else
+    want_dy = (dy > 0) and 1 or -1
+  end
+
+  if d.dx == want_dx and d.dy == want_dy then return PATH_TONE.ahead end
+  if d.dx == -want_dx and d.dy == -want_dy then return PATH_TONE.behind end
+  return PATH_TONE.side
+end
+
 -- Aim the sonar path beacon from Link toward waypoint `w` (a {tile_x, tile_y}).
 -- Shared by both route followers (local pathfinder and cross-screen overworld), so
--- the heading maths and tone live in one place. The pitch brightens when Link is
--- already facing along the dominant axis toward the corner, so walking toward the
--- sound is walking the route. `duck` drops the volume while an enemy is engaged, so
--- the threat tone reads over the guide without the guide dropping out entirely.
+-- the heading maths and tone live in one place. `duck` drops the volume while an enemy is
+-- engaged, so the threat tone reads over the guide without the guide dropping out entirely.
 local function aim_path_beacon(s, w, duck)
   local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
-  local d = DIRS[s.direction]
-  local on_course = d ~= nil and (
-    (math.abs(dx) > math.abs(dy)) and (d.dx ~= 0 and (dx > 0) == (d.dx > 0))
-    or (math.abs(dx) <= math.abs(dy)) and (d.dy ~= 0 and (dy > 0) == (d.dy > 0)))
   beacon.set("path", {
     x = dx, y = dy,
-    pitch = on_course and PATH_ALIGNED_PITCH or PATH_PITCH,
+    pitch = path_tone(s.direction, dx, dy),
     volume = duck and PATH_VOLUME * PATH_DUCK or PATH_VOLUME,
     tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
   })

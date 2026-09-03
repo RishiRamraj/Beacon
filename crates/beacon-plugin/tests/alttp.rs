@@ -2960,10 +2960,10 @@ fn alttp_facing_a_pit_blips_once_and_says_nothing() {
         "a sharp attack-decay strike, not a swell: {hazard:?}"
     );
     assert!(hazard.tremolo >= 6.0, "and a quick one: {hazard:?}");
-    // Above every object tone (0.7 to 2.0) and above the guide's sonar (3.0 to 3.4), so
+    // Above every object tone (0.7 to 2.0) and above the guide's sonar (2.4 to 3.5), so
     // there is nothing in the vocabulary it can be mistaken for.
     assert!(
-        hazard.pitch > 3.4,
+        hazard.pitch > 3.5,
         "pitched clear of everything else: {hazard:?}"
     );
     assert!(
@@ -6549,4 +6549,60 @@ fn alttp_options_are_recovered_from_the_message_underneath() {
         .map(|i| i.text.clone())
         .collect();
     assert!(back.iter().any(|t| t == "Yes"), "and the other: {back:?}");
+}
+
+#[test]
+fn alttp_the_guide_tone_says_whether_link_is_facing_the_way_to_walk() {
+    // The whole of steering, in one rule: turn until the tone goes up, then walk. High is
+    // facing the way to go, mid is the route off to one side, low is facing away from it.
+    // Three pitches rather than a stereo image the player has to translate into a heading.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let ram = vec![0u8; 128 * 1024];
+
+    // Facing codes are the game's own: 0 north, 2 south, 4 west, 6 east.
+    // The corner is well to the east, so east is the way to walk.
+    let probe = r#"
+        local east, west = 64, -64
+        local ahead  = path_tone(6, east, 0)
+        local behind = path_tone(4, east, 0)
+        local side_n = path_tone(0, east, 0)
+        local side_s = path_tone(2, east, 0)
+        -- The way to walk is the axis with the most ground left, so a corner mostly north
+        -- with a little east in it is a northward tone, not an eastward one.
+        local dominant = path_tone(0, 8, -64)
+        local unknown  = path_tone(99, east, 0)
+        local standing = path_tone(6, 0, 0)
+        return table.concat({ahead, behind, side_n, side_s, dominant, unknown, standing}, ",")
+    "#;
+    let tones: Vec<f32> = plugin
+        .eval(probe, &ram)
+        .unwrap()
+        .split(',')
+        .map(|v| v.parse().expect("a number per tone"))
+        .collect();
+    let (ahead, behind, side_n, side_s) = (tones[0], tones[1], tones[2], tones[3]);
+
+    assert!(
+        ahead > side_n && side_n > behind,
+        "high facing the way to go, mid to the side, low facing away: {tones:?}"
+    );
+    assert_eq!(side_n, side_s, "both sideways facings are the one tone");
+    assert_eq!(tones[4], ahead, "the dominant axis is the way to walk");
+    // An unknown facing and standing on the corner both say the neutral middle rather
+    // than claiming a direction they do not have.
+    assert_eq!(tones[5], side_n);
+    assert_eq!(tones[6], side_n);
+
+    // And the vocabulary still holds: clear of the item tone below and the pit warning
+    // above, so the guide cannot be mistaken for either.
+    assert!(behind > 2.0, "above the item tone: {tones:?}");
+    assert!(ahead < 4.0, "below the pit warning: {tones:?}");
+    // Equal ratios, so turning through the three sounds like even steps.
+    let step_up = ahead / side_n;
+    let step_from_low = side_n / behind;
+    assert!(
+        (step_up - step_from_low).abs() < 0.02,
+        "even steps: {step_up} vs {step_from_low}"
+    );
 }
