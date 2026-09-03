@@ -21,6 +21,7 @@
 
 use accesskit::{HasPopup, Live, Node, NodeId, Rect, Role, TreeId, TreeInfo, TreeUpdate};
 
+use crate::config_modal::View;
 use crate::menu::Menu;
 
 /// The window itself, and the root of the tree.
@@ -29,11 +30,34 @@ pub const WINDOW: NodeId = NodeId(0);
 pub const MENU: NodeId = NodeId(1);
 /// Where an announcement goes when Beacon is speaking through the screen reader.
 pub const ANNOUNCEMENT: NodeId = NodeId(2);
+/// The input configuration, when it is open.
+pub const DIALOG: NodeId = NodeId(3);
+/// The dialog's list of actions.
+pub const ACTIONS: NodeId = NodeId(4);
+/// The dialog's instructions.
+pub const DIALOG_HELP: NodeId = NodeId(5);
 /// The first entry. Entry `i` is `ENTRY_BASE + i`.
 const ENTRY_BASE: u64 = 16;
+/// The first row of the dialog's list. Row `i` is `ROW_BASE + i`.
+///
+/// Far from the menu's range so the two can never be confused for one another: an id is all
+/// a screen reader sends back, and acting on the wrong list would move the wrong cursor.
+const ROW_BASE: u64 = 4096;
 
 fn entry_id(i: usize) -> NodeId {
     NodeId(ENTRY_BASE + i as u64)
+}
+
+fn row_id(i: usize) -> NodeId {
+    NodeId(ROW_BASE + i as u64)
+}
+
+/// Which row of the input configuration a node id refers to, or `None` for anything else.
+pub fn row_index(id: NodeId) -> Option<usize> {
+    if id.0 < ROW_BASE {
+        return None;
+    }
+    Some((id.0 - ROW_BASE) as usize)
 }
 
 /// Which entry a node id refers to, or `None` for the window or the menu itself.
@@ -41,7 +65,10 @@ fn entry_id(i: usize) -> NodeId {
 /// Needed because assistive technology drives the menu by node: a reader clicking an
 /// item or moving its own review cursor names the node, not an index.
 pub fn entry_index(id: NodeId) -> Option<usize> {
-    id.0.checked_sub(ENTRY_BASE).map(|i| i as usize)
+    if id.0 < ENTRY_BASE || id.0 >= ROW_BASE {
+        return None;
+    }
+    Some((id.0 - ENTRY_BASE) as usize)
 }
 
 /// A node whose text a screen reader reads aloud when it changes.
@@ -57,7 +84,9 @@ pub fn entry_index(id: NodeId) -> Option<usize> {
 /// this route, and is why it is not the default.
 fn announcement_node(text: &str) -> Node {
     let mut node = Node::new(Role::Label);
+    // Both spellings: AT-SPI takes a Label's name from its value, UI Automation from its label.
     node.set_value(text.to_string());
+    node.set_label(text.to_string());
     node.set_live(Live::Polite);
     node
 }
@@ -153,6 +182,82 @@ pub fn menu_tree(
     // says the level's name. Focusing nothing at all would leave the reader silent,
     // which is the one thing an empty list must not be.
     let focus = ids.get(menu.selected()).copied().unwrap_or(MENU);
+
+    TreeUpdate {
+        nodes,
+        tree: Some(TreeInfo::new(WINDOW)),
+        tree_id: TreeId::ROOT,
+        focus,
+    }
+}
+
+/// The tree for the open input configuration: a real dialog, with every action in it.
+///
+/// This is the part spoken narration cannot do. Beacon says the row the cursor is on, which
+/// is enough to *use* the dialog and no use at all for reviewing it — a player cannot hear
+/// what else is in the list, or how far down it they are, without walking the whole thing.
+/// Published as a listbox, a reader can read it in any order with the keys it already has.
+///
+/// The rows carry their binding in the label rather than in a second column, because a
+/// two-column grid is more structure for a reader to navigate and the pair is one fact.
+pub fn dialog_tree(
+    title: &str,
+    size: (f64, f64),
+    view: &View,
+    announcement: Option<&str>,
+) -> TreeUpdate {
+    let ids: Vec<NodeId> = (0..view.rows.len()).map(row_id).collect();
+
+    let mut root = window_node(title, size);
+    root.set_children(vec![DIALOG]);
+
+    let mut dialog = Node::new(Role::Dialog);
+    dialog.set_label(view.heading.to_string());
+    // Modal because it is: the game is suspended and every key goes to the dialog, so a
+    // reader should not offer the window behind it as somewhere to move.
+    dialog.set_modal();
+    // And because it is modal, the announcement goes INSIDE it. A reader that honours modality
+    // may ignore everything outside the dialog, which would lose exactly the lines that matter
+    // most here — a key bound, a key refused.
+    let mut children = vec![DIALOG_HELP, ACTIONS];
+    if announcement.is_some() {
+        children.push(ANNOUNCEMENT);
+    }
+    dialog.set_children(children);
+
+    let mut help = Node::new(Role::Label);
+    help.set_label(view.help.to_string());
+    // Both, because the two backends read a label differently: AT-SPI takes a Label node's
+    // name from its value, and leaves the name empty without one.
+    help.set_value(view.help.to_string());
+
+    let mut list = Node::new(Role::ListBox);
+    list.set_label("Actions".to_string());
+    list.set_children(ids.clone());
+
+    let mut nodes = vec![
+        (WINDOW, root),
+        (DIALOG, dialog),
+        (DIALOG_HELP, help),
+        (ACTIONS, list),
+    ];
+    if let Some(text) = announcement {
+        nodes.push((ANNOUNCEMENT, announcement_node(text)));
+    }
+    for (i, row) in view.rows.iter().enumerate() {
+        let mut node = Node::new(Role::ListBoxOption);
+        node.set_label(row.clone());
+        node.set_position_in_set(i + 1);
+        node.set_size_of_set(view.rows.len());
+        if i == view.selected {
+            // So a reader reviewing the list from elsewhere can still tell which row the
+            // next key press will bind to, which focus alone does not say.
+            node.set_selected(true);
+        }
+        nodes.push((ids[i], node));
+    }
+
+    let focus = ids.get(view.selected).copied().unwrap_or(DIALOG);
 
     TreeUpdate {
         nodes,
@@ -299,6 +404,72 @@ mod tests {
             label_of(&slots, entry_id(0)).as_deref(),
             Some("Slot 0, occupied")
         );
+    }
+
+    #[test]
+    fn the_input_configuration_is_published_as_a_real_dialog() {
+        // Spoken narration can say the row the cursor is on and nothing else. This is what
+        // lets a reader review the list: a modal dialog, a listbox, and every action in it.
+        let view = View {
+            heading: "Input configuration",
+            help: "Up and down to choose an action.",
+            rows: vec![
+                "Save state. T.".to_string(),
+                "Scan. C.".to_string(),
+                "Quit. Escape.".to_string(),
+            ],
+            selected: 1,
+        };
+        let update = dialog_tree("Beacon", (768.0, 672.0), &view, None);
+
+        let dialog = node_of(&update, DIALOG);
+        assert_eq!(dialog.role(), Role::Dialog);
+        assert_eq!(dialog.label(), Some("Input configuration"));
+        assert!(dialog.is_modal(), "the game is suspended behind it");
+        // The instructions are in the tree, not only in the sentence said on opening, so a
+        // reader can go back and find out how the dialog works.
+        assert_eq!(
+            label_of(&update, DIALOG_HELP).as_deref(),
+            Some("Up and down to choose an action.")
+        );
+
+        // The cursor's row has the focus, which is what makes a reader speak it, and is also
+        // marked selected, so a reader reviewing elsewhere can still tell which row a key
+        // press would bind to.
+        assert_eq!(update.focus, NodeId(4096 + 1));
+        let row = node_of(&update, NodeId(4096 + 1));
+        assert_eq!(row.label(), Some("Scan. C."));
+        assert_eq!(row.is_selected(), Some(true));
+        assert_eq!(row.position_in_set(), Some(2));
+        assert_eq!(row.size_of_set(), Some(3));
+        assert_eq!(node_of(&update, NodeId(4096)).is_selected(), None);
+
+        // Rows and menu entries can never be mistaken for each other: an id is all a reader
+        // sends back, and acting on the wrong list would move the wrong cursor.
+        assert_eq!(row_index(NodeId(4096 + 2)), Some(2));
+        assert_eq!(row_index(entry_id(2)), None);
+        assert_eq!(entry_index(NodeId(4096 + 2)), None);
+    }
+
+    #[test]
+    fn an_announcement_reaches_the_reader_from_inside_the_dialog() {
+        // A binding confirmed or refused is not in the tree, so it goes to the live region —
+        // and must not take the focus off the row the player is on.
+        let view = View {
+            heading: "Input configuration",
+            help: "help",
+            rows: vec!["Save state. T.".to_string()],
+            selected: 0,
+        };
+        let update = dialog_tree("Beacon", (768.0, 672.0), &view, Some("D bound to Scan."));
+        assert_eq!(
+            node_of(&update, ANNOUNCEMENT).value(),
+            Some("D bound to Scan.")
+        );
+        assert_eq!(update.focus, NodeId(4096));
+        // Inside the dialog, not beside it: a reader honouring modality would never look
+        // outside, and these are the lines it most needs to say.
+        assert!(node_of(&update, DIALOG).children().contains(&ANNOUNCEMENT));
     }
 
     #[test]

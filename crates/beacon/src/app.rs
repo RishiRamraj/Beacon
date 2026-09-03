@@ -58,11 +58,10 @@ pub struct App {
     /// Whether the window has been shown yet. It is created hidden and shown one iteration
     /// later: see the note in `resumed`.
     shown: bool,
-    /// The menu and the announcement as last published, so the tree is only pushed when one
-    /// of them changes. Compared rather than diffed because a tree update is cheap and a
-    /// comparison is cheaper than working out what moved.
-    #[allow(clippy::type_complexity)]
-    published: (Option<(String, Vec<String>, usize)>, Option<String>),
+    /// What was last published, so the tree is only pushed when it changes. Compared rather
+    /// than diffed because a tree update is cheap and a comparison is cheaper than working
+    /// out what moved.
+    published: Published,
 }
 
 /// The base game panel size, the SNES 256x224 scaled up.
@@ -135,7 +134,7 @@ impl App {
             #[cfg(any(windows, target_os = "macos"))]
             native_failed: false,
             shown: false,
-            published: (None, None),
+            published: Published::default(),
         }
     }
 
@@ -147,6 +146,15 @@ impl App {
     /// voice, which is what keeps it usable with the reader turned off.
     fn access_action(&mut self, request: accesskit::ActionRequest) {
         use accesskit::Action;
+        // A row of the input configuration. Focusing or clicking one moves the cursor to it,
+        // and nothing more: what a row does is bind the NEXT key pressed, which is not
+        // something a reader can ask for on the player's behalf.
+        if let Some(row) = access::row_index(request.target_node) {
+            if matches!(request.action, Action::Focus | Action::Click) {
+                self.session.config_select(row);
+            }
+            return;
+        }
         let Some(index) = access::entry_index(request.target_node) else {
             return;
         };
@@ -237,6 +245,10 @@ impl App {
             })
             .unwrap_or((0.0, 0.0));
         let announcement = self.session.announcement().map(str::to_string);
+        // The dialog first: it is modal, and while it is up nothing behind it can be reached.
+        if let Some(view) = self.session.config_view() {
+            return access::dialog_tree("Beacon", size, &view, announcement.as_deref());
+        }
         match self.session.menu() {
             Some(menu) => access::menu_tree("Beacon", size, menu, announcement.as_deref()),
             None => access::window_only("Beacon", size, announcement.as_deref()),
@@ -264,10 +276,21 @@ impl App {
                 menu.selected(),
             )
         });
-        if (now.clone(), said.clone()) == self.published {
+        // The dialog's rows change as bindings are made, so its contents are compared, not
+        // merely whether it is open.
+        let dialog = self
+            .session
+            .config_view()
+            .map(|view| (view.rows, view.selected));
+        let state = Published {
+            menu: now,
+            dialog,
+            said,
+        };
+        if state == self.published {
             return;
         }
-        self.published = (now, said);
+        self.published = state;
         let update = self.tree();
         if let Some(adapter) = self.access.as_mut() {
             adapter.update_if_active(|| update);
@@ -423,6 +446,17 @@ impl App {
     }
 }
 
+/// Everything the accessibility tree is built from, as last published.
+#[derive(Default, PartialEq)]
+struct Published {
+    /// The menu's level, entries and cursor.
+    menu: Option<(String, Vec<String>, usize)>,
+    /// The input configuration's rows and cursor.
+    dialog: Option<(Vec<String>, usize)>,
+    /// The live-region announcement, when narration goes through the reader.
+    said: Option<String>,
+}
+
 impl ApplicationHandler<AccessEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -569,7 +603,7 @@ impl ApplicationHandler<AccessEvent> for App {
             // that comes back is sent the tree rather than skipped as unchanged.
             AccessWindowEvent::AccessibilityDeactivated => {
                 self.session.set_at_listening(false);
-                self.published = (None, None);
+                self.published = Published::default();
             }
         }
     }

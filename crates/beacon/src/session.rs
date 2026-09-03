@@ -77,6 +77,8 @@ pub struct Session {
     /// Whether the game was already paused when the menu opened, so closing it puts
     /// things back rather than starting a game the player deliberately stopped.
     paused_before_menu: bool,
+    /// The same, for the input configuration, which suspends the game the same way.
+    paused_before_config: bool,
     /// Whether the plugin's map view is showing.
     show_map: bool,
     /// The plugin's navigation state last frame, so the map can be brought up on
@@ -179,6 +181,7 @@ impl Session {
             config: None,
             menu: None,
             paused_before_menu: false,
+            paused_before_config: false,
             show_map: false,
             nav_was_active: false,
             map_buffer: Vec::new(),
@@ -344,7 +347,11 @@ impl Session {
             let in_tree = self
                 .menu
                 .as_ref()
-                .is_some_and(|menu| menu.duplicates(&utterance.text));
+                .is_some_and(|menu| menu.duplicates(&utterance.text))
+                || self
+                    .config
+                    .as_ref()
+                    .is_some_and(|c| c.duplicates(&utterance.text, &self.settings.keymap));
             if !in_tree {
                 self.announcement = Some(distinct(self.announcement.as_deref(), &utterance.text));
             }
@@ -838,6 +845,7 @@ impl Session {
 
     pub fn open_input_config(&mut self) {
         // Freeze the game so nothing moves while choosing bindings.
+        self.paused_before_config = self.paused;
         self.paused = true;
         self.timing_disturbed = true;
         self.held_buttons = 0;
@@ -845,10 +853,11 @@ impl Session {
         let modal = ConfigModal::new(action::bindable_actions(self.plugin.as_ref()));
         let opening = modal.announce(&self.settings.keymap);
         self.config = Some(modal);
-        self.say_now(
-            "Input configuration. Up and down to choose an action, then press a key to bind it. \
-             Delete to clear a binding, escape to finish.",
-        );
+        self.say_now(format!(
+            "{}. {}",
+            crate::config_modal::HEADING,
+            crate::config_modal::HELP
+        ));
         self.say_now(opening);
     }
 
@@ -891,11 +900,30 @@ impl Session {
         self.say_now(said);
     }
 
+    /// The dialog as a screen reader should see it, or `None` when it is not open.
+    pub fn config_view(&self) -> Option<crate::config_modal::View> {
+        self.config
+            .as_ref()
+            .map(|modal| modal.view(&self.settings.keymap))
+    }
+
+    /// Moves the configuration cursor to a row a screen reader named.
+    pub fn config_select(&mut self, index: usize) {
+        let Some(modal) = self.config.as_mut() else {
+            return;
+        };
+        if let Some(said) = modal.select(index, &self.settings.keymap) {
+            self.say_now(said);
+        }
+    }
+
     /// Closes the configuration and resumes play.
     pub fn config_close(&mut self) {
         self.config = None;
         self.held_buttons = 0;
-        self.paused = false;
+        // Back to however the game was, not started: a player who paused deliberately and
+        // then went to look at their keys should not come back to a running game.
+        self.paused = self.paused_before_config;
         self.say_now("Configuration saved.");
     }
 
