@@ -1909,8 +1909,11 @@ local pathfind_arrival = nil -- what to say on reaching the goal, else a generic
 -- Some destinations are a place AND a way to face: a chest opens only from below, the
 -- throne room's mantle is shoved from its west side. Standing in the right square facing
 -- the wrong way is not arriving, so the guide keeps sounding until he has turned.
-local pathfind_face = nil    -- required facing at the goal (a DIRS code), or nil
-local pathfind_told = false  -- arrival line said once per arming, not once per turn
+-- Global, like the rest of the follower state, so an agent can see over MCP whether a
+-- destination is asking for a facing at all — which is the first question when the tone
+-- is not the one it should be.
+pathfind_face = nil          -- required facing at the goal (a DIRS code), or nil
+pathfind_told = false        -- arrival line said once per arming, not once per turn
 
 -- Three tones and nothing else to learn: HIGH means the way you are facing is the way to
 -- walk, MID means the route is off to one side, LOW means you are facing away from it. So
@@ -2169,10 +2172,25 @@ end
 -- that. Either column will do: Link is as wide as the chest, so both halves of the same
 -- sixteen pixels open it. The left one is tried first because that is the named one.
 local function chest_stand(s, tx, ty, level)
-  local by = ty
+  -- Measure the chest rather than assuming its size: down for its bottom row, east for
+  -- its right column. They are drawn 2x2, but measuring is what makes the answer right
+  -- for whatever the room actually holds.
+  local by, bx = ty, tx
   while CHEST_TILES[tile_attr_at(s, tx * 8, (by + 1) * 8, level) or 0] do by = by + 1 end
+  while CHEST_TILES[tile_attr_at(s, (bx + 1) * 8, ty * 8, level) or 0] do bx = bx + 1 end
   local sy = by + 1
-  for _, sx in ipairs({ tx, tx + 1 }) do
+  -- Under whichever column of it Link is already nearest: he is as wide as the chest, so
+  -- any column below it opens the same chest. Always picking the named (left) one sent a
+  -- player who had walked up under the right half one step sideways for nothing — and
+  -- until he took that step the guide was still steering him along a leg instead of
+  -- turning him to face the chest, which is a medium tone in the one place it should be
+  -- high. Clamped to the chest's own columns, so a one-tile chest has only the one.
+  local first = math.max(tx, math.min(bx, s.x >> 3))
+  local order = { first }
+  for sx = tx, bx do
+    if sx ~= first then order[#order + 1] = sx end
+  end
+  for _, sx in ipairs(order) do
     if tile_passable(s, sx, sy, level) then return sx * 8 + 4, sy * 8 + 4 end
   end
   -- Nowhere to stand below it (a chest against the bottom wall of a room, if such a
