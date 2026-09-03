@@ -52,6 +52,9 @@ pub struct App {
     /// Every label the bar was built from, so it can be rebuilt when they change.
     #[cfg(any(windows, target_os = "macos"))]
     native_sig: Vec<String>,
+    /// Whether the last attempt to build the bar failed, so it is not retried every wake.
+    #[cfg(any(windows, target_os = "macos"))]
+    native_failed: bool,
     /// Whether the window has been shown yet. It is created hidden and shown one iteration
     /// later: see the note in `resumed`.
     shown: bool,
@@ -129,6 +132,8 @@ impl App {
             native: None,
             #[cfg(any(windows, target_os = "macos"))]
             native_sig: Vec::new(),
+            #[cfg(any(windows, target_os = "macos"))]
+            native_failed: false,
             shown: false,
             published: (None, None),
         }
@@ -166,10 +171,21 @@ impl App {
     fn sync_native_menu(&mut self) {
         let tree = crate::menu::full(&self.session.menu_context());
         let sig = crate::native::signature(&tree);
-        if self.native.is_some() && sig == self.native_sig {
+        // A failed attempt counts as an attempt. Without that, a platform that will never give
+        // up a menu bar is asked again on every wake, sixty times a second, complaining each
+        // time — so the failure is reported once per thing there was to build.
+        if (self.native.is_some() || self.native_failed) && sig == self.native_sig {
             return;
         }
         self.native_sig = sig;
+        self.native_failed = false;
+
+        // The old bar goes first, and this is not tidiness. Dropping a muda menu calls
+        // SetMenu(hwnd, NULL) for every window it was attached to, so attaching the new one
+        // and letting the assignment drop the old ended with the new bar torn straight back
+        // off — the menu vanished the moment anything changed what it listed, which is any
+        // toggle, any save, any ROM opened.
+        self.native = None;
 
         #[cfg(windows)]
         {
@@ -184,17 +200,29 @@ impl App {
                         unsafe { crate::native::NativeMenu::attach(win32.hwnd.get(), &tree) };
                     match built {
                         Ok(menu) => self.native = Some(menu),
-                        Err(e) => eprintln!("could not attach the menu bar: {e}"),
+                        Err(e) => {
+                            self.native_failed = true;
+                            eprintln!("could not attach the menu bar: {e}");
+                        }
                     }
                 }
-                Ok(other) => eprintln!("no menu bar: unexpected window handle {other:?}"),
-                Err(e) => eprintln!("no menu bar: {e}"),
+                Ok(other) => {
+                    self.native_failed = true;
+                    eprintln!("no menu bar: unexpected window handle {other:?}");
+                }
+                Err(e) => {
+                    self.native_failed = true;
+                    eprintln!("no menu bar: {e}");
+                }
             }
         }
         #[cfg(target_os = "macos")]
         match crate::native::NativeMenu::attach_app(&tree) {
             Ok(menu) => self.native = Some(menu),
-            Err(e) => eprintln!("could not install the application menu: {e}"),
+            Err(e) => {
+                self.native_failed = true;
+                eprintln!("could not install the application menu: {e}");
+            }
         }
     }
 
@@ -576,6 +604,19 @@ impl ApplicationHandler<AccessEvent> for App {
         if self.session.in_config() || self.session.in_menu() {
             self.input.clear_keyboard();
         }
+        // Anything chosen from the platform's own menu, BEFORE the bar is rebuilt. It does
+        // its own navigating and reports only what was picked, by id — and a rebuilt bar has
+        // new ids, so a choice resolved against the wrong one would be silently dropped.
+        #[cfg(any(windows, target_os = "macos"))]
+        if let Some(native) = self.native.as_ref() {
+            while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+                if let Some(act) = native.act_for(&event.id) {
+                    self.session.perform(act);
+                }
+            }
+            self.honour_quit(event_loop);
+        }
+
         // The menu bar, built on the first wake and rebuilt whenever what it lists changes.
         #[cfg(any(windows, target_os = "macos"))]
         self.sync_native_menu();
@@ -588,18 +629,6 @@ impl ApplicationHandler<AccessEvent> for App {
                 window.set_visible(true);
                 self.shown = true;
             }
-        }
-
-        // Anything chosen from the platform's own menu. It does its own navigating and
-        // reports only what was picked, which lands on the same verbs a key does.
-        #[cfg(any(windows, target_os = "macos"))]
-        if let Some(native) = self.native.as_ref() {
-            while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
-                if let Some(act) = native.act_for(&event.id) {
-                    self.session.perform(act);
-                }
-            }
-            self.honour_quit(event_loop);
         }
 
         // After input and before frames: the menu's state is settled by now, whether it

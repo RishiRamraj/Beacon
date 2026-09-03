@@ -169,15 +169,23 @@ impl Entry {
 /// empty because it was empty when Beacon started would be worse than no menu.
 fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
     match level {
-        Level::Root => vec![
-            Entry::enter("File", Level::File),
-            Entry::enter("Save", Level::Save),
-            Entry::enter("Load", Level::Load),
-            Entry::enter("Game", Level::Game),
-            Entry::enter("Settings", Level::Settings),
-            Entry::enter("Debug", Level::Debug),
-            Entry::enter("Input", Level::Input),
-        ],
+        Level::Root => {
+            let mut root = vec![
+                Entry::enter("File", Level::File),
+                Entry::enter("Save", Level::Save),
+                Entry::enter("Load", Level::Load),
+            ];
+            // Only when the game being played has something to offer. Beacon starts with no
+            // ROM, so an unconditional Game entry is an empty menu on the way in — which is
+            // exactly what it was, and what there is no reason for anyone to walk into.
+            if !ctx.commands.is_empty() {
+                root.push(Entry::enter("Game", Level::Game));
+            }
+            root.push(Entry::enter("Settings", Level::Settings));
+            root.push(Entry::enter("Debug", Level::Debug));
+            root.push(Entry::enter("Input", Level::Input));
+            root
+        }
         Level::File => vec![
             Entry::enter("Open", Level::Open),
             Entry::act("Exit".to_string(), Act::Exit),
@@ -821,15 +829,38 @@ mod tests {
     }
 
     #[test]
-    fn game_is_empty_with_no_plugin() {
-        // No game loaded, so nothing to run. The level says so rather than going quiet.
+    fn there_is_no_game_menu_with_no_game() {
+        // Beacon starts with no ROM, so an unconditional Game entry is a menu that leads
+        // nowhere on the way in. It is not listed until the game it belongs to is loaded.
         let ctx = Context {
             slots: Vec::new(),
             ..Context::default()
         };
-        let mut menu = Menu::open(&ctx);
-        menu.navigate(3); // Game
-        assert_eq!(menu.choose(&ctx), Chosen::Moved("Game. Empty.".to_string()));
+        let menu = Menu::open(&ctx);
+        let labels: Vec<String> = menu.shown().into_iter().map(|e| e.label).collect();
+        assert!(!labels.contains(&"Game".to_string()), "{labels:?}");
+
+        // And it is there, with the game's own commands in it, once one is.
+        let with = ctx_with_commands();
+        let mut menu = Menu::open(&with);
+        let labels: Vec<String> = menu.shown().into_iter().map(|e| e.label).collect();
+        assert!(labels.contains(&"Game".to_string()), "{labels:?}");
+        menu.navigate(3);
+        assert_eq!(
+            menu.choose(&with),
+            Chosen::Moved("Game. Scan, 1 of 2.".to_string())
+        );
+    }
+
+    /// A context whose plugin offers commands, which is what puts Game in the root.
+    fn ctx_with_commands() -> Context {
+        Context {
+            commands: vec![
+                ("scan".to_string(), "Scan".to_string()),
+                ("advance".to_string(), "Guide".to_string()),
+            ],
+            ..Context::default()
+        }
     }
 
     #[test]
