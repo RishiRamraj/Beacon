@@ -6709,3 +6709,54 @@ fn alttp_the_guide_skips_a_corner_link_has_already_passed() {
          waypoints nothing moves"
     );
 }
+
+#[test]
+fn alttp_getting_out_of_bed_turns_on_navigation_and_asks_for_the_map() {
+    // The first thing a new player does. Nothing has been pressed yet — no key, no menu —
+    // so guidance has to start itself, and the host raises the map off the same signal.
+    // Asserted at the host boundary (`navigation_active`, `has_map`) rather than inside
+    // Lua, because that pair is what actually decides whether the map appears.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Link's house, out of bed and controllable, Lamp still in the chest.
+    let house = || -> Vec<u8> {
+        let mut ram = dungeon_frame((32, 40), (32, 6), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x04); // room 0x0104
+        set(0x7E00A1, 0x01);
+        set(0x7EF34A, 0); // no Lamp yet
+        set(0x7F2000 + 20 * 64 + 20, 0x58); // the chest it should lead to
+        ram
+    };
+
+    assert!(
+        !plugin.navigation_active(),
+        "nothing is guiding before the game starts"
+    );
+
+    // The first frame only primes the plugin's idea of the previous state; the work
+    // starts on the second, a sixtieth of a second later.
+    plugin.on_frame(&house(), 0);
+    let out = plugin.on_frame(&house(), 1);
+    let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
+    assert!(
+        plugin.navigation_active(),
+        "guidance starts itself the moment Link is up and controllable: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("Navigation on")),
+        "and says so, so the player knows it did not need asking: {texts:?}"
+    );
+    // The host's other condition for raising the map on the same edge.
+    assert!(plugin.has_map(), "the plugin draws a map to raise");
+
+    // It stays on across frames rather than re-announcing every one.
+    let out = plugin.on_frame(&house(), 2);
+    assert!(plugin.navigation_active());
+    assert!(
+        !out.iter().any(|i| i.text.contains("Navigation on")),
+        "said once, not every frame: {:?}",
+        out.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+}
