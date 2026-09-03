@@ -555,6 +555,20 @@ impl Session {
             // Beside the loaded ROM, or where Beacon was started when there is none — which
             // is the case that matters, since starting with no game is how a player reaches
             // Open in the first place.
+            verbosity: self.settings.arbiter.verbosity,
+            speech: self.settings.speech.enabled,
+            beacons: self.settings.beacons.enabled,
+            braille: self.settings.braille.enabled,
+            json_events: self.settings.speech.json_events,
+            muted: self.muted,
+            map_shown: self.show_map,
+            // Everything the plugin offers, so a command is reachable without knowing its key.
+            commands: self
+                .plugin
+                .commands()
+                .iter()
+                .map(|c| (c.id.clone(), c.label.clone()))
+                .collect(),
             roms: match self.rom_path.as_ref().and_then(|p| p.parent()) {
                 Some(dir) => rom::files_in(dir),
                 None => std::env::current_dir()
@@ -673,6 +687,26 @@ impl Session {
             }
             Act::MapKeys => self.open_input_config(),
             Act::OpenRom(path) => self.open_rom(&path),
+            // Through set_setting, so the arbiter is kept in step and the change is persisted —
+            // a setting changed from the menu should still be set next time Beacon starts.
+            Act::SetSetting { key, value, said } => match self.set_setting(key, &value) {
+                Ok(()) => self.say_now(said),
+                Err(e) => {
+                    eprintln!("set {key}: {e}");
+                    self.say_now("Could not change that setting.");
+                }
+            },
+            Act::ToggleMute => self.toggle_mute(),
+            Act::ToggleMap => self.toggle_map(),
+            Act::FrameAdvance => self.frame_advance(),
+            Act::ReloadPlugin => match self.reload_plugin() {
+                Ok(msg) => self.say_now(msg),
+                Err(e) => {
+                    eprintln!("reload plugin: {e}");
+                    self.say_now("Could not reload the plugin.");
+                }
+            },
+            Act::Command(name) => self.run_command(&name),
         }
     }
 

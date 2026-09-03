@@ -134,6 +134,8 @@ mod tests {
         Context {
             slots: vec![true, false],
             roms: vec![("Zelda".to_string(), PathBuf::from("/roms/zelda.sfc"))],
+            // The rest is only read by levels these tests do not enter.
+            ..Context::default()
         }
     }
 
@@ -197,10 +199,12 @@ mod tests {
         let ctx = ctx();
         let menu = Menu::open(&ctx);
         let update = menu_tree("Beacon", (768.0, 672.0), &menu);
-        for i in 0..4 {
+        // However many the root holds; the point is that each carries its own place.
+        let n = menu.shown().len();
+        for i in 0..n {
             let node = node_of(&update, entry_id(i));
             assert_eq!(node.position_in_set(), Some(i + 1));
-            assert_eq!(node.size_of_set(), Some(4));
+            assert_eq!(node.size_of_set(), Some(n));
         }
     }
 
@@ -249,6 +253,8 @@ mod tests {
         let ctx = Context {
             slots: vec![false],
             roms: Vec::new(),
+            // The rest is only read by levels these tests do not enter.
+            ..Context::default()
         };
         let mut menu = Menu::open(&ctx);
         menu.choose(&ctx); // File

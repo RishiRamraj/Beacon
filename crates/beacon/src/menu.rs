@@ -34,6 +34,25 @@ pub struct Context {
     pub slots: Vec<bool>,
     /// The ROMs `File, Open` offers: what to call each, and where it is.
     pub roms: Vec<(String, PathBuf)>,
+
+    // The settings the menu shows. Their CURRENT values, because a toggle whose label does not
+    // say what it is set to has to be activated to find out — which for a toggle means changing
+    // the thing you were only asking about.
+    /// 0 critical only, 3 everything.
+    pub verbosity: u8,
+    pub speech: bool,
+    pub beacons: bool,
+    pub braille: bool,
+    pub json_events: bool,
+    pub muted: bool,
+    pub map_shown: bool,
+
+    /// The loaded plugin's commands, as `(id, label)`.
+    ///
+    /// Everything the plugin can do, reachable without knowing which key it is on — including
+    /// the navigation toggle, which is what a player is most likely to want and least likely to
+    /// remember. Empty with no game, so the level reads "Empty".
+    pub commands: Vec<(String, String)>,
 }
 
 /// A level of the menu.
@@ -44,6 +63,10 @@ pub enum Level {
     Open,
     Save,
     Load,
+    Settings,
+    Verbosity,
+    Debug,
+    Game,
     Input,
 }
 
@@ -56,6 +79,10 @@ impl Level {
             Level::Open => "Open",
             Level::Save => "Save",
             Level::Load => "Load",
+            Level::Settings => "Settings",
+            Level::Verbosity => "Verbosity",
+            Level::Debug => "Debug",
+            Level::Game => "Game",
             Level::Input => "Input",
         }
     }
@@ -77,6 +104,28 @@ pub enum Act {
     LoadSlot(u8),
     /// Open the input configuration.
     MapKeys,
+    /// Store a setting by its dotted key. One variant for every setting, because the menu knows
+    /// which key and which value and the session knows how to store it — a variant per toggle
+    /// would be the same code a dozen times.
+    ///
+    /// `said` is what to speak once it is stored, and it comes from here because here is where
+    /// the wording lives. Deriving it from the key gave "enabled false", which is the setting's
+    /// name in a file rather than anything a player would say.
+    SetSetting {
+        key: &'static str,
+        value: String,
+        said: String,
+    },
+    /// Toggle the global mute.
+    ToggleMute,
+    /// Show or hide the plugin's map.
+    ToggleMap,
+    /// Advance a single frame, for watching a plugin work.
+    FrameAdvance,
+    /// Rebuild the plugin from its source.
+    ReloadPlugin,
+    /// Run one of the plugin's commands by id.
+    Command(String),
 }
 
 /// What an entry does when chosen.
@@ -122,6 +171,9 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
             Entry::enter("File", Level::File),
             Entry::enter("Save", Level::Save),
             Entry::enter("Load", Level::Load),
+            Entry::enter("Game", Level::Game),
+            Entry::enter("Settings", Level::Settings),
+            Entry::enter("Debug", Level::Debug),
             Entry::enter("Input", Level::Input),
         ],
         Level::File => vec![
@@ -138,6 +190,82 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
         Level::Save => slot_entries(ctx, Act::SaveSlot),
         Level::Load => slot_entries(ctx, Act::LoadSlot),
         Level::Input => vec![Entry::act("Map keys".to_string(), Act::MapKeys)],
+
+        // Each toggle says what it is set to, and choosing it flips it. So the label is the
+        // state and the act is its opposite, which is why they are built together.
+        Level::Settings => vec![
+            Entry::enter(
+                &format!("Verbosity: {}", verbosity_name(ctx.verbosity)),
+                Level::Verbosity,
+            ),
+            toggle("Speech", ctx.speech, "speech.enabled"),
+            toggle("Spatial audio", ctx.beacons, "beacons.enabled"),
+            toggle("Braille", ctx.braille, "braille.enabled"),
+            Entry::act(state("Mute", ctx.muted), Act::ToggleMute),
+        ],
+
+        Level::Verbosity => (0..=3)
+            .map(|level| {
+                // The one in force says so, since a list of four with no mark tells a listener
+                // nothing about where they already are.
+                let mark = if level == ctx.verbosity {
+                    ", current"
+                } else {
+                    ""
+                };
+                Entry::act(
+                    format!("{}{mark}", verbosity_name(level)),
+                    Act::SetSetting {
+                        key: "arbiter.verbosity",
+                        value: level.to_string(),
+                        said: format!("Verbosity {}.", verbosity_name(level)),
+                    },
+                )
+            })
+            .collect(),
+
+        Level::Debug => vec![
+            Entry::act(
+                format!("Map: {}", if ctx.map_shown { "shown" } else { "hidden" }),
+                Act::ToggleMap,
+            ),
+            Entry::act("Advance one frame".to_string(), Act::FrameAdvance),
+            Entry::act("Reload plugin".to_string(), Act::ReloadPlugin),
+            toggle("JSON events", ctx.json_events, "speech.json_events"),
+        ],
+
+        Level::Game => ctx
+            .commands
+            .iter()
+            .map(|(id, label)| Entry::act(label.clone(), Act::Command(id.clone())))
+            .collect(),
+    }
+}
+
+/// "Speech: on", and the act that turns it off.
+fn toggle(label: &str, on: bool, key: &'static str) -> Entry {
+    Entry::act(
+        state(label, on),
+        Act::SetSetting {
+            key,
+            value: (!on).to_string(),
+            // The state it is being moved TO, since that is what the player wants confirmed.
+            said: format!("{}.", state(label, !on)),
+        },
+    )
+}
+
+fn state(label: &str, on: bool) -> String {
+    format!("{label}: {}", if on { "on" } else { "off" })
+}
+
+/// The verbosity levels by name, matching what cycling through them already says.
+fn verbosity_name(level: u8) -> &'static str {
+    match level {
+        0 => "critical only",
+        1 => "navigation",
+        2 => "interaction",
+        _ => "everything",
     }
 }
 
@@ -381,6 +509,19 @@ mod tests {
                 ("Zelda".to_string(), PathBuf::from("/roms/zelda.sfc")),
                 ("Metroid".to_string(), PathBuf::from("/roms/metroid.sfc")),
             ],
+            // A plugin with two commands, and settings at their defaults, so the levels that
+            // read them have something to show.
+            commands: vec![
+                ("scan".to_string(), "Scan".to_string()),
+                (
+                    "advance".to_string(),
+                    "Guide to the next quest step".to_string(),
+                ),
+            ],
+            verbosity: 2,
+            speech: true,
+            beacons: true,
+            ..Context::default()
         }
     }
 
@@ -390,7 +531,7 @@ mod tests {
         // from the same entries — or the platform's menu and the spoken one would drift.
         let ctx = ctx();
         let tree = full(&ctx);
-        assert_eq!(tree.len(), 4);
+        assert_eq!(tree.len(), 7);
 
         let Node::Menu { label, children } = &tree[0] else {
             panic!("File is a menu: {:?}", tree[0]);
@@ -438,7 +579,7 @@ mod tests {
         // And Input reaches the key mapping.
         let Node::Menu {
             children: input, ..
-        } = &tree[3]
+        } = &tree[6]
         else {
             panic!("Input is a menu");
         };
@@ -459,26 +600,14 @@ mod tests {
         let mut menu = Menu::open(&ctx);
         assert_eq!(menu.title(), "Menu");
         assert_eq!(menu.selected(), 0);
+        let labels: Vec<String> = menu.shown().into_iter().map(|e| e.label).collect();
         assert_eq!(
-            menu.shown(),
-            vec![
-                Shown {
-                    label: "File".into(),
-                    submenu: true
-                },
-                Shown {
-                    label: "Save".into(),
-                    submenu: true
-                },
-                Shown {
-                    label: "Load".into(),
-                    submenu: true
-                },
-                Shown {
-                    label: "Input".into(),
-                    submenu: true
-                },
-            ]
+            labels,
+            vec!["File", "Save", "Load", "Game", "Settings", "Debug", "Input"]
+        );
+        assert!(
+            menu.shown().iter().all(|e| e.submenu),
+            "every root entry leads somewhere"
         );
 
         menu.navigate(1);
@@ -504,9 +633,9 @@ mod tests {
         // Length and position are what a sighted user gets for free and a listener
         // does not, so they are in every line rather than in a separate one.
         let mut menu = Menu::open(&ctx());
-        assert_eq!(menu.announce(), "File, 1 of 4, submenu.");
-        assert_eq!(menu.navigate(1), "Save, 2 of 4, submenu.");
-        assert_eq!(menu.navigate(1), "Load, 3 of 4, submenu.");
+        assert_eq!(menu.announce(), "File, 1 of 7, submenu.");
+        assert_eq!(menu.navigate(1), "Save, 2 of 7, submenu.");
+        assert_eq!(menu.navigate(1), "Load, 3 of 7, submenu.");
     }
 
     #[test]
@@ -524,15 +653,15 @@ mod tests {
         // A screen reader can name a node from a level that has since changed under it.
         // Landing on nothing would be worse than staying put.
         let mut menu = Menu::open(&ctx());
-        assert_eq!(menu.select(2), "Load, 3 of 4, submenu.");
-        assert_eq!(menu.select(99), "Load, 3 of 4, submenu.");
+        assert_eq!(menu.select(2), "Load, 3 of 7, submenu.");
+        assert_eq!(menu.select(99), "Load, 3 of 7, submenu.");
     }
 
     #[test]
     fn wrapping_is_audible_from_the_position_alone() {
         let mut menu = Menu::open(&ctx());
-        assert_eq!(menu.navigate(-1), "Input, 4 of 4, submenu.");
-        assert_eq!(menu.navigate(1), "File, 1 of 4, submenu.");
+        assert_eq!(menu.navigate(-1), "Input, 7 of 7, submenu.");
+        assert_eq!(menu.navigate(1), "File, 1 of 7, submenu.");
     }
 
     #[test]
@@ -546,8 +675,119 @@ mod tests {
         );
         assert_eq!(
             menu.back(),
-            Backed::Moved("Menu. Save, 2 of 4, submenu.".to_string())
+            Backed::Moved("Menu. Save, 2 of 7, submenu.".to_string())
         );
+    }
+
+    #[test]
+    fn a_toggle_says_what_it_is_set_to_and_chooses_the_opposite() {
+        // A toggle whose label does not say its state has to be activated to find out — which
+        // for a toggle means changing the thing you were only asking about.
+        let mut ctx = ctx();
+        ctx.speech = true;
+        ctx.beacons = false;
+
+        let mut menu = Menu::open(&ctx);
+        menu.navigate(4); // Settings
+        menu.choose(&ctx);
+
+        assert_eq!(menu.navigate(1), "Speech: on, 2 of 5.");
+        assert_eq!(
+            menu.choose(&ctx),
+            Chosen::Act(Act::SetSetting {
+                key: "speech.enabled",
+                value: "false".to_string(),
+                said: "Speech: off.".to_string()
+            }),
+            "choosing an `on` toggle asks for off"
+        );
+
+        assert_eq!(menu.navigate(1), "Spatial audio: off, 3 of 5.");
+        assert_eq!(
+            menu.choose(&ctx),
+            Chosen::Act(Act::SetSetting {
+                key: "beacons.enabled",
+                value: "true".to_string(),
+                said: "Spatial audio: on.".to_string()
+            }),
+            "and an `off` one asks for on"
+        );
+    }
+
+    #[test]
+    fn the_verbosity_in_force_is_marked() {
+        // Four names with nothing marked tells a listener nothing about where they already are.
+        let mut ctx = ctx();
+        ctx.verbosity = 1;
+
+        let mut menu = Menu::open(&ctx);
+        menu.navigate(4); // Settings
+        menu.choose(&ctx);
+        // The Settings entry carries the level in force, so it can be read without entering.
+        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 5, submenu.");
+        menu.choose(&ctx); // into Verbosity
+
+        assert_eq!(menu.announce(), "critical only, 1 of 4.");
+        assert_eq!(menu.navigate(1), "navigation, current, 2 of 4.");
+        assert_eq!(menu.navigate(1), "interaction, 3 of 4.");
+        assert_eq!(
+            menu.choose(&ctx),
+            Chosen::Act(Act::SetSetting {
+                key: "arbiter.verbosity",
+                value: "2".to_string(),
+                said: "Verbosity interaction.".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn debug_offers_the_map_the_frame_step_and_a_plugin_reload() {
+        let mut ctx = ctx();
+        ctx.map_shown = true;
+
+        let mut menu = Menu::open(&ctx);
+        menu.navigate(5); // Debug
+        menu.choose(&ctx);
+
+        assert_eq!(menu.announce(), "Map: shown, 1 of 4.");
+        assert_eq!(menu.choose(&ctx), Chosen::Act(Act::ToggleMap));
+        assert_eq!(menu.navigate(1), "Advance one frame, 2 of 4.");
+        assert_eq!(menu.choose(&ctx), Chosen::Act(Act::FrameAdvance));
+        assert_eq!(menu.navigate(1), "Reload plugin, 3 of 4.");
+        assert_eq!(menu.choose(&ctx), Chosen::Act(Act::ReloadPlugin));
+    }
+
+    #[test]
+    fn game_lists_the_plugins_own_commands() {
+        // Which is how navigation is reached without knowing its key — the thing a player is
+        // most likely to want and least likely to remember.
+        let ctx = ctx();
+        let mut menu = Menu::open(&ctx);
+        menu.navigate(3); // Game
+        menu.choose(&ctx);
+
+        assert_eq!(menu.announce(), "Scan, 1 of 2.");
+        assert_eq!(
+            menu.navigate(1),
+            "Guide to the next quest step, 2 of 2.",
+            "the plugin's own label, not one invented here"
+        );
+        assert_eq!(
+            menu.choose(&ctx),
+            Chosen::Act(Act::Command("advance".to_string()))
+        );
+    }
+
+    #[test]
+    fn game_is_empty_with_no_plugin() {
+        // No game loaded, so nothing to run. The level says so rather than going quiet.
+        let ctx = Context {
+            slots: Vec::new(),
+            ..Context::default()
+        };
+        let mut menu = Menu::open(&ctx);
+        menu.navigate(3); // Game
+        assert_eq!(menu.choose(&ctx), Chosen::Moved("Game. Empty.".to_string()));
     }
 
     #[test]
@@ -591,7 +831,7 @@ mod tests {
         assert_eq!(menu.choose(&ctx), Chosen::Act(Act::Exit));
 
         let mut menu = Menu::open(&ctx);
-        menu.navigate(3); // Input
+        menu.navigate(6); // Input
         menu.choose(&ctx);
         assert_eq!(menu.announce(), "Map keys, 1 of 1.");
         assert_eq!(menu.choose(&ctx), Chosen::Act(Act::MapKeys));
@@ -613,6 +853,8 @@ mod tests {
         let ctx = Context {
             slots: vec![false],
             roms: Vec::new(),
+            // The rest is only read by levels these tests do not enter.
+            ..Context::default()
         };
         let mut menu = Menu::open(&ctx);
         menu.choose(&ctx); // File
@@ -637,6 +879,8 @@ mod tests {
         let mut ctx = Context {
             slots: vec![false, false],
             roms: Vec::new(),
+            // The rest is only read by levels these tests do not enter.
+            ..Context::default()
         };
         let mut menu = Menu::open(&ctx);
         menu.navigate(1); // Save
