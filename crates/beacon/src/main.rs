@@ -18,6 +18,7 @@ mod session;
 mod state;
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use beacon_config::Settings;
 use beacon_emu::Emulator;
@@ -75,7 +76,9 @@ value can also be changed while playing.",
 }
 
 struct Args {
-    rom: PathBuf,
+    /// `None` starts with no game, so a ROM can be found from the menu. The usual way in on a
+    /// desktop, where nobody types a path.
+    rom: Option<PathBuf>,
     headless: Option<u64>,
     json: bool,
     quiet: bool,
@@ -90,7 +93,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut rom = None;
     let mut args = Args {
-        rom: PathBuf::new(),
+        rom: None,
         headless: None,
         json: false,
         quiet: false,
@@ -132,12 +135,13 @@ fn parse_args() -> Args {
         }
     }
 
-    // Every mode needs a ROM except the bare stdio<->socket bridge.
-    args.rom = match rom {
-        Some(r) => r,
-        None if args.connect => PathBuf::new(),
-        None => usage(),
-    };
+    // Only the modes that run frames unattended need one up front: with a window there is a
+    // menu to open a ROM from, but nothing is going to pick one for a benchmark.
+    if rom.is_none() && args.headless.is_some() {
+        eprintln!("--headless needs a ROM to run");
+        usage()
+    }
+    args.rom = rom;
     args
 }
 
@@ -278,14 +282,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Settings::default(),
     };
 
-    let emu = Emulator::load(&args.rom)?;
+    // No ROM is a legitimate start: an empty machine with a menu on it.
+    let emu = match args.rom.as_ref() {
+        Some(path) => Some(Emulator::load(path)?),
+        None => None,
+    };
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
     let speech = build_speech(&settings, &args);
-    let rom = rom::read(&args.rom);
+    let rom = match args.rom.as_ref() {
+        Some(path) => rom::read(path),
+        None => Rc::new(Vec::new()),
+    };
     let sha1 = (!rom.is_empty()).then(|| beacon_plugin::rom_sha1(&rom));
     let (plugin, reload_spec) = rom::select_plugin(sha1.as_deref(), &rom);
 
     if let Some(frames) = args.headless {
+        // parse_args refuses --headless without a ROM, so this is always Some.
+        let emu = emu.expect("--headless requires a ROM");
         return run_headless(emu, arbiter, speech, plugin, frames);
     }
 
@@ -300,7 +313,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rom.clone(),
         args.rom.clone(),
         settings,
-        sha1.as_deref().unwrap_or("unknown"),
+        sha1.as_deref(),
     );
     // Fill any keys a built-in action or the plugin suggests, without overriding the
     // user's own bindings. Built-ins first, so a plugin command cannot take the key a

@@ -39,7 +39,14 @@ const SPEECH_LOG_CAP: usize = 512;
 const NTSC_FPS: f64 = 60.098;
 
 pub struct Session {
-    emu: Emulator,
+    /// `None` when no game is loaded.
+    ///
+    /// Beacon starts this way when given no ROM, so the menu can be used to find one — which
+    /// is the only way to open a game on a desktop where nobody types a path. It is also what
+    /// makes swapping ROMs work at all: bsnes-jg allows exactly one live instance, so the old
+    /// emulator has to be DROPPED before the new one is created, and there is no way to drop a
+    /// field that is not an Option.
+    emu: Option<Emulator>,
     audio: Audio,
     arbiter: Arbiter,
     speech: Fanout,
@@ -49,12 +56,14 @@ pub struct Session {
     reload_spec: Option<PluginSpec>,
     /// The headerless ROM, handed to the plugin on load and reload.
     rom: std::rc::Rc<Vec<u8>>,
-    /// Where the ROM came from. Kept for two things the menu needs: the directory
-    /// to offer other ROMs from, and something to call the one that is running.
-    rom_path: PathBuf,
+    /// Where the ROM came from, if one is loaded. Kept for two things the menu needs: the
+    /// directory to offer other ROMs from, and something to call the one that is running.
+    rom_path: Option<PathBuf>,
     settings: Settings,
 
-    slots: SlotStore,
+    /// Savestates for the loaded game. `None` with no game: slots are per game, and a shared
+    /// "unknown" store would let one game's states be loaded into another.
+    slots: Option<SlotStore>,
     active_slot: u8,
     paused: bool,
     /// Once the player has paused or stepped, wall-clock timing no longer
@@ -99,19 +108,32 @@ pub struct Session {
     underrun_baseline: Option<u64>,
 }
 
+/// The loaded game's work RAM, or `None` when there is no game.
+///
+/// Every plugin call needs it, and with no game there is nothing to narrate — so callers treat
+/// this the same way they already treated a failed RAM read, which is to produce no intents.
+///
+/// A free function over the field rather than a method on `Session`, because a method borrows
+/// the whole of it: several callers pass the RAM straight into `self.plugin`, which needs the
+/// plugin borrowed mutably at the same time. Taking just the one field keeps those borrows
+/// disjoint, which is what the code did before this became an Option.
+fn ram_of(emu: &Option<Emulator>) -> Option<&[u8]> {
+    emu.as_ref().and_then(|emu| emu.main_ram().ok())
+}
+
 impl Session {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        emu: Emulator,
+        emu: Option<Emulator>,
         audio: Audio,
         arbiter: Arbiter,
         speech: Fanout,
         plugin: Box<dyn Plugin>,
         reload_spec: Option<PluginSpec>,
         rom: std::rc::Rc<Vec<u8>>,
-        rom_path: PathBuf,
+        rom_path: Option<PathBuf>,
         settings: Settings,
-        rom_id: &str,
+        rom_id: Option<&str>,
     ) -> Self {
         Session {
             emu,
@@ -123,7 +145,7 @@ impl Session {
             rom,
             rom_path,
             settings,
-            slots: SlotStore::new(rom_id),
+            slots: rom_id.map(SlotStore::new),
             active_slot: 0,
             paused: false,
             timing_disturbed: false,
@@ -160,15 +182,27 @@ impl Session {
         Duration::from_secs_f64(self.frames as f64 / NTSC_FPS)
     }
 
+    /// Whether save slot `slot` holds a state. False with no game, so the menu's Save and
+    /// Load levels come out empty rather than offering slots that cannot be written.
+    fn occupied(&self, slot: u8) -> bool {
+        self.slots
+            .as_ref()
+            .map(|store| store.occupied(slot))
+            .unwrap_or(false)
+    }
+
     /// Advances the emulator by exactly one frame and runs the plugin over it.
     pub fn step_one_frame(&mut self) {
-        self.emu.set_buttons(0, self.held_buttons);
+        let Some(emu) = self.emu.as_mut() else {
+            return;
+        };
+        emu.set_buttons(0, self.held_buttons);
 
-        self.emu.run_frame();
+        emu.run_frame();
         self.frames += 1;
 
         self.audio_scratch.clear();
-        self.emu.drain_audio(&mut self.audio_scratch);
+        emu.drain_audio(&mut self.audio_scratch);
         if !self.audio_scratch.is_empty() {
             if self.muted {
                 // Silence game and beacons alike, but keep the sample count so the
@@ -194,9 +228,9 @@ impl Session {
 
         // Instrumentation runs here: between frames, against real memory.
         let frame = self.frames;
-        let intents = match self.emu.main_ram() {
-            Ok(ram) => self.plugin.on_frame(ram, frame),
-            Err(_) => Vec::new(),
+        let intents = match ram_of(&self.emu) {
+            Some(ram) => self.plugin.on_frame(ram, frame),
+            None => Vec::new(),
         };
         self.dispatch(intents);
 
@@ -371,9 +405,9 @@ impl Session {
     /// answer immediately. Empty output stays silent — a command with nothing to
     /// say says nothing, rather than a filler acknowledgement.
     pub fn run_command(&mut self, name: &str) {
-        let intents = match self.emu.main_ram() {
-            Ok(ram) => self.plugin.command(name, ram),
-            Err(_) => Vec::new(),
+        let intents = match ram_of(&self.emu) {
+            Some(ram) => self.plugin.command(name, ram),
+            None => Vec::new(),
         };
         for intent in intents {
             self.say_now(intent.text);
@@ -382,8 +416,12 @@ impl Session {
 
     pub fn save_state(&mut self) {
         let slot = self.active_slot;
-        match self.emu.save_state() {
-            Ok(data) => match self.slots.save(slot, &data) {
+        let (Some(emu), Some(store)) = (self.emu.as_mut(), self.slots.as_ref()) else {
+            self.say_now("No game loaded.");
+            return;
+        };
+        match emu.save_state() {
+            Ok(data) => match store.save(slot, &data) {
                 Ok(()) => self.say_now(format!("Saved to slot {slot}.")),
                 Err(e) => {
                     eprintln!("save slot {slot}: {e}");
@@ -399,8 +437,12 @@ impl Session {
 
     pub fn load_state(&mut self) {
         let slot = self.active_slot;
-        match self.slots.load(slot) {
-            Ok(Some(data)) => match self.emu.load_state(&data) {
+        let (Some(emu), Some(store)) = (self.emu.as_mut(), self.slots.as_ref()) else {
+            self.say_now("No game loaded.");
+            return;
+        };
+        match store.load(slot) {
+            Ok(Some(data)) => match emu.load_state(&data) {
                 Ok(()) => self.say_now(format!("Loaded slot {slot}.")),
                 Err(e) => {
                     eprintln!("load slot {slot}: {e}");
@@ -418,7 +460,7 @@ impl Session {
     fn change_slot(&mut self, delta: i32) {
         let n = SLOTS as i32;
         self.active_slot = (((self.active_slot as i32 + delta) % n + n) % n) as u8;
-        let state = if self.slots.occupied(self.active_slot) {
+        let state = if self.occupied(self.active_slot) {
             "occupied"
         } else {
             "empty"
@@ -471,9 +513,9 @@ impl Session {
         let frame = self.frames;
         // Disjoint field borrows: `ram` reads `emu`, `draw` writes `plugin` and
         // the buffer.
-        let dims = match self.emu.main_ram() {
-            Ok(ram) => self.plugin.draw(ram, frame, &mut self.map_buffer),
-            Err(_) => None,
+        let dims = match ram_of(&self.emu) {
+            Some(ram) => self.plugin.draw(ram, frame, &mut self.map_buffer),
+            None => None,
         };
         if let Some(d) = dims {
             self.map_dims = d;
@@ -509,12 +551,16 @@ impl Session {
     /// menu opened reads as occupied.
     pub(crate) fn menu_context(&self) -> menu::Context {
         menu::Context {
-            slots: (0..SLOTS).map(|s| self.slots.occupied(s)).collect(),
-            roms: self
-                .rom_path
-                .parent()
-                .map(rom::files_in)
-                .unwrap_or_default(),
+            slots: (0..SLOTS).map(|s| self.occupied(s)).collect(),
+            // Beside the loaded ROM, or where Beacon was started when there is none — which
+            // is the case that matters, since starting with no game is how a player reaches
+            // Open in the first place.
+            roms: match self.rom_path.as_ref().and_then(|p| p.parent()) {
+                Some(dir) => rom::files_in(dir),
+                None => std::env::current_dir()
+                    .map(|dir| rom::files_in(&dir))
+                    .unwrap_or_default(),
+            },
         }
     }
 
@@ -640,6 +686,11 @@ impl Session {
     /// A ROM that will not load leaves the session exactly as it was, so a mistyped
     /// or corrupt file costs the player nothing but the announcement.
     pub fn open_rom(&mut self, path: &Path) {
+        // The old emulator goes before the new one is built. bsnes-jg permits exactly one live
+        // instance, so creating the second while the first still exists fails with
+        // AlreadyInstantiated — which is what Open did until this was an Option, meaning it
+        // could never have worked and said only "Could not open that ROM."
+        self.emu = None;
         let emu = match Emulator::load(path) {
             Ok(emu) => emu,
             Err(e) => {
@@ -652,12 +703,12 @@ impl Session {
         let sha1 = (!bytes.is_empty()).then(|| beacon_plugin::rom_sha1(&bytes));
         let (plugin, spec) = rom::select_plugin(sha1.as_deref(), &bytes);
 
-        self.emu = emu;
+        self.emu = Some(emu);
         self.plugin = plugin;
         self.reload_spec = spec;
         self.rom = bytes;
-        self.slots = SlotStore::new(sha1.as_deref().unwrap_or("unknown"));
-        self.rom_path = path.to_path_buf();
+        self.slots = Some(SlotStore::new(sha1.as_deref().unwrap_or("unknown")));
+        self.rom_path = Some(path.to_path_buf());
         self.active_slot = 0;
         self.frames = 0;
         self.held_buttons = 0;
@@ -749,12 +800,24 @@ impl Session {
 
     /// The current video frame's geometry.
     pub fn frame_info(&self) -> FrameInfo {
-        self.emu.frame_info()
+        // With no game, the SNES's own dimensions, so the window still opens at a sensible
+        // size and the menu has somewhere to be drawn.
+        let Some(emu) = self.emu.as_ref() else {
+            return FrameInfo {
+                width: 256,
+                height: 224,
+                pitch: 256 * 4,
+            };
+        };
+        emu.frame_info()
     }
 
     /// The current video frame's pixels.
     pub fn framebuffer(&self) -> &[u32] {
-        self.emu.framebuffer()
+        match self.emu.as_ref() {
+            Some(emu) => emu.framebuffer(),
+            None => &[],
+        }
     }
 
     // --- The agent-facing control surface (used by the MCP server) -------
@@ -787,7 +850,7 @@ impl Session {
     /// Reads work RAM by SNES address, sharing the plugin's addressing. `None`
     /// if any byte of the range is outside mapped WRAM.
     pub fn read_wram(&self, addr: u32, len: usize) -> Option<Vec<u8>> {
-        let ram = self.emu.main_ram().ok()?;
+        let ram = ram_of(&self.emu)?;
         let mut out = Vec::with_capacity(len);
         for i in 0..len {
             let offset = beacon_plugin::wram_offset(addr.wrapping_add(i as u32))?;
@@ -938,9 +1001,8 @@ impl Session {
     /// Evaluates a Lua snippet in the plugin's environment against the current
     /// frame, returning its result. For an agent probing memory and plugin state.
     pub fn eval_lua(&mut self, code: &str) -> Result<String, String> {
-        let ram = match self.emu.main_ram() {
-            Ok(r) => r,
-            Err(e) => return Err(e.to_string()),
+        let Some(ram) = ram_of(&self.emu) else {
+            return Err("no game loaded".to_string());
         };
         self.plugin.eval(code, ram)
     }
