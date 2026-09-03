@@ -38,56 +38,94 @@ pub struct Audio {
     _stream: cpal::Stream,
 }
 
+/// Builds an output stream of one sample type, feeding it from the shared queue.
+///
+/// Generic over the type because the device names it and Beacon does not get to choose;
+/// `FromSample` converts the emulator's f32 into whatever that is.
+fn build<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    channels: usize,
+    shared: &Arc<Mutex<Shared>>,
+) -> Result<cpal::Stream, cpal::Error>
+where
+    T: cpal::SizedSample + cpal::FromSample<f32>,
+{
+    let shared = Arc::clone(shared);
+    device.build_output_stream(
+        config,
+        move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
+            let Ok(mut s) = shared.lock() else {
+                out.fill(T::EQUILIBRIUM);
+                return;
+            };
+
+            for frame in out.chunks_mut(channels) {
+                // The emulator is stereo. Mono devices take the left channel; anything wider
+                // gets silence in the extra channels rather than a wrong-sounding upmix.
+                let l = s.queue.pop_front();
+                let r = if channels > 1 {
+                    s.queue.pop_front()
+                } else {
+                    None
+                };
+
+                match l {
+                    Some(l) => {
+                        frame[0] = T::from_sample(l);
+                        if channels > 1 {
+                            frame[1] = T::from_sample(r.unwrap_or(l));
+                        }
+                        for extra in frame.iter_mut().skip(2) {
+                            *extra = T::EQUILIBRIUM;
+                        }
+                    }
+                    None => {
+                        s.underruns += 1;
+                        frame.fill(T::EQUILIBRIUM);
+                    }
+                }
+            }
+        },
+        |err| eprintln!("audio stream error: {err}"),
+        None,
+    )
+}
+
 impl Audio {
-    /// Opens the default output device, preferring `preferred` where the device allows it.
+    /// Opens the default output device, exactly as the device describes itself.
     ///
-    /// The rate is the DEVICE's to choose, not Beacon's. Asking for an arbitrary one and
-    /// hoping worked on Linux, where ALSA and PulseAudio resample without saying so, and
-    /// failed outright on Windows: WASAPI in shared mode serves only the device's own mix
-    /// format and rejects anything else — "Stream configuration is not supported in shared
-    /// mode", which killed Beacon on startup before a window ever appeared.
+    /// Nothing here is negotiated, and that is the point. Beacon used to build a stream
+    /// configuration of its own and hand it over, which worked on Linux because ALSA and
+    /// PulseAudio quietly convert whatever they are given. WASAPI in shared mode does not: it
+    /// serves the device's own mix format and refuses anything else, so Beacon died on Windows
+    /// with "Stream configuration is not supported in shared mode" before a window appeared.
     ///
-    /// So the supported configurations are asked for, `preferred` is used only if one of them
-    /// covers it, and otherwise the device's default stands. Whatever comes out of that is
-    /// reported by [`Audio::sample_rate`] and handed to the emulator, which resamples to meet
-    /// it. cpal does not negotiate on a caller's behalf, whatever the old comment here hoped.
-    pub fn new(preferred: u32) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Fixing only the sample RATE was not enough — that was the difference I could see, and I
+    /// assumed it was the whole of it. The mix format is a rate AND a channel count AND a
+    /// sample type, and any one of them being wrong is refused the same way. So the device's
+    /// own configuration is used whole, and the sample type it names decides which stream is
+    /// built. That cannot mismatch, because none of it was chosen here.
+    ///
+    /// The rate that falls out is reported by [`Audio::sample_rate`] and handed to the
+    /// emulator, which resamples to meet it — libsamplerate is vendored into bsnes-jg, so
+    /// that is its job rather than something Beacon does again on the way out.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .ok_or("no audio output device")?;
 
-        let config = device.default_output_config()?;
-        let channels = config.channels() as usize;
+        let supported = device.default_output_config()?;
+        let sample_format = supported.sample_format();
+        let config: cpal::StreamConfig = supported.into();
+        let channels = config.channels as usize;
+        let sample_rate = config.sample_rate;
 
-        let supported = device
-            .supported_output_configs()
-            .map(|mut configs| {
-                configs.any(|range| {
-                    range.sample_format() == SampleFormat::F32
-                        && range.channels() == config.channels()
-                        && range.min_sample_rate() <= preferred
-                        && preferred <= range.max_sample_rate()
-                })
-            })
-            .unwrap_or(false);
+        // Said out loud every time, because it is the first thing worth knowing when audio
+        // fails on a machine nobody can reach: what the device actually asked for.
+        eprintln!("audio: {sample_rate} Hz, {channels} channel(s), {sample_format:?}");
 
-        let sample_rate = if supported {
-            preferred
-        } else {
-            config.sample_rate()
-        };
-        if sample_rate != preferred {
-            eprintln!(
-                "audio: device runs at {sample_rate} Hz, not {preferred}; emulating to match"
-            );
-        }
-
-        let stream_config = cpal::StreamConfig {
-            channels: config.channels(),
-            sample_rate,
-            buffer_size: cpal::BufferSize::Default,
-        };
         let target = (sample_rate as f32 * TARGET_QUEUED_SECONDS) as usize * channels.max(1);
 
         let shared = Arc::new(Mutex::new(Shared {
@@ -95,46 +133,21 @@ impl Audio {
             underruns: 0,
         }));
 
-        let cb_shared = Arc::clone(&shared);
-        let stream = device.build_output_stream(
-            stream_config,
-            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let Ok(mut s) = cb_shared.lock() else {
-                    out.fill(0.0);
-                    return;
-                };
-
-                for frame in out.chunks_mut(channels) {
-                    // The emulator is stereo. Mono devices take the left
-                    // channel; anything wider gets silence in the extra
-                    // channels rather than a wrong-sounding upmix.
-                    let l = s.queue.pop_front();
-                    let r = if channels > 1 {
-                        s.queue.pop_front()
-                    } else {
-                        None
-                    };
-
-                    match l {
-                        Some(l) => {
-                            frame[0] = l;
-                            if channels > 1 {
-                                frame[1] = r.unwrap_or(l);
-                            }
-                            for extra in frame.iter_mut().skip(2) {
-                                *extra = 0.0;
-                            }
-                        }
-                        None => {
-                            s.underruns += 1;
-                            frame.fill(0.0);
-                        }
-                    }
-                }
-            },
-            |err| eprintln!("audio stream error: {err}"),
-            None,
-        )?;
+        // Every sample type a mix format is likely to be. Converting from the emulator's f32
+        // is `FromSample`'s job, so each arm is the same code at a different type.
+        let stream = match sample_format {
+            SampleFormat::F32 => build::<f32>(&device, config, channels, &shared),
+            SampleFormat::F64 => build::<f64>(&device, config, channels, &shared),
+            SampleFormat::I16 => build::<i16>(&device, config, channels, &shared),
+            SampleFormat::I32 => build::<i32>(&device, config, channels, &shared),
+            SampleFormat::U8 => build::<u8>(&device, config, channels, &shared),
+            SampleFormat::U16 => build::<u16>(&device, config, channels, &shared),
+            other => {
+                return Err(
+                    format!("audio device wants an unsupported sample format: {other:?}").into(),
+                )
+            }
+        }?;
 
         stream.play()?;
 
