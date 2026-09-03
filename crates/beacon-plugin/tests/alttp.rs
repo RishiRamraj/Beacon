@@ -6719,14 +6719,18 @@ fn alttp_getting_out_of_bed_turns_on_navigation_and_asks_for_the_map() {
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
-    // Link's house, out of bed and controllable, Lamp still in the chest.
-    let house = || -> Vec<u8> {
+    // Link's house, Lamp still in the chest. `asleep` is the state the game actually
+    // starts a new file in: module 0x07 submodule 0, so "in play" by every other
+    // measure, with Link face down in bed and not yet controllable.
+    let house = |asleep: bool| -> Vec<u8> {
         let mut ram = dungeon_frame((32, 40), (32, 6), &[]);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E00A0, 0x04); // room 0x0104
         set(0x7E00A1, 0x01);
         set(0x7EF34A, 0); // no Lamp yet
         set(0x7F2000 + 20 * 64 + 20, 0x58); // the chest it should lead to
+        // $7E005D is Link's state; 0x16 is the game's own kPlayerState_AsleepInBed.
+        set(0x7E005D, if asleep { 0x16 } else { 0x00 });
         ram
     };
 
@@ -6735,10 +6739,24 @@ fn alttp_getting_out_of_bed_turns_on_navigation_and_asks_for_the_map() {
         "nothing is guiding before the game starts"
     );
 
-    // The first frame only primes the plugin's idea of the previous state; the work
-    // starts on the second, a sixtieth of a second later.
-    plugin.on_frame(&house(), 0);
-    let out = plugin.on_frame(&house(), 1);
+    // Asleep: nothing arms, and nothing is said. Arming here was the bug — it announced
+    // itself over a sleeping player, tried to route out of the bed (solid furniture the
+    // router cannot start on), failed, and latched the failure so that by the time he was
+    // up, navigation read as on and did nothing at all.
+    plugin.on_frame(&house(true), 0);
+    let out = plugin.on_frame(&house(true), 1);
+    assert!(
+        !plugin.navigation_active(),
+        "asleep in bed is not the start of the quest"
+    );
+    assert!(
+        !out.iter().any(|i| i.text.contains("Navigation on")),
+        "and says nothing to a player who has not started yet: {:?}",
+        out.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+
+    // He gets up: the guide starts itself, on the next frame.
+    let out = plugin.on_frame(&house(false), 2);
     let texts: Vec<&str> = out.iter().map(|i| i.text.as_str()).collect();
     assert!(
         plugin.navigation_active(),
@@ -6752,11 +6770,61 @@ fn alttp_getting_out_of_bed_turns_on_navigation_and_asks_for_the_map() {
     assert!(plugin.has_map(), "the plugin draws a map to raise");
 
     // It stays on across frames rather than re-announcing every one.
-    let out = plugin.on_frame(&house(), 2);
+    let out = plugin.on_frame(&house(false), 3);
     assert!(plugin.navigation_active());
     assert!(
         !out.iter().any(|i| i.text.contains("Navigation on")),
         "said once, not every frame: {:?}",
         out.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn alttp_a_route_starts_from_ground_link_can_stand_on() {
+    // $0020/$0022 is the top-left of Link's sprite, not the ground under him, so the tile
+    // it lands in is often solid — his head is IN the wall when he stands against the top
+    // of a room, and every tile around him is collision when he is on furniture. Seeding
+    // A* there boxed it in on all four sides and the guide said "No path there" about a
+    // route it could walk perfectly well. That is what it said from the bed, all through
+    // the opening.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Link boxed in: his own tile and the ring around it are wall, with open floor just
+    // beyond, and a chest to route to further out.
+    let mut ram = dungeon_frame((32, 40), (10, 10), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00A0, 0x04);
+        set(0x7E00A1, 0x01); // room 0x0104
+        set(0x7EF34A, 0);
+        set(0x7E005D, 0x00); // awake
+        // Wall over Link's tile and the ring around it. 0x02 is the game's own
+        // StandardCollision, which is what a bed reads as.
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let tx = (32 + dx) as u32;
+                let ty = (40 + dy) as u32;
+                set(0x7F2000 + ty * 64 + tx, 0x02);
+            }
+        }
+        set(0x7F2000 + 44 * 64 + 32, 0x58); // a chest four tiles south
+    }
+
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+
+    // A route exists and leads out, rather than failing because of where he was standing.
+    let planned = plugin
+        .eval(
+            "return tostring(pathfind_active) .. \",\" .. tostring(pathfind_path and #pathfind_path)",
+            &ram,
+        )
+        .unwrap();
+    let (active, waypoints) = planned.split_once(',').expect("active and waypoint count");
+    assert_eq!(active, "true", "the guide found a route out: {planned}");
+    assert!(
+        waypoints != "nil" && waypoints.parse::<usize>().unwrap() >= 2,
+        "with waypoints to follow: {planned}"
     );
 }

@@ -1965,9 +1965,34 @@ local function area_id(s)
   return (s.indoors == 1) and ("d" .. s.dungeon_room) or ("o" .. s.ow_screen)
 end
 
+-- Where a route may start from.
+--
+-- $0020/$0022 is the top-left of Link's sprite, not the ground he stands on, and the
+-- tile it lands in is often solid: against the top wall of a room his head is IN the
+-- wall, and asleep in bed — or standing on any furniture the game lets him stand on —
+-- every tile around him is collision. A* then finds no way out of its own start and the
+-- guide says "No path there" about a route it could walk perfectly well.
+--
+-- So: his own tile if it is passable, else the nearest tile that is, searched outward
+-- and downward-first because that is where his feet are. The overworld router has
+-- always done this (ow_nearest_walk); the room router never did.
+local function route_start(s)
+  local lv = (s.module == 0x07) and mem.u8(LOWER_LEVEL) or 0
+  local tx, ty = s.x >> 3, s.y >> 3
+  if tile_passable(s, tx, ty, lv) then return tx, ty end
+  for r = 1, 4 do
+    -- Below first: his feet are about a tile under his stored position.
+    for _, d in ipairs({ { 0, r }, { 0, -r }, { r, 0 }, { -r, 0 }, { r, r }, { -r, r }, { r, -r }, { -r, -r } }) do
+      if tile_passable(s, tx + d[1], ty + d[2], lv) then return tx + d[1], ty + d[2] end
+    end
+  end
+  return tx, ty
+end
+
 local function pathfind_replan(s)
   if pathfind_goal == nil then return false end
-  local tiles = planned_route(s, s.x >> 3, s.y >> 3, pathfind_goal[1], pathfind_goal[2], pathfind_goal[3])
+  local sx, sy = route_start(s)
+  local tiles = planned_route(s, sx, sy, pathfind_goal[1], pathfind_goal[2], pathfind_goal[3])
   if tiles == nil then return false end
   pathfind_path = tiles
   pathfind_wp = math.min(2, #pathfind_path)
@@ -2465,8 +2490,17 @@ end
 -- The opening context navigation auto-starts in: Link up and controllable in his
 -- house (room 0x104) with the Lamp ($7EF34A) not yet taken — just out of bed, before
 -- the first errand. Named so the frame loop reads intent, not bare constants.
+--
+-- Asleep counts him out. The game is already module 0x07 submodule 0 while Link is in
+-- bed at the start of a new file, so "in play" alone armed the guide over a sleeping
+-- player: it announced itself, then tried to plan a route from the bed, which is solid
+-- furniture the router cannot start on. It failed, latched the failure, and by the time
+-- he was actually up nothing re-aimed — navigation read as on and did nothing at all.
+-- $7E005D is Link's state; 0x16 is the game's own kPlayerState_AsleepInBed.
+local LINK_ASLEEP = 0x16
 local function at_quest_opening(s)
   return in_play(s) and s.dungeon_room == 0x104 and mem.u8(0x7EF34A) == 0
+      and mem.u8(0x7E005D) ~= LINK_ASLEEP
 end
 
 -- Place one beacon `id` at offset (dx, dy), `dist` away, using class `kind`'s reach,
@@ -4885,12 +4919,18 @@ nav_update = function(s)
   -- so a genuinely unrouteable spot does not re-aim every frame.
   local idle = nav_chain == nil and not pathfind_active
     and ow_route_goal == nil and route_room == nil
+  -- The idle latch is keyed on WHERE he stands as well as what he is aiming for, in
+  -- four-tile blocks. A spot with no route out stays quiet while he stands in it, but
+  -- walking a few tiles is exactly the event that can change the answer — and when it
+  -- could not, the guide stayed silently idle from the bed onwards for the whole of the
+  -- opening, because the objective never changed and so nothing ever re-aimed.
+  local idle_key = sig .. "@" .. (s.x >> 5) .. "," .. (s.y >> 5)
   if sig ~= nav_sig then
     nav_sig = sig
     nav_idle_sig = nil
     nav_reaim(s, v)
-  elseif idle and nav_idle_sig ~= sig then
-    nav_idle_sig = sig
+  elseif idle and nav_idle_sig ~= idle_key then
+    nav_idle_sig = idle_key
     nav_reaim(s, v)
   end
   -- Short-term room objective: while this room gates progress on a task done in
