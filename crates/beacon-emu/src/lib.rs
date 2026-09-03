@@ -114,9 +114,20 @@ pub const VIDEO_MAX_WIDTH: usize = 512;
 /// Tallest frame the SNES can output (interlaced modes double 248 lines).
 pub const VIDEO_MAX_HEIGHT: usize = 496;
 /// Audio samples per frame, sized for PAL's lower frame rate so NTSC also fits.
-const AUDIO_MAX_SPF: usize = (48_000 / 50) * 2;
+/// Room for one frame of stereo at the highest rate a device is likely to ask for.
+///
+/// Sized for 192kHz rather than for the rate actually in use, because bsnes-jg writes into
+/// this buffer with no bound of its own: it is handed a capacity in `spf` and trusted. A
+/// buffer sized for 48kHz and a device running at 96 would be written past the end.
+/// Divided by 50 rather than 60 for the same reason — a slow frame produces more samples
+/// than the nominal rate suggests.
+const AUDIO_MAX_SPF: usize = (192_000 / 50) * 2;
 /// Sample rate the emulator is asked to produce.
+/// The rate to ask an audio device for, and what to fall back to when there is no device.
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+
+/// The highest rate the frame buffer above can hold.
+pub const AUDIO_MAX_SAMPLE_RATE: u32 = 192_000;
 
 /// Dimensions of the most recently emitted video frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -212,14 +223,33 @@ impl Emulator {
     ///
     /// A 512-byte copier header is detected and stripped, since bsnes-jg
     /// expects a headerless image.
+    /// Loads a ROM from disk and powers the system on at the default rate.
+    ///
+    /// For callers with no audio device to consult — a benchmark, a test — where the rate
+    /// only has to be consistent.
     pub fn load(rom_path: &Path) -> Result<Self> {
+        Self::load_at(rom_path, AUDIO_SAMPLE_RATE)
+    }
+
+    /// Loads a ROM from disk and powers the system on, producing audio at `sample_rate`.
+    ///
+    /// The rate comes from the output device rather than being fixed here, because a device
+    /// may accept nothing else: WASAPI in shared mode on Windows serves only its own mix
+    /// format, where ALSA and PulseAudio resample quietly on Linux. bsnes-jg resamples
+    /// internally — libsamplerate is vendored into it — so meeting the device is its job
+    /// rather than something Beacon has to do again on the way out.
+    pub fn load_at(rom_path: &Path, sample_rate: u32) -> Result<Self> {
         // Claim the global instance before touching any emulator state.
         if INSTANCE_HELD.swap(true, Ordering::AcqRel) {
             return Err(Error::AlreadyInstantiated);
         }
 
+        // Beyond what the frame buffer holds there is nothing safe to do, and silently
+        // running at the wrong rate would play the game at the wrong pitch.
+        let sample_rate = sample_rate.min(AUDIO_MAX_SAMPLE_RATE);
+
         // From here on, any early return must release the claim.
-        match Self::load_inner(rom_path) {
+        match Self::load_inner(rom_path, sample_rate) {
             Ok(emu) => Ok(emu),
             Err(e) => {
                 INSTANCE_HELD.store(false, Ordering::Release);
@@ -228,7 +258,7 @@ impl Emulator {
         }
     }
 
-    fn load_inner(rom_path: &Path) -> Result<Self> {
+    fn load_inner(rom_path: &Path, sample_rate: u32) -> Result<Self> {
         let bytes = std::fs::read(rom_path)?;
         let rom = strip_copier_header(&bytes);
 
@@ -266,7 +296,7 @@ impl Emulator {
                 cb: Some(on_video),
             });
             sys::beacon_bsnes_set_audio_spec(sys::AudioSpec {
-                freq: AUDIO_SAMPLE_RATE as f64,
+                freq: sample_rate as f64,
                 spf: AUDIO_MAX_SPF as u32,
                 rsqual: 0,
                 buf: buffers.audio.as_mut_ptr(),

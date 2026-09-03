@@ -282,11 +282,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Settings::default(),
     };
 
-    // No ROM is a legitimate start: an empty machine with a menu on it.
-    let emu = match args.rom.as_ref() {
-        Some(path) => Some(Emulator::load(path)?),
-        None => None,
-    };
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
     let speech = build_speech(&settings, &args);
     let rom = match args.rom.as_ref() {
@@ -297,12 +292,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (plugin, reload_spec) = rom::select_plugin(sha1.as_deref(), &rom);
 
     if let Some(frames) = args.headless {
-        // parse_args refuses --headless without a ROM, so this is always Some.
-        let emu = emu.expect("--headless requires a ROM");
-        return run_headless(emu, arbiter, speech, plugin, frames);
+        // parse_args refuses --headless without a ROM, so this is always Some. No device to
+        // consult without a window, so the default rate stands.
+        let path = args.rom.as_ref().expect("--headless requires a ROM");
+        return run_headless(Emulator::load(path)?, arbiter, speech, plugin, frames);
     }
 
+    // The device opens BEFORE the emulator, because the rate it settles on is the rate the
+    // emulator has to produce. Asking a device to run at the emulator's rate instead is what
+    // failed on Windows, where WASAPI shared mode serves only its own mix format.
     let audio = audio::Audio::new(beacon_emu::AUDIO_SAMPLE_RATE)?;
+    let rate = audio.sample_rate();
+
+    // No ROM is a legitimate start: an empty machine with a menu on it.
+    let emu = match args.rom.as_ref() {
+        Some(path) => Some(Emulator::load_at(path, rate)?),
+        None => None,
+    };
     let mut session = session::Session::new(
         emu,
         audio,

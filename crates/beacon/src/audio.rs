@@ -8,15 +8,14 @@
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::SampleFormat;
 
-/// How much audio to keep queued ahead of the output device.
+/// How much audio to keep queued ahead of the output device, as a fraction of a second.
 ///
-/// Roughly 100 ms at 48 kHz stereo. Long enough to absorb a slow frame, short
-/// enough that input does not feel detached from sound.
-const TARGET_QUEUED_SAMPLES: usize = 48_000 * 2 / 10;
-
-/// Above this the emulator is running ahead and should wait.
-const HIGH_WATER: usize = TARGET_QUEUED_SAMPLES * 2;
+/// Long enough to absorb a slow frame, short enough that input does not feel detached from
+/// sound. Derived from the rate the device actually runs at rather than assumed, or the whole
+/// pacing loop would be wrong by the ratio between them.
+const TARGET_QUEUED_SECONDS: f32 = 0.1;
 
 /// Shared between the frame loop and the audio callback.
 struct Shared {
@@ -30,13 +29,29 @@ struct Shared {
 
 pub struct Audio {
     shared: Arc<Mutex<Shared>>,
+    /// The rate the device is actually running at, which the emulator is told to match.
+    sample_rate: u32,
+    /// The queue length above which the emulator has run far enough ahead to wait. Derived
+    /// from the device's rate, so pacing does not depend on it being 48kHz.
+    high_water: usize,
     // Held to keep the device alive; dropping this stops playback.
     _stream: cpal::Stream,
 }
 
 impl Audio {
-    /// Opens the default output device at the emulator's sample rate.
-    pub fn new(sample_rate: u32) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Opens the default output device, preferring `preferred` where the device allows it.
+    ///
+    /// The rate is the DEVICE's to choose, not Beacon's. Asking for an arbitrary one and
+    /// hoping worked on Linux, where ALSA and PulseAudio resample without saying so, and
+    /// failed outright on Windows: WASAPI in shared mode serves only the device's own mix
+    /// format and rejects anything else — "Stream configuration is not supported in shared
+    /// mode", which killed Beacon on startup before a window ever appeared.
+    ///
+    /// So the supported configurations are asked for, `preferred` is used only if one of them
+    /// covers it, and otherwise the device's default stands. Whatever comes out of that is
+    /// reported by [`Audio::sample_rate`] and handed to the emulator, which resamples to meet
+    /// it. cpal does not negotiate on a caller's behalf, whatever the old comment here hoped.
+    pub fn new(preferred: u32) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -45,17 +60,38 @@ impl Audio {
         let config = device.default_output_config()?;
         let channels = config.channels() as usize;
 
-        // The emulator produces stereo at a fixed rate. Rather than resample,
-        // ask the device for the emulator's rate and let cpal pick the closest
-        // supported configuration.
+        let supported = device
+            .supported_output_configs()
+            .map(|mut configs| {
+                configs.any(|range| {
+                    range.sample_format() == SampleFormat::F32
+                        && range.channels() == config.channels()
+                        && range.min_sample_rate() <= preferred
+                        && preferred <= range.max_sample_rate()
+                })
+            })
+            .unwrap_or(false);
+
+        let sample_rate = if supported {
+            preferred
+        } else {
+            config.sample_rate()
+        };
+        if sample_rate != preferred {
+            eprintln!(
+                "audio: device runs at {sample_rate} Hz, not {preferred}; emulating to match"
+            );
+        }
+
         let stream_config = cpal::StreamConfig {
             channels: config.channels(),
             sample_rate,
             buffer_size: cpal::BufferSize::Default,
         };
+        let target = (sample_rate as f32 * TARGET_QUEUED_SECONDS) as usize * channels.max(1);
 
         let shared = Arc::new(Mutex::new(Shared {
-            queue: std::collections::VecDeque::with_capacity(HIGH_WATER * 2),
+            queue: std::collections::VecDeque::with_capacity(target * 4),
             underruns: 0,
         }));
 
@@ -104,8 +140,15 @@ impl Audio {
 
         Ok(Audio {
             shared,
+            sample_rate,
+            high_water: target * 2,
             _stream: stream,
         })
+    }
+
+    /// The rate the device settled on. The emulator is created to match it.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     /// Queues samples produced by a frame.
@@ -123,7 +166,7 @@ impl Audio {
     pub fn is_ahead(&self) -> bool {
         self.shared
             .lock()
-            .map(|s| s.queue.len() >= HIGH_WATER)
+            .map(|s| s.queue.len() >= self.high_water)
             .unwrap_or(false)
     }
 
