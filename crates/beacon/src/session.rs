@@ -691,7 +691,7 @@ impl Session {
         // AlreadyInstantiated — which is what Open did until this was an Option, meaning it
         // could never have worked and said only "Could not open that ROM."
         self.emu = None;
-        let emu = match Emulator::load(path) {
+        let emu = match Emulator::load_at(path, self.audio.sample_rate()) {
             Ok(emu) => emu,
             Err(e) => {
                 eprintln!("open {}: {e}", path.display());
