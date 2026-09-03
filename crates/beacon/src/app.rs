@@ -55,10 +55,11 @@ pub struct App {
     /// Whether the window has been shown yet. It is created hidden and shown one iteration
     /// later: see the note in `resumed`.
     shown: bool,
-    /// The menu as last published, so the tree is only pushed when it changes. Compared
-    /// rather than diffed because a tree update is cheap and a comparison is cheaper than
-    /// working out what moved.
-    published: Option<(String, Vec<String>, usize)>,
+    /// The menu and the announcement as last published, so the tree is only pushed when one
+    /// of them changes. Compared rather than diffed because a tree update is cheap and a
+    /// comparison is cheaper than working out what moved.
+    #[allow(clippy::type_complexity)]
+    published: (Option<(String, Vec<String>, usize)>, Option<String>),
 }
 
 /// The base game panel size, the SNES 256x224 scaled up.
@@ -129,7 +130,7 @@ impl App {
             #[cfg(any(windows, target_os = "macos"))]
             native_sig: Vec::new(),
             shown: false,
-            published: None,
+            published: (None, None),
         }
     }
 
@@ -207,9 +208,10 @@ impl App {
                 (s.width as f64, s.height as f64)
             })
             .unwrap_or((0.0, 0.0));
+        let announcement = self.session.announcement().map(str::to_string);
         match self.session.menu() {
-            Some(menu) => access::menu_tree("Beacon", size, menu),
-            None => access::window_only("Beacon", size),
+            Some(menu) => access::menu_tree("Beacon", size, menu, announcement.as_deref()),
+            None => access::window_only("Beacon", size, announcement.as_deref()),
         }
     }
 
@@ -220,6 +222,10 @@ impl App {
     /// keypress does. Nothing is published while no assistive technology is listening —
     /// `update_if_active` is what decides that, not this.
     fn publish_access(&mut self) {
+        // The announcement is part of what is published, so a new line reaches the reader
+        // even when the menu has not moved. It carries its own counter, so saying the same
+        // thing twice still counts as a change.
+        let said = self.session.announcement().map(str::to_string);
         let now = self.session.menu().map(|menu| {
             (
                 menu.title().to_string(),
@@ -230,10 +236,10 @@ impl App {
                 menu.selected(),
             )
         });
-        if now == self.published {
+        if (now.clone(), said.clone()) == self.published {
             return;
         }
-        self.published = now;
+        self.published = (now, said);
         let update = self.tree();
         if let Some(adapter) = self.access.as_mut() {
             adapter.update_if_active(|| update);
@@ -500,6 +506,8 @@ impl ApplicationHandler<AccessEvent> for App {
             // Asked for on activation, and whenever a screen reader attaches later. The
             // whole tree, since the platform has nothing yet to update against.
             AccessWindowEvent::InitialTreeRequested => {
+                // Something is reading, so announcing through it is a route that exists.
+                self.session.set_at_listening(true);
                 let update = self.tree();
                 if let Some(adapter) = self.access.as_mut() {
                     adapter.update_if_active(|| update);
@@ -517,7 +525,10 @@ impl ApplicationHandler<AccessEvent> for App {
             // Nothing is listening any more. The next request builds the tree again, so
             // there is nothing to tear down; forgetting what was published means a reader
             // that comes back is sent the tree rather than skipped as unchanged.
-            AccessWindowEvent::AccessibilityDeactivated => self.published = None,
+            AccessWindowEvent::AccessibilityDeactivated => {
+                self.session.set_at_listening(false);
+                self.published = (None, None);
+            }
         }
     }
 

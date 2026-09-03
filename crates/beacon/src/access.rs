@@ -19,7 +19,7 @@
 //! Kept free of the window and the adapter, so the shape of the tree is testable
 //! without a screen reader, a display, or an event loop.
 
-use accesskit::{HasPopup, Node, NodeId, Rect, Role, TreeId, TreeInfo, TreeUpdate};
+use accesskit::{HasPopup, Live, Node, NodeId, Rect, Role, TreeId, TreeInfo, TreeUpdate};
 
 use crate::menu::Menu;
 
@@ -27,6 +27,8 @@ use crate::menu::Menu;
 pub const WINDOW: NodeId = NodeId(0);
 /// The menu, when one is open.
 pub const MENU: NodeId = NodeId(1);
+/// Where an announcement goes when Beacon is speaking through the screen reader.
+pub const ANNOUNCEMENT: NodeId = NodeId(2);
 /// The first entry. Entry `i` is `ENTRY_BASE + i`.
 const ENTRY_BASE: u64 = 16;
 
@@ -40,6 +42,24 @@ fn entry_id(i: usize) -> NodeId {
 /// item or moving its own review cursor names the node, not an index.
 pub fn entry_index(id: NodeId) -> Option<usize> {
     id.0.checked_sub(ENTRY_BASE).map(|i| i as usize)
+}
+
+/// A node whose text a screen reader reads aloud when it changes.
+///
+/// A live region — the same idea as `aria-live` on the web — and the only way to have a screen
+/// reader speak something that is not a focus change. It carries Beacon's announcements when
+/// `speech.screen_reader` is on: the reader says them in its user's own voice, on any platform,
+/// with no separate speech backend for each.
+///
+/// `Polite` rather than `Assertive` deliberately. Assertive interrupts whatever is being read,
+/// including the menu item the player is trying to hear, and Beacon narrates often enough that
+/// it would talk over itself. Losing the arbiter's fine-grained interruption is the price of
+/// this route, and is why it is not the default.
+fn announcement_node(text: &str) -> Node {
+    let mut node = Node::new(Role::Label);
+    node.set_value(text.to_string());
+    node.set_live(Live::Polite);
+    node
 }
 
 /// The window node.
@@ -65,10 +85,16 @@ fn window_node(title: &str, size: (f64, f64)) -> Node {
 /// with interruption rules a live game needs, and mirroring that into the
 /// accessibility tree would have the screen reader talk over it. So the tree describes
 /// the parts that are genuinely user interface, and the menu is the first of them.
-pub fn window_only(title: &str, size: (f64, f64)) -> TreeUpdate {
-    let root = window_node(title, size);
+pub fn window_only(title: &str, size: (f64, f64), announcement: Option<&str>) -> TreeUpdate {
+    let mut root = window_node(title, size);
+    let mut nodes = Vec::new();
+    if let Some(text) = announcement {
+        root.set_children(vec![ANNOUNCEMENT]);
+        nodes.push((ANNOUNCEMENT, announcement_node(text)));
+    }
+    nodes.insert(0, (WINDOW, root));
     TreeUpdate {
-        nodes: vec![(WINDOW, root)],
+        nodes,
         tree: Some(TreeInfo::new(WINDOW)),
         tree_id: TreeId::ROOT,
         focus: WINDOW,
@@ -85,18 +111,30 @@ pub fn window_only(title: &str, size: (f64, f64)) -> TreeUpdate {
 /// So `position_in_set` and `size_of_set` are set explicitly even though the list is
 /// right there in the children: it is what lets the reader say "3 of 4" in the phrasing
 /// and language its user has configured, instead of Beacon's.
-pub fn menu_tree(title: &str, size: (f64, f64), menu: &Menu) -> TreeUpdate {
+pub fn menu_tree(
+    title: &str,
+    size: (f64, f64),
+    menu: &Menu,
+    announcement: Option<&str>,
+) -> TreeUpdate {
     let entries = menu.shown();
     let ids: Vec<NodeId> = (0..entries.len()).map(entry_id).collect();
 
     let mut root = window_node(title, size);
-    root.set_children(vec![MENU]);
+    let mut top = vec![MENU];
+    if announcement.is_some() {
+        top.push(ANNOUNCEMENT);
+    }
+    root.set_children(top);
 
     let mut list = Node::new(Role::Menu);
     list.set_label(menu.title().to_string());
     list.set_children(ids.clone());
 
     let mut nodes = vec![(WINDOW, root), (MENU, list)];
+    if let Some(text) = announcement {
+        nodes.push((ANNOUNCEMENT, announcement_node(text)));
+    }
     for (i, entry) in entries.iter().enumerate() {
         let mut node = Node::new(Role::MenuItem);
         node.set_label(entry.label.clone());
@@ -171,10 +209,43 @@ mod tests {
     fn a_closed_menu_publishes_only_the_window() {
         // Nothing of the game is mirrored into the tree: Beacon narrates that itself, and
         // a screen reader reading it too would talk over it.
-        let update = window_only("Beacon", (768.0, 672.0));
+        let update = window_only("Beacon", (768.0, 672.0), None);
         assert_eq!(update.nodes.len(), 1);
         assert_eq!(label_of(&update, WINDOW).as_deref(), Some("Beacon"));
         assert_eq!(update.focus, WINDOW);
+    }
+
+    #[test]
+    fn an_announcement_is_published_as_a_live_region_the_reader_will_speak() {
+        // The mechanism for having a screen reader say something that is not a focus change,
+        // and the whole of how Beacon narrates through a reader rather than its own voice.
+        let update = window_only("Beacon", (768.0, 672.0), Some("Two hearts."));
+        let node = node_of(&update, ANNOUNCEMENT);
+        assert_eq!(node.value(), Some("Two hearts."));
+        assert_eq!(node.live(), Some(Live::Polite));
+        // Reachable from the root, or a reader will never look at it.
+        assert!(node_of(&update, WINDOW).children().contains(&ANNOUNCEMENT));
+    }
+
+    #[test]
+    fn an_announcement_reaches_the_reader_while_a_menu_is_open_too() {
+        // A toggle confirming its new state is said while the menu is up, and the focused
+        // entry keeps the focus: the announcement rides alongside rather than stealing it.
+        let ctx = ctx();
+        let menu = Menu::open(&ctx);
+        let update = menu_tree("Beacon", (768.0, 672.0), &menu, Some("Speech: off."));
+        assert_eq!(node_of(&update, ANNOUNCEMENT).value(), Some("Speech: off."));
+        assert_eq!(update.focus, entry_id(menu.selected()));
+        assert!(node_of(&update, WINDOW).children().contains(&ANNOUNCEMENT));
+    }
+
+    #[test]
+    fn nothing_is_published_when_beacon_is_speaking_for_itself() {
+        // The default. A live region carrying the narration as well would have the reader
+        // talking over Beacon's own voice.
+        let update = window_only("Beacon", (768.0, 672.0), None);
+        assert!(update.nodes.iter().all(|(id, _)| *id != ANNOUNCEMENT));
+        assert!(node_of(&update, WINDOW).children().is_empty());
     }
 
     #[test]
@@ -182,12 +253,12 @@ mod tests {
         // Focus is the whole mechanism: it is what makes a screen reader speak at all.
         let ctx = ctx();
         let mut menu = Menu::open(&ctx);
-        let first = menu_tree("Beacon", (768.0, 672.0), &menu);
+        let first = menu_tree("Beacon", (768.0, 672.0), &menu, None);
         assert_eq!(first.focus, entry_id(0));
         assert_eq!(label_of(&first, entry_id(0)).as_deref(), Some("File"));
 
         menu.navigate(1);
-        let second = menu_tree("Beacon", (768.0, 672.0), &menu);
+        let second = menu_tree("Beacon", (768.0, 672.0), &menu, None);
         assert_eq!(second.focus, entry_id(1));
         assert_eq!(label_of(&second, entry_id(1)).as_deref(), Some("Save"));
     }
@@ -198,7 +269,7 @@ mod tests {
         // which is the point of publishing a tree rather than prose.
         let ctx = ctx();
         let menu = Menu::open(&ctx);
-        let update = menu_tree("Beacon", (768.0, 672.0), &menu);
+        let update = menu_tree("Beacon", (768.0, 672.0), &menu, None);
         // However many the root holds; the point is that each carries its own place.
         let n = menu.shown().len();
         for i in 0..n {
@@ -213,7 +284,7 @@ mod tests {
         let ctx = ctx();
         let mut menu = Menu::open(&ctx);
         // Every root entry is a submenu.
-        let root = menu_tree("Beacon", (768.0, 672.0), &menu);
+        let root = menu_tree("Beacon", (768.0, 672.0), &menu, None);
         assert_eq!(
             node_of(&root, entry_id(0)).has_popup(),
             Some(HasPopup::Menu)
@@ -222,7 +293,7 @@ mod tests {
         // A slot acts, so it has no popup and the reader will not offer to open one.
         menu.navigate(1);
         menu.choose(&ctx);
-        let slots = menu_tree("Beacon", (768.0, 672.0), &menu);
+        let slots = menu_tree("Beacon", (768.0, 672.0), &menu, None);
         assert_eq!(node_of(&slots, entry_id(0)).has_popup(), None);
         assert_eq!(
             label_of(&slots, entry_id(0)).as_deref(),
@@ -235,13 +306,13 @@ mod tests {
         let ctx = ctx();
         let mut menu = Menu::open(&ctx);
         assert_eq!(
-            label_of(&menu_tree("Beacon", (768.0, 672.0), &menu), MENU).as_deref(),
+            label_of(&menu_tree("Beacon", (768.0, 672.0), &menu, None), MENU).as_deref(),
             Some("Menu")
         );
         menu.navigate(2); // Load
         menu.choose(&ctx);
         assert_eq!(
-            label_of(&menu_tree("Beacon", (768.0, 672.0), &menu), MENU).as_deref(),
+            label_of(&menu_tree("Beacon", (768.0, 672.0), &menu, None), MENU).as_deref(),
             Some("Load")
         );
     }
@@ -259,7 +330,7 @@ mod tests {
         let mut menu = Menu::open(&ctx);
         menu.choose(&ctx); // File
         menu.choose(&ctx); // Open, which is empty
-        let update = menu_tree("Beacon", (768.0, 672.0), &menu);
+        let update = menu_tree("Beacon", (768.0, 672.0), &menu, None);
         assert_eq!(update.focus, MENU);
         assert_eq!(label_of(&update, MENU).as_deref(), Some("Open"));
     }

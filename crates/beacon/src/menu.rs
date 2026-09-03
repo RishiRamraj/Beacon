@@ -41,6 +41,8 @@ pub struct Context {
     /// 0 critical only, 3 everything.
     pub verbosity: u8,
     pub speech: bool,
+    /// Whether announcements go to the screen reader instead of Beacon's own voice.
+    pub screen_reader: bool,
     pub beacons: bool,
     pub braille: bool,
     pub json_events: bool,
@@ -199,6 +201,11 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
                 Level::Verbosity,
             ),
             toggle("Speech", ctx.speech, "speech.enabled"),
+            toggle(
+                "Announce through screen reader",
+                ctx.screen_reader,
+                "speech.screen_reader",
+            ),
             toggle("Spatial audio", ctx.beacons, "beacons.enabled"),
             toggle("Braille", ctx.braille, "braille.enabled"),
             Entry::act(state("Mute", ctx.muted), Act::ToggleMute),
@@ -415,6 +422,16 @@ impl Menu {
         }
     }
 
+    /// Whether `text` is nothing more than what the menu itself is showing.
+    ///
+    /// For when a screen reader is reading the menu out of the accessibility tree: it already
+    /// says the focused entry, so Beacon repeating the same words would have every item read
+    /// twice. Anything else said while the menu is open — a toggle confirming its new state, a
+    /// state saved — is not in the tree and does still need saying.
+    pub fn duplicates(&self, text: &str) -> bool {
+        text == self.announce() || text == self.arrival()
+    }
+
     /// The level's name followed by the selected entry, as said on changing level.
     fn arrival(&self) -> String {
         format!("{}. {}", self.top().level.title(), self.announce())
@@ -523,6 +540,27 @@ mod tests {
             beacons: true,
             ..Context::default()
         }
+    }
+
+    /// Which announcements the accessibility tree already carries.
+    ///
+    /// When a screen reader is reading the menu from the tree, Beacon must not also announce
+    /// the entry: the reader would say it twice. But everything else said while the menu is
+    /// open — a toggle's new state, a slot saved — is not in the tree and still has to be said.
+    #[test]
+    fn the_menus_own_wording_is_recognised_as_already_in_the_tree() {
+        let ctx = ctx();
+        let mut menu = Menu::open(&ctx);
+        assert!(menu.duplicates(&menu.announce()));
+        // Entering a level says the level's name first; that phrasing counts too.
+        let arrival = menu.choose(&ctx);
+        let Chosen::Moved(arrival) = arrival else {
+            panic!("File opens a level: {arrival:?}");
+        };
+        assert!(menu.duplicates(&arrival));
+        // A confirmation is not the menu talking about itself.
+        assert!(!menu.duplicates("Speech: off."));
+        assert!(!menu.duplicates("Saved to slot 1."));
     }
 
     #[test]
@@ -691,7 +729,7 @@ mod tests {
         menu.navigate(4); // Settings
         menu.choose(&ctx);
 
-        assert_eq!(menu.navigate(1), "Speech: on, 2 of 5.");
+        assert_eq!(menu.navigate(1), "Speech: on, 2 of 6.");
         assert_eq!(
             menu.choose(&ctx),
             Chosen::Act(Act::SetSetting {
@@ -702,7 +740,11 @@ mod tests {
             "choosing an `on` toggle asks for off"
         );
 
-        assert_eq!(menu.navigate(1), "Spatial audio: off, 3 of 5.");
+        assert_eq!(
+            menu.navigate(1),
+            "Announce through screen reader: off, 3 of 6."
+        );
+        assert_eq!(menu.navigate(1), "Spatial audio: off, 4 of 6.");
         assert_eq!(
             menu.choose(&ctx),
             Chosen::Act(Act::SetSetting {
@@ -724,7 +766,7 @@ mod tests {
         menu.navigate(4); // Settings
         menu.choose(&ctx);
         // The Settings entry carries the level in force, so it can be read without entering.
-        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 5, submenu.");
+        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 6, submenu.");
         menu.choose(&ctx); // into Verbosity
 
         assert_eq!(menu.announce(), "critical only, 1 of 4.");

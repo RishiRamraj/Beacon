@@ -51,6 +51,18 @@ pub struct Speech {
     pub voice: String,
     /// Emit line delimited JSON events on stdout for external tooling.
     pub json_events: bool,
+    /// Announce through the screen reader instead of speaking directly.
+    ///
+    /// Off by default, because speaking directly is what Beacon is built around: it decides
+    /// what interrupts what, and it works with no screen reader running at all. On, every
+    /// announcement is published into the accessibility tree as a live region and the screen
+    /// reader reads it — no Tolk.dll needed on Windows, and any reader on any platform will do.
+    ///
+    /// The trade is real in both directions, which is why it is a setting rather than a
+    /// decision made here. Through the reader, Beacon loses fine control of interruption and
+    /// depends on how that reader handles live regions changing quickly, which is the case they
+    /// handle worst. With no reader running, it is silence.
+    pub screen_reader: bool,
 }
 
 impl Default for Speech {
@@ -61,6 +73,7 @@ impl Default for Speech {
             module: String::new(),
             voice: String::new(),
             json_events: false,
+            screen_reader: false,
         }
     }
 }
@@ -328,6 +341,7 @@ impl Settings {
             "speech.module",
             "speech.voice",
             "speech.json_events",
+            "speech.screen_reader",
             "arbiter.verbosity",
             "arbiter.max_per_frame",
             "arbiter.bucket_capacity",
@@ -345,6 +359,7 @@ impl Settings {
     pub fn get(&self, key: &str) -> Result<String> {
         Ok(match key {
             "speech.enabled" => self.speech.enabled.to_string(),
+            "speech.screen_reader" => self.speech.screen_reader.to_string(),
             "speech.rate" => self.speech.rate.to_string(),
             "speech.module" => self.speech.module.clone(),
             "speech.voice" => self.speech.voice.clone(),
@@ -385,6 +400,7 @@ impl Settings {
             "speech.module" => self.speech.module = value.to_string(),
             "speech.voice" => self.speech.voice = value.to_string(),
             "speech.json_events" => self.speech.json_events = parse(key, value)?,
+            "speech.screen_reader" => self.speech.screen_reader = parse(key, value)?,
             "arbiter.verbosity" => self.arbiter.verbosity = parse::<u8>(key, value)?.min(3),
             "arbiter.max_per_frame" => {
                 self.arbiter.max_per_frame = parse::<usize>(key, value)?.max(1)

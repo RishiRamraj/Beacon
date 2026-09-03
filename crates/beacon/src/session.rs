@@ -106,6 +106,16 @@ pub struct Session {
     /// Underrun count captured after warmup, so the "too slow" warning ignores
     /// the startup priming burst and measures only sustained starvation.
     underrun_baseline: Option<u64>,
+    /// The latest thing to announce through the screen reader, exactly as it should be
+    /// published. Only used while `speech.screen_reader` is on; see [`Session::announcement`].
+    announcement: Option<String>,
+    /// Whether assistive technology is actually attached to the accessibility tree.
+    ///
+    /// Announcing through a screen reader only works if there is one listening. Without this,
+    /// turning the setting on with no reader running would make Beacon completely silent —
+    /// including the menu, which is how the setting would be turned back off. So a tree with
+    /// nobody reading it is treated as no route at all, and the voice is used instead.
+    at_listening: bool,
 }
 
 /// The loaded game's work RAM, or `None` when there is no game.
@@ -117,6 +127,23 @@ pub struct Session {
 /// the whole of it: several callers pass the RAM straight into `self.plugin`, which needs the
 /// plugin borrowed mutably at the same time. Taking just the one field keeps those borrows
 /// disjoint, which is what the code did before this became an Option.
+/// `text`, made to differ from `previous` without differing in anything audible.
+///
+/// See [`Session::announcement`]: a live region is only announced when its text CHANGES, so
+/// the same line twice running would be said once and the repeat swallowed — and repeats are
+/// ordinary. The same wall, the same locked door, the same "no path". A trailing space is
+/// added or dropped to break the tie, which is inaudible but is a different string.
+///
+/// Toggling the space is decided against the previous announcement rather than a counter:
+/// a counter's parity only breaks ties when the two announcements are an odd number apart,
+/// and two identical lines two announcements apart went out identical.
+fn distinct(previous: Option<&str>, text: &str) -> String {
+    match previous {
+        Some(prev) if prev.trim_end() == text && !prev.ends_with(' ') => format!("{text} "),
+        _ => text.to_string(),
+    }
+}
+
 fn ram_of(emu: &Option<Emulator>) -> Option<&[u8]> {
     emu.as_ref().and_then(|emu| emu.main_ram().ok())
 }
@@ -166,6 +193,8 @@ impl Session {
             frames: 0,
             warned_slow: false,
             underrun_baseline: None,
+            announcement: None,
+            at_listening: false,
         }
     }
 
@@ -305,6 +334,20 @@ impl Session {
         // Muted hushes the voice but still records the line, so `repeat_last` and
         // the MCP speech log keep working while silent.
         if self.muted {
+            return;
+        }
+        // Through the screen reader, when the player has asked for that. The menu is the one
+        // exception: an open menu is already published as a real menu, and the reader speaks
+        // each entry from the focused node, so also putting Beacon's wording in the live
+        // region would have every menu item read twice.
+        if self.settings.speech.screen_reader && self.at_listening {
+            let in_tree = self
+                .menu
+                .as_ref()
+                .is_some_and(|menu| menu.duplicates(&utterance.text));
+            if !in_tree {
+                self.announcement = Some(distinct(self.announcement.as_deref(), &utterance.text));
+            }
             return;
         }
         if let Err(e) = self.speech.speak(&utterance) {
@@ -557,6 +600,7 @@ impl Session {
             // Open in the first place.
             verbosity: self.settings.arbiter.verbosity,
             speech: self.settings.speech.enabled,
+            screen_reader: self.settings.speech.screen_reader,
             beacons: self.settings.beacons.enabled,
             braille: self.settings.braille.enabled,
             json_events: self.settings.speech.json_events,
@@ -603,6 +647,35 @@ impl Session {
     /// The open menu, for the shell to publish to the platform's accessibility layer.
     pub fn menu(&self) -> Option<&Menu> {
         self.menu.as_ref()
+    }
+
+    /// What the screen reader should be reading, if Beacon is announcing through it.
+    ///
+    /// `None` when speaking directly, which is the default: then nothing of the narration
+    /// belongs in the accessibility tree, because the reader would say it on top of Beacon's
+    /// own voice.
+    ///
+    /// The count is what makes a repeat audible. A live region is announced when its text
+    /// CHANGES, so saying the same line twice — "wall" walking into the same wall again — would
+    /// be silent the second time. The count changes with every announcement, and its parity
+    /// puts a trailing space on alternate ones: inaudible, but a different string, so the reader
+    /// treats it as new. A crude trick, and the honest cost of not owning the voice.
+    pub fn announcement(&self) -> Option<&str> {
+        self.announcement.as_deref()
+    }
+
+    /// Told by the window layer when assistive technology attaches or goes away.
+    ///
+    /// Says so on stderr, because whether a screen reader has attached at all is the first
+    /// thing to know when narration through one is silent, and there is no other way to see it.
+    pub fn set_at_listening(&mut self, listening: bool) {
+        if listening != self.at_listening {
+            eprintln!(
+                "accessibility: screen reader {}",
+                if listening { "attached" } else { "gone" }
+            );
+        }
+        self.at_listening = listening;
     }
 
     /// Moves the selection, announcing what it landed on.
@@ -1052,6 +1125,7 @@ mod tests {
     //
     // Naming an input's game-ness, the check the modal relies on, is asserted
     // here since it is the seam between this module and `input`.
+    use super::distinct;
     use crate::input::is_game_input_name;
 
     #[test]
@@ -1062,5 +1136,25 @@ mod tests {
         assert!(!is_game_input_name("KeyD"));
         assert!(!is_game_input_name("Pad:C"));
         assert!(!is_game_input_name("F5"));
+    }
+
+    /// The same words twice must not come out as the same string, or a screen reader reading
+    /// Beacon's live region says them once and swallows the repeat — and repeats are the
+    /// normal case: the same wall, the same locked door, the same "no path".
+    #[test]
+    fn a_repeated_announcement_still_reads_as_a_change() {
+        let first = distinct(None, "Wall.");
+        assert_eq!(first, "Wall.");
+        let second = distinct(Some(&first), "Wall.");
+        assert_ne!(first, second);
+        // Walked into it a third time: still a change, every time, not every other time.
+        let third = distinct(Some(&second), "Wall.");
+        assert_ne!(second, third);
+        // And nothing audible differs.
+        for said in [&first, &second, &third] {
+            assert_eq!(said.trim(), "Wall.");
+        }
+        // Something else to say needs no trick, even after a padded one.
+        assert_eq!(distinct(Some("Wall. "), "Door."), "Door.");
     }
 }
