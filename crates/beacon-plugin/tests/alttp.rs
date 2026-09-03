@@ -6606,3 +6606,106 @@ fn alttp_the_guide_tone_says_whether_link_is_facing_the_way_to_walk() {
         "even steps: {step_up} vs {step_from_low}"
     );
 }
+
+#[test]
+fn alttp_a_route_never_asks_link_to_walk_a_diagonal() {
+    // The bug that made the navigation audio unusable. The guide names one of four
+    // directions, so every leg of a route has to BE one of four directions — and pulling
+    // the route straight by line of sight produced diagonals, which are a leg the guide
+    // cannot say and the player cannot walk with a d-pad.
+    //
+    // Driven against a hand-drawn grid rather than a room, so the property is asserted
+    // about the puller itself: no ROM, no collision table, no console.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let ram = vec![0u8; 128 * 1024];
+
+    // A staircase path across open ground, exactly what a 4-connected A* produces when
+    // the goal is diagonal: east, south, east, south, ... Every tile walkable.
+    let open = r#"
+        local pts = {}
+        for i = 0, 9 do
+            pts[#pts + 1] = { i, i, 0 }
+            pts[#pts + 1] = { i + 1, i, 0 }
+        end
+        pts[#pts + 1] = { 10, 10, 0 }
+        local out = rect_pull(pts, function() return true end)
+        local legs = {}
+        for i = 2, #out do
+            legs[#legs + 1] = (out[i][1] - out[i-1][1]) .. ":" .. (out[i][2] - out[i-1][2])
+        end
+        return #out .. "|" .. table.concat(legs, " ")
+    "#;
+    let got = plugin.eval(open, &ram).unwrap();
+    let (count, legs) = got.split_once('|').expect("count and legs");
+    // Twenty tiles of zig-zag become a start, one turn, and the goal.
+    assert_eq!(count, "3", "pulled to a single corner: {got}");
+    for leg in legs.split(' ') {
+        let (dx, dy) = leg.split_once(':').expect("a leg per pair");
+        assert!(
+            dx == "0" || dy == "0",
+            "every leg is one of four directions, not a diagonal: {got}"
+        );
+    }
+
+    // A wall between them forces the other orientation of the L: going along the top row
+    // is blocked, so the turn has to happen at the start instead of at the end.
+    let blocked = r#"
+        local pts = { { 0, 0, 0 }, { 0, 1, 0 }, { 1, 1, 0 }, { 2, 1, 0 }, { 2, 2, 0 } }
+        -- The whole of row 0 past the start is wall, so a horizontal-first L cannot work.
+        local out = rect_pull(pts, function(x, y) return not (y == 0 and x > 0) end)
+        local legs = {}
+        for i = 1, #out do legs[#legs + 1] = out[i][1] .. "," .. out[i][2] end
+        return table.concat(legs, " ")
+    "#;
+    let got = plugin.eval(blocked, &ram).unwrap();
+    // Down the column first, then along row 2 — the whole way to the goal in one L, since
+    // the only thing the wall rules out is turning last.
+    assert_eq!(
+        got, "0,0 0,2 2,2",
+        "turns down first, then across, and never through the wall: {got}"
+    );
+
+    // A floor change is a corner in its own right: the pull stops dead at it, because the
+    // two floors are different grids and a run across them would read the wrong one.
+    let floors = r#"
+        local pts = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 0, 1 }, { 2, 0, 1 }, { 3, 0, 1 } }
+        local out = rect_pull(pts, function() return true end,
+                              function(a, b) return a[3] == b[3] end)
+        local legs = {}
+        for i = 1, #out do legs[#legs + 1] = out[i][1] .. "," .. out[i][2] .. "," .. out[i][3] end
+        return table.concat(legs, " ")
+    "#;
+    assert_eq!(
+        plugin.eval(floors, &ram).unwrap(),
+        "0,0,0 1,0,0 1,0,1 3,0,1",
+        "the stair tile survives the pull, on both of its floors"
+    );
+}
+
+#[test]
+fn alttp_the_guide_skips_a_corner_link_has_already_passed() {
+    // Corners are shortcuts players cut, and right-angle legs mean there are more of them.
+    // The follower steers for the FURTHEST waypoint already reached, so a corner behind
+    // Link never drags him back — and standing on the goal counts as arriving even if a
+    // corner in the middle was never stepped on.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let ram = vec![0u8; 128 * 1024];
+
+    let probe = r#"
+        -- Waypoints at tiles 0, 5 and 10 along a row; 8 pixels a tile, centres at +4.
+        local path = { { 0, 0 }, { 5, 0 }, { 10, 0 } }
+        local at_start  = route_advance(path, 1, 0 * 8 + 4, 4)
+        local at_corner = route_advance(path, 1, 5 * 8 + 4, 4)
+        local at_goal   = route_advance(path, 1, 10 * 8 + 4, 4)
+        local midway    = route_advance(path, 2, 3 * 8 + 4, 4)
+        return at_start .. "," .. at_corner .. "," .. at_goal .. "," .. midway
+    "#;
+    assert_eq!(
+        plugin.eval(probe, &ram).unwrap(),
+        "2,3,4,2",
+        "reaching a waypoint moves past it; the goal ends the route; between two \
+         waypoints nothing moves"
+    );
+}

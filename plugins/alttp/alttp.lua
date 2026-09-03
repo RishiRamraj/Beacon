@@ -1701,39 +1701,87 @@ local function plan_path(s, s_tx, s_ty, g_tx, g_ty, goal_level)
   return nil
 end
 
--- Whether every tile on the straight line between two world tiles is passable.
-local function line_passable(s, ax, ay, bx, by, level)
-  local dx, dy = math.abs(bx - ax), -math.abs(by - ay)
-  local sx = ax < bx and 1 or -1
-  local sy = ay < by and 1 or -1
-  local err = dx + dy
-  local cx, cy = ax, ay
-  while true do
-    if not tile_passable(s, cx, cy, level) then return false end
-    if cx == bx and cy == by then return true end
-    local e2 = 2 * err
-    if e2 >= dy then err = err + dy; cx = cx + sx end
-    if e2 <= dx then err = err + dx; cy = cy + sy end
-  end
-end
+-- Right-angle string-pulling: drop the tiles Link can walk past, keeping only the
+-- corners, and never leave him a leg he cannot walk in one direction.
+--
+-- The guide names ONE of four directions — the tone says whether the way he is facing is
+-- the way to go — so a leg of the route has to be one of four directions. Pulling by
+-- line of sight did not respect that: a waypoint "in a straight line" from the anchor is
+-- reached by walking two axes at once, and a diagonal is a leg the guide cannot say and
+-- the player cannot follow. It is what made the navigation audio unusable.
+--
+-- So a leg is pulled only as far as an L reaches: at most one turn, both runs
+-- axis-aligned, every tile of both walkable. The corner is emitted as a waypoint of its
+-- own so the follower walks the two runs in turn. This costs no walking at all — an L is
+-- the same number of tiles as the staircase it replaces, since Manhattan distance does
+-- not care where the turn is — and it removes far more turns than it adds, because the
+-- A* is free to zig-zag anywhere the ground is open.
+--
+-- `walkable(tx, ty, level)` decides a tile. `joinable(a, b)` (optional) refuses to pull
+-- between two points that must stay separate waypoints: the dungeon passes it to break
+-- every pull at a floor change, which is a real corner and a different grid.
+--
+-- Global so it can be exercised against a hand-drawn grid, with no ROM and no console.
+function rect_pull(pts, walkable, joinable)
+  if #pts <= 2 then return pts end
 
--- String-pulling: drop interior waypoints Link can walk straight past, so the
--- guide beacon points at real corners rather than every tile. Each path tile carries
--- its floor; a run is pulled only within one floor (on that floor's grid), and the
--- pull always breaks at a layer-swap — the floor change is a genuine corner, and a
--- straight line across floors would read the wrong grid.
-local function simplify(s, tiles)
-  if #tiles <= 2 then return tiles end
-  local out, anchor = { tiles[1] }, 1
-  for i = 2, #tiles - 1 do
-    local alv = tiles[anchor][3]
-    if tiles[i + 1][3] ~= alv
-        or not line_passable(s, tiles[anchor][1], tiles[anchor][2], tiles[i + 1][1], tiles[i + 1][2], alv) then
-      out[#out + 1] = tiles[i]; anchor = i
+  -- One axis-aligned run, both ends included.
+  local function run(x0, y0, x1, y1, lv)
+    local sx = (x1 > x0) and 1 or ((x1 < x0) and -1 or 0)
+    local sy = (y1 > y0) and 1 or ((y1 < y0) and -1 or 0)
+    local x, y = x0, y0
+    while true do
+      if not walkable(x, y, lv) then return false end
+      if x == x1 and y == y1 then return true end
+      x, y = x + sx, y + sy
     end
   end
-  out[#out + 1] = tiles[#tiles]
+
+  -- Whether `b` is reachable from `a` in at most two runs, and where the turn is
+  -- (nil when a single run does it). Both orientations are tried, so an L is refused
+  -- only when the ground refuses both.
+  local function l_walk(a, b)
+    local lv = a[3]
+    if a[1] == b[1] or a[2] == b[2] then
+      return run(a[1], a[2], b[1], b[2], lv), nil
+    end
+    if run(a[1], a[2], b[1], a[2], lv) and run(b[1], a[2], b[1], b[2], lv) then
+      return true, { b[1], a[2], lv }
+    end
+    if run(a[1], a[2], a[1], b[2], lv) and run(a[1], b[2], b[1], b[2], lv) then
+      return true, { a[1], b[2], lv }
+    end
+    return false, nil
+  end
+
+  local out, anchor = { pts[1] }, 1
+  while anchor < #pts do
+    local best, corner = nil, nil
+    local j = anchor + 1
+    while j <= #pts do
+      if joinable ~= nil and not joinable(pts[anchor], pts[j]) then break end
+      local ok, turn = l_walk(pts[anchor], pts[j])
+      if not ok then break end
+      best, corner = j, turn
+      j = j + 1
+    end
+    -- Not even the next tile: a floor change or a portal hop, which is a corner in its
+    -- own right. Step over it and carry on from there.
+    if best == nil then best, corner = anchor + 1, nil end
+    if corner ~= nil then out[#out + 1] = corner end
+    out[#out + 1] = pts[best]
+    anchor = best
+  end
   return out
+end
+
+-- The dungeon route, pulled: same floor only, and the live collision table.
+local function simplify(s, tiles)
+  return rect_pull(
+    tiles,
+    function(tx, ty, lv) return tile_passable(s, tx, ty, lv) end,
+    function(a, b) return a[3] == b[3] end
+  )
 end
 
 -- A string-pulled A* route between two world tiles, ending on `goal_level` (nil =
@@ -1771,22 +1819,6 @@ local function ow_nearest_walk(w, tx, ty)
     end
   end
   return nil
-end
-
--- Whether the straight line between two world tiles stays walkable (string-pull).
-local function ow_line(w, x0, y0, x1, y1)
-  local dx, dy = math.abs(x1 - x0), -math.abs(y1 - y0)
-  local sx = x0 < x1 and 1 or -1
-  local sy = y0 < y1 and 1 or -1
-  local err = dx + dy
-  local x, y = x0, y0
-  while true do
-    if not ow_walk(w, x, y) then return false end
-    if x == x1 and y == y1 then return true end
-    local e2 = 2 * err
-    if e2 >= dy then err = err + dy; x = x + sx end
-    if e2 <= dx then err = err + dx; y = y + sy end
-  end
 end
 
 -- Large overworld areas (Hyrule Castle, Kakariko, ...) span a 2x2 block of cells
@@ -1861,15 +1893,9 @@ local function ow_plan_path(s, gx, gy, goal_area)
   while c do rev[#rev + 1] = { c % 512, c // 512 }; c = came[c] end
   local pts = {}
   for i = #rev, 1, -1 do pts[#pts + 1] = rev[i] end
-  if #pts <= 2 then return pts end
-  local out, anchor = { pts[1] }, 1
-  for i = 2, #pts - 1 do
-    if not ow_line(w, pts[anchor][1], pts[anchor][2], pts[i + 1][1], pts[i + 1][2]) then
-      out[#out + 1] = pts[i]; anchor = i
-    end
-  end
-  out[#out + 1] = pts[#pts]
-  return out
+  -- Pulled to right angles, like the dungeon route: the guide can only name four
+  -- directions, so a leg has to be one of them.
+  return rect_pull(pts, function(tx, ty) return ow_walk(w, tx, ty) end)
 end
 
 -- Follower state. Global so an agent can inspect/drive it over MCP.
@@ -1981,6 +2007,23 @@ function pathfind_stop()
   beacon.clear("path")
 end
 
+-- The waypoint to steer for, given where Link actually is.
+--
+-- The FURTHEST one already reached decides it, not merely the next one in the list. A
+-- corner is a shortcut a player often cuts — and right-angle legs mean there are more
+-- corners than there used to be — so a corner already passed must not send him back for
+-- it. Searching from the end also means a route re-planned under his feet, or a warp,
+-- picks up from where he is rather than from where the old route thought he was.
+function route_advance(path, wp, x, y)
+  for k = #path, wp, -1 do
+    local w = path[k]
+    if math.abs(w[1] * 8 + 4 - x) + math.abs(w[2] * 8 + 4 - y) <= WAYPOINT_REACHED then
+      return k + 1
+    end
+  end
+  return wp
+end
+
 -- Advance the follower one frame and place or clear the guide beacon.
 local function pathfind_update(s)
   if not pathfind_active then return end
@@ -1997,14 +2040,7 @@ local function pathfind_update(s)
   end
 
   local path = pathfind_path
-  while pathfind_wp <= #path do
-    local w = path[pathfind_wp]
-    if math.abs(w[1] * 8 + 4 - s.x) + math.abs(w[2] * 8 + 4 - s.y) <= WAYPOINT_REACHED then
-      pathfind_wp = pathfind_wp + 1
-    else
-      break
-    end
-  end
+  pathfind_wp = route_advance(path, pathfind_wp, s.x, s.y)
   if pathfind_wp > #path then
     if pathfind_arrival then
       say(pathfind_arrival, { priority = "navigation", category = "on-demand" })
@@ -2419,14 +2455,7 @@ local function ow_route_update(s)
   end
   local path = ow_route_path
   if path == nil then beacon.clear("path"); return end
-  while ow_route_wp <= #path do
-    local w = path[ow_route_wp]
-    if math.abs(w[1] * 8 + 4 - s.x) + math.abs(w[2] * 8 + 4 - s.y) <= WAYPOINT_REACHED then
-      ow_route_wp = ow_route_wp + 1
-    else
-      break
-    end
-  end
+  ow_route_wp = route_advance(path, ow_route_wp, s.x, s.y)
   if ow_route_wp > #path then
     ow_route_stop(); beacon.clear("path"); return
   end
