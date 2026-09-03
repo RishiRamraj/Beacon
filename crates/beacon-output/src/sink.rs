@@ -449,6 +449,28 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// The first of `names` a library exports, or null if it exports none of them.
+///
+/// Both spellings have to be tried. Tolk's header and its documentation say `Tolk_Load` and
+/// `Tolk_Output`; the release build that people actually download exports them lowercase,
+/// `Tolk_load` and `Tolk_output`. `GetProcAddress` is case sensitive, so looking up only the
+/// documented name found nothing in a `Tolk.dll` sitting right beside the executable — and
+/// Beacon then reported that there was no Tolk.dll at all.
+///
+/// # Safety
+///
+/// `module` must be a live library handle.
+#[cfg(windows)]
+unsafe fn proc_any(module: Handle, names: &[&core::ffi::CStr]) -> *const core::ffi::c_void {
+    for name in names {
+        let found = GetProcAddress(module, name.as_ptr() as *const u8);
+        if !found.is_null() {
+            return found;
+        }
+    }
+    core::ptr::null()
+}
+
 #[cfg(windows)]
 impl ScreenReaderSink {
     /// Loads whichever library is present, or fails if neither is.
@@ -457,18 +479,39 @@ impl ScreenReaderSink {
             // Tolk first: it covers the screen readers AND falls back to SAPI, so it is the
             // only option that speaks for a player without a screen reader at all.
             let tolk = LoadLibraryW(wide("Tolk.dll").as_ptr());
+            let mut tolk_loaded_but_unusable = false;
             if !tolk.is_null() {
-                let load = GetProcAddress(tolk, c"Tolk_Load".as_ptr() as *const u8);
-                let out = GetProcAddress(tolk, c"Tolk_Output".as_ptr() as *const u8);
-                let silence = GetProcAddress(tolk, c"Tolk_Silence".as_ptr() as *const u8);
-                if !load.is_null() && !out.is_null() && !silence.is_null() {
+                let load = proc_any(tolk, &[c"Tolk_Load", c"Tolk_load"]);
+                let out = proc_any(tolk, &[c"Tolk_Output", c"Tolk_output"]);
+                let silence = proc_any(tolk, &[c"Tolk_Silence", c"Tolk_silence"]);
+                tolk_loaded_but_unusable = load.is_null() || out.is_null() || silence.is_null();
+                if !tolk_loaded_but_unusable {
+                    // SAPI is not one of Tolk's drivers unless it is asked for, and asking
+                    // before loading is what makes Beacon speak for a player who has no
+                    // screen reader running at all. Optional: an older Tolk without it still
+                    // works, with the readers only.
+                    let try_sapi = proc_any(tolk, &[c"Tolk_TrySAPI", c"Tolk_trySAPI"]);
+                    if !try_sapi.is_null() {
+                        let try_sapi = core::mem::transmute::<
+                            *const core::ffi::c_void,
+                            unsafe extern "system" fn(bool) -> bool,
+                        >(try_sapi);
+                        try_sapi(true);
+                    }
                     // Tolk_Load picks the screen reader; without it Tolk_Output says nothing.
-                    let load: unsafe extern "system" fn() = core::mem::transmute(load);
+                    let load: unsafe extern "system" fn() =
+                        core::mem::transmute::<_, unsafe extern "system" fn()>(load);
                     load();
                     return Ok(ScreenReaderSink {
                         _library: tolk,
-                        speak: SpeakFn::Tolk(core::mem::transmute(out)),
-                        silence: SilenceFn::Tolk(core::mem::transmute(silence)),
+                        speak: SpeakFn::Tolk(core::mem::transmute::<
+                            *const core::ffi::c_void,
+                            unsafe extern "system" fn(*const u16, bool) -> bool,
+                        >(out)),
+                        silence: SilenceFn::Tolk(core::mem::transmute::<
+                            *const core::ffi::c_void,
+                            unsafe extern "system" fn(),
+                        >(silence)),
                         name: "Tolk",
                     });
                 }
@@ -476,17 +519,32 @@ impl ScreenReaderSink {
 
             let nvda = LoadLibraryW(wide("nvdaControllerClient64.dll").as_ptr());
             if !nvda.is_null() {
-                let speak = GetProcAddress(nvda, c"nvdaController_speakText".as_ptr() as *const u8);
-                let cancel =
-                    GetProcAddress(nvda, c"nvdaController_cancelSpeech".as_ptr() as *const u8);
+                let speak = proc_any(nvda, &[c"nvdaController_speakText"]);
+                let cancel = proc_any(nvda, &[c"nvdaController_cancelSpeech"]);
                 if !speak.is_null() && !cancel.is_null() {
                     return Ok(ScreenReaderSink {
                         _library: nvda,
-                        speak: SpeakFn::Nvda(core::mem::transmute(speak)),
-                        silence: SilenceFn::Nvda(core::mem::transmute(cancel)),
+                        speak: SpeakFn::Nvda(core::mem::transmute::<
+                            *const core::ffi::c_void,
+                            unsafe extern "system" fn(*const u16) -> u32,
+                        >(speak)),
+                        silence: SilenceFn::Nvda(core::mem::transmute::<
+                            *const core::ffi::c_void,
+                            unsafe extern "system" fn() -> u32,
+                        >(cancel)),
                         name: "NVDA",
                     });
                 }
+            }
+
+            // Named apart, because "there is no DLL" and "the DLL is there and wrong" send
+            // someone looking in completely different places.
+            if tolk_loaded_but_unusable {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Tolk.dll loaded but exports no speech functions this knows: not Tolk, \
+                     or a build with different names",
+                ));
             }
         }
 
