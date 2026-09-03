@@ -2163,8 +2163,9 @@ fn alttp_escape_room_0x71_chest_is_a_routing_objective() {
                 &near
             )
             .unwrap(),
-        "34,20",
-        "leads to the chest"
+        "34,21",
+        "leads to the tile BELOW the chest at 34,20: a chest opens from the south only, \
+         so anywhere else is a place the button does nothing"
     );
 
     // Chest in a far chamber (off-screen, 40 tiles east): stays quiet, so the guide
@@ -4340,8 +4341,9 @@ fn alttp_the_sanctuary_chest_speaks_its_arrival_line_on_reaching_it() {
         "nothing yet: he has not reached it — {said:?}"
     );
 
-    // Now walk him onto it.
-    let on = frame((156, 74));
+    // Now walk him to where it is opened from: the tile below it, since the guide leads
+    // there rather than onto the chest itself.
+    let on = frame((156, 76));
     for f in 6..14 {
         said.extend(p.on_frame(&on, f).iter().map(|i| i.text.clone()));
     }
@@ -6826,5 +6828,40 @@ fn alttp_a_route_starts_from_ground_link_can_stand_on() {
     assert!(
         waypoints != "nil" && waypoints.parse::<usize>().unwrap() >= 2,
         "with waypoints to follow: {planned}"
+    );
+}
+
+#[test]
+fn alttp_facing_a_chest_names_it() {
+    // The same cue that names a bush or a block, extended to chests — and it does double
+    // duty here. A chest opens from the south only, so hearing "Chest." is how a player
+    // knows they are standing where the button will actually work, not merely next to it.
+    let r = Registry::builtin();
+    let north = faced_tile((20, 20), 0); // the tile Link faces, looking north
+    let chest = facing_frame((20, 20), 0, &[(north.0, north.1, 0x58)]);
+    let opened = facing_frame((20, 20), 0, &[(north.0, north.1, 0x00)]);
+
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    p.on_frame(&chest, 0);
+    let said: Vec<String> = p
+        .on_frame(&chest, 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        said.iter().any(|t| t == "Chest."),
+        "named on facing it: {said:?}"
+    );
+
+    // Opened, the tile stops reading as a chest and the cue goes quiet on its own.
+    p.on_frame(&opened, 2);
+    let after: Vec<String> = p
+        .on_frame(&opened, 3)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        !after.iter().any(|t| t == "Chest."),
+        "an opened chest is not still announced: {after:?}"
     );
 }

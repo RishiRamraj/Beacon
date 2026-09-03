@@ -2115,9 +2115,33 @@ local function nearest_door_tile(s)
   return best
 end
 
--- The nearest treasure-chest tile in the current window, as world pixel
--- coordinates, or nil. Chests read as tile-types 0x58-0x5D (and 0x63, a minigame
--- chest) in the game's tile detection. Used to lead to the Lamp chest in the intro.
+-- Where to stand to open the chest whose tile is (tx, ty), as world pixels.
+--
+-- A chest opens from the SOUTH only: Link has to be underneath it, facing north. A
+-- waypoint on the chest itself leads him into whichever side the route happened to
+-- approach from — the north-west diagonal, as it happens, since that is the first tile
+-- the spiral search finds — where the button does nothing and nothing says why.
+--
+-- Chests are drawn 2x2 and named by their top-left tile, so the bottom row is found by
+-- walking down while the tile still reads as a chest, and the place to stand is one below
+-- that. Either column will do: Link is as wide as the chest, so both halves of the same
+-- sixteen pixels open it. The left one is tried first because that is the named one.
+local function chest_stand(s, tx, ty, level)
+  local by = ty
+  while CHEST_TILES[tile_attr_at(s, tx * 8, (by + 1) * 8, level) or 0] do by = by + 1 end
+  local sy = by + 1
+  for _, sx in ipairs({ tx, tx + 1 }) do
+    if tile_passable(s, sx, sy, level) then return sx * 8 + 4, sy * 8 + 4 end
+  end
+  -- Nowhere to stand below it (a chest against the bottom wall of a room, if such a
+  -- thing exists): fall back to the old behaviour rather than refusing to lead at all.
+  return walkable_near(s, tx * 8 + 4, ty * 8 + 4, level)
+end
+
+-- The nearest treasure chest in the current window, as the world pixel Link should
+-- WALK TO to open it — the tile below it, not the chest itself. Chests read as
+-- tile-types 0x58-0x5D (and 0x63, a minigame chest) in the game's tile detection.
+-- Used to lead to the Lamp chest in the intro.
 local function nearest_chest_tile(s)
   local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
   local ltx, lty = (s.x >> 3) - ox, (s.y >> 3) - oy
@@ -2128,7 +2152,8 @@ local function nearest_chest_tile(s)
       if attr and CHEST_TILES[attr] then
         local d = math.abs(x - ltx) + math.abs(y - lty)
         if best_d == nil or d < best_d then
-          best_d, best = d, { (ox + x) * 8 + 4, (oy + y) * 8 + 4 }
+          local sx, sy = chest_stand(s, ox + x, oy + y, nil)
+          best_d, best = d, { sx, sy }
         end
       end
     end
@@ -3437,11 +3462,15 @@ KIND.enemy = {
   end,
 }
 
--- A chest, at its own tile. Done when the tile stops reading as a chest — the game
--- rewrites it on opening, so no flag is needed.
+-- A chest, named by its own tile. Led to from BELOW, because that is the only side it
+-- opens from — every authored chest step names the chest, so this is the one place that
+-- has to know the rule. Done when the tile stops reading as a chest: the game rewrites
+-- it on opening, so no flag is needed, and the test stays on the chest rather than on
+-- the tile Link stands on to reach it.
 KIND.chest = {
   cue = "Open the chest.",
-  target = KIND.spot.target,
+  -- Two values, like every other kind's target: the callers unpack them.
+  target = function(s, wp) return chest_stand(s, wp.tx, wp.ty, wp.level) end,
   done = function(s, wp)
     local a = tile_attr_at(s, wp.tx * 8, wp.ty * 8, wp.level)
     return a == nil or not CHEST_TILES[a]
@@ -4434,6 +4463,13 @@ FACE.CLASSES = {
   -- Overworld only in practice: BUSH_TILE is what the overworld decode reports for the
   -- two bush map16 ids, and the dungeon grid never yields it.
   { say = "Bush.", guided = true, test = function(a) return a == BUSH_TILE end },
+  -- A chest names itself the moment Link is squared up to it. It opens from the south
+  -- only, so being told he is facing one IS the confirmation that he is standing where
+  -- the button will work — the guide leads him below it, and this says he has arrived
+  -- pointing the right way. Ungated, unlike the bush: what you have walked into is worth
+  -- knowing whether or not anything is leading you. An opened chest stops reading as one,
+  -- so the cue goes quiet by itself.
+  { say = "Chest.", test = function(a) return SWEEP.is_chest(a) end },
   -- 0x27 is TileBehavior_Hookshottables, and it is what a shoved block becomes at its
   -- new position: the tile stops being manipulable, so the push machinery rightly goes
   -- quiet, but the thing is still standing there and still worth naming. Statues, logs
