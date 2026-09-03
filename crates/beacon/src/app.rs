@@ -49,6 +49,9 @@ pub struct App {
     /// it takes the menu with it.
     #[cfg(any(windows, target_os = "macos"))]
     native: Option<crate::native::NativeMenu>,
+    /// Every label the bar was built from, so it can be rebuilt when they change.
+    #[cfg(any(windows, target_os = "macos"))]
+    native_sig: Vec<String>,
     /// Whether the window has been shown yet. It is created hidden and shown one iteration
     /// later: see the note in `resumed`.
     shown: bool,
@@ -123,6 +126,8 @@ impl App {
             access_proxy,
             #[cfg(any(windows, target_os = "macos"))]
             native: None,
+            #[cfg(any(windows, target_os = "macos"))]
+            native_sig: Vec::new(),
             shown: false,
             published: None,
         }
@@ -147,6 +152,48 @@ impl App {
             }
             Action::Collapse => self.session.menu_back(),
             _ => {}
+        }
+    }
+
+    /// Builds the platform's menu bar, or rebuilds it when its labels have changed.
+    ///
+    /// Rebuilt rather than built once, because what it lists arrives later than the window
+    /// does: Beacon is normally started with no ROM, so the plugin's commands and the save
+    /// slots do not exist when the bar is first attached. Built once, the Game level was
+    /// permanently empty — which is how it shipped — and the slots permanently wrong.
+    #[cfg(any(windows, target_os = "macos"))]
+    fn sync_native_menu(&mut self) {
+        let tree = crate::menu::full(&self.session.menu_context());
+        let sig = crate::native::signature(&tree);
+        if self.native.is_some() && sig == self.native_sig {
+            return;
+        }
+        self.native_sig = sig;
+
+        #[cfg(windows)]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let Some(window) = self.window.as_ref() else {
+                return;
+            };
+            match window.window_handle().map(|h| h.as_raw()) {
+                // Safe: the handle came from the window this App is holding alive.
+                Ok(RawWindowHandle::Win32(win32)) => {
+                    let built =
+                        unsafe { crate::native::NativeMenu::attach(win32.hwnd.get(), &tree) };
+                    match built {
+                        Ok(menu) => self.native = Some(menu),
+                        Err(e) => eprintln!("could not attach the menu bar: {e}"),
+                    }
+                }
+                Ok(other) => eprintln!("no menu bar: unexpected window handle {other:?}"),
+                Err(e) => eprintln!("no menu bar: {e}"),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        match crate::native::NativeMenu::attach_app(&tree) {
+            Ok(menu) => self.native = Some(menu),
+            Err(e) => eprintln!("could not install the application menu: {e}"),
         }
     }
 
@@ -378,39 +425,6 @@ impl ApplicationHandler<AccessEvent> for App {
             }
         };
 
-        // The platform's own menu bar, built from the same entries the spoken menu walks.
-        //
-        // Once, at startup. Its slot labels therefore say what was true then — saving into an
-        // empty slot leaves the bar calling it empty until Beacon restarts. The spoken menu
-        // has no such gap because it builds each level as it is entered; closing this one
-        // means holding the item handles and calling set_text as occupancy changes, which is
-        // not worth guessing at before anyone has seen the bar work.
-        #[cfg(any(windows, target_os = "macos"))]
-        {
-            let tree = crate::menu::full(&self.session.menu_context());
-            #[cfg(windows)]
-            {
-                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                match window.window_handle().map(|h| h.as_raw()) {
-                    Ok(RawWindowHandle::Win32(win32)) => {
-                        // Safe: the handle came from the window that is alive right here.
-                        match unsafe { crate::native::NativeMenu::attach(win32.hwnd.get(), &tree) }
-                        {
-                            Ok(menu) => self.native = Some(menu),
-                            Err(e) => eprintln!("could not attach the menu bar: {e}"),
-                        }
-                    }
-                    Ok(other) => eprintln!("no menu bar: unexpected window handle {other:?}"),
-                    Err(e) => eprintln!("no menu bar: {e}"),
-                }
-            }
-            #[cfg(target_os = "macos")]
-            match crate::native::NativeMenu::attach_app(&tree) {
-                Ok(menu) => self.native = Some(menu),
-                Err(e) => eprintln!("could not install the application menu: {e}"),
-            }
-        }
-
         // Before the surface, so the adapter sees the window at its initial size, and before
         // the window is shown, which the adapter requires.
         self.access = Some(Adapter::with_event_loop_proxy(
@@ -537,6 +551,10 @@ impl ApplicationHandler<AccessEvent> for App {
         if self.session.in_config() || self.session.in_menu() {
             self.input.clear_keyboard();
         }
+        // The menu bar, built on the first wake and rebuilt whenever what it lists changes.
+        #[cfg(any(windows, target_os = "macos"))]
+        self.sync_native_menu();
+
         // Show the window once, now the loop is turning — where it was created hidden so the
         // accessibility adapter could be built first. A no-op on platforms that created it
         // visible, which is why it needs no cfg of its own.

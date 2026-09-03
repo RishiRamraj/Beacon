@@ -22,6 +22,29 @@ use muda::{Menu, MenuId, MenuItem, Submenu};
 
 use crate::menu::{Act, Node};
 
+/// Every label in a tree, flattened, as a cheap way to tell whether it has changed.
+///
+/// The bar is built from a snapshot, so it goes stale: opening a ROM gives the session a plugin
+/// and a set of save slots that were not there when the window appeared. That is not
+/// hypothetical — the Game level shipped empty on Windows for exactly this reason, because
+/// Beacon is normally started with no ROM and the plugin arrives later.
+pub fn signature(tree: &[Node]) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(nodes: &[Node], out: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                Node::Act { label, .. } => out.push(label.clone()),
+                Node::Menu { label, children } => {
+                    out.push(label.clone());
+                    walk(children, out);
+                }
+            }
+        }
+    }
+    walk(tree, &mut out);
+    out
+}
+
 /// A built native menu, and what each of its items means.
 ///
 /// The menu is kept alive because dropping it takes the menu bar with it; the map is how a
