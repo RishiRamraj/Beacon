@@ -49,6 +49,9 @@ pub struct App {
     /// it takes the menu with it.
     #[cfg(any(windows, target_os = "macos"))]
     native: Option<crate::native::NativeMenu>,
+    /// Whether the window has been shown yet. It is created hidden and shown one iteration
+    /// later: see the note in `resumed`.
+    shown: bool,
     /// The menu as last published, so the tree is only pushed when it changes. Compared
     /// rather than diffed because a tree update is cheap and a comparison is cheaper than
     /// working out what moved.
@@ -120,6 +123,7 @@ impl App {
             access_proxy,
             #[cfg(any(windows, target_os = "macos"))]
             native: None,
+            shown: false,
             published: None,
         }
     }
@@ -351,6 +355,20 @@ impl ApplicationHandler<AccessEvent> for App {
             .with_title("Beacon")
             .with_inner_size(window_size(self.map_only, self.map_shown));
 
+        // Created hidden where the accessibility adapter demands it, and only there.
+        //
+        // The adapter must exist before the window is first shown, and it panics rather than
+        // degrading if it does not — which is what happened on Windows. Linux could not have
+        // caught that: the guard is `window.is_visible() == Some(true)`, and winit answers None
+        // on X11 and Wayland, so it cannot fire there however wrong the order is.
+        //
+        // Which is also why this is conditional. On X11 a window created hidden STAYS hidden:
+        // winit's set_visible does not map it, from `resumed` or from a later turn of the loop,
+        // so hiding it there traded a panic on one platform for an invisible window on another.
+        // Linux has no constraint to satisfy, so it keeps creating the window visible.
+        #[cfg(any(windows, target_os = "macos"))]
+        let attrs = attrs.with_visible(false);
+
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
@@ -393,7 +411,8 @@ impl ApplicationHandler<AccessEvent> for App {
             }
         }
 
-        // Before the surface, so the adapter sees the window at its initial size.
+        // Before the surface, so the adapter sees the window at its initial size, and before
+        // the window is shown, which the adapter requires.
         self.access = Some(Adapter::with_event_loop_proxy(
             event_loop,
             &window,
@@ -518,6 +537,16 @@ impl ApplicationHandler<AccessEvent> for App {
         if self.session.in_config() || self.session.in_menu() {
             self.input.clear_keyboard();
         }
+        // Show the window once, now the loop is turning — where it was created hidden so the
+        // accessibility adapter could be built first. A no-op on platforms that created it
+        // visible, which is why it needs no cfg of its own.
+        if !self.shown {
+            if let Some(window) = self.window.as_ref() {
+                window.set_visible(true);
+                self.shown = true;
+            }
+        }
+
         // Anything chosen from the platform's own menu. It does its own navigating and
         // reports only what was picked, which lands on the same verbs a key does.
         #[cfg(any(windows, target_os = "macos"))]
