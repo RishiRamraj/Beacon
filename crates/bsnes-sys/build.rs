@@ -28,8 +28,33 @@ fn main() {
     let src = tree.join("src");
     let lib = tree.join("objs/libbsnes.a");
 
+    // The core is where the CPU goes, and it is worth knowing by how much: holding 60fps
+    // costs about three quarters of a core, against about two per cent for the whole ALttP
+    // plugin (measured by stubbing its on_frame out under a running game).
+    //
+    // The flags are explicit here because they are a knob someone will reach for, and the
+    // vendored makefile's own default is easy to miss (mk/common.mk sets `CXXFLAGS ?= -O2`,
+    // which is what was in force all along — a grep of the top-level Makefile suggests -O0
+    // and is wrong). Measured from one savestate, three samples each: -O2 about 81%, -O3
+    // about 76%, -O2 -march=native about 75%. All within a few points of each other, so the
+    // core is simply expensive rather than badly built, and the portable default stands.
+    //
+    // BEACON_NATIVE=1 tunes for the building machine. Off by default because the Windows
+    // package is cross-built here and shipped elsewhere.
+    let opt = match std::env::var("BEACON_NATIVE").ok().as_deref() {
+        Some("1") => "-O2 -march=native",
+        _ => "-O2",
+    };
+    let stamp = tree.join(".beacon-cxxflags");
+    let stale = std::fs::read_to_string(&stamp).map(|s| s != opt).unwrap_or(true);
+
     if !tree.exists() {
         copy_tree(&vendor, &tree);
+    }
+    // A flag change has to rebuild, and the guard below is "does the library exist" — so
+    // without this, editing the flags above would silently keep the old library forever.
+    if stale && lib.exists() {
+        let _ = std::fs::remove_dir_all(tree.join("objs"));
     }
 
     println!("cargo:rerun-if-changed=csrc/shim.cpp");
@@ -61,6 +86,8 @@ fn main() {
                 &format!("CC={}", cc_tool.path().display()),
                 &format!("CXX={}", cxx_tool.path().display()),
                 &format!("AR={}", ar_tool.get_program().to_string_lossy()),
+                &format!("CFLAGS={opt}"),
+                &format!("CXXFLAGS={opt}"),
                 &format!("-j{jobs}"),
             ])
             .status()
@@ -70,6 +97,7 @@ fn main() {
     }
 
     assert!(lib.exists(), "expected {} after build", lib.display());
+    let _ = std::fs::write(&stamp, opt);
 
     cc::Build::new()
         .cpp(true)

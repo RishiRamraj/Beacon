@@ -286,18 +286,22 @@ impl Session {
     /// Audio paces emulation: a starved buffer is an audible click, and for a
     /// player navigating by sound a click is indistinguishable from a cue. While
     /// paused, or with the configuration open, nothing runs here.
-    pub fn run_frames(&mut self) {
+    /// Returns whether any frame actually ran, which is the only thing that can have
+    /// changed the picture — so the caller knows whether there is anything to redraw.
+    pub fn run_frames(&mut self) -> bool {
         if self.paused || self.config.is_some() {
-            return;
+            return false;
         }
 
         // Bounded so that a stall cannot spin here forever.
         const MAX_CATCH_UP: u32 = 8;
+        let mut ran = false;
         for _ in 0..MAX_CATCH_UP {
             if self.audio.is_ahead() {
                 break;
             }
             self.step_one_frame();
+            ran = true;
         }
 
         // The audio pipeline underruns while it primes at startup (window and
@@ -314,6 +318,24 @@ impl Session {
                 self.say_now("Audio is struggling. This machine may be too slow for full speed.");
             }
         }
+        ran
+    }
+
+    /// How long the loop may sleep before it must produce audio again.
+    ///
+    /// The frame loop is paced by the audio queue — it stops producing once the queue is
+    /// full — which limits how fast the EMULATOR runs but says nothing about how fast the
+    /// event loop may ask. Asking as fast as the CPU allows is what pegged a core at 100%.
+    /// With no game, or paused, there is nothing to produce at all and the only reason to
+    /// wake is to look at the gamepad, which no human needs faster than this.
+    pub fn idle_for(&self) -> Duration {
+        if self.paused || self.config.is_some() || self.emu.is_none() {
+            return Duration::from_millis(4);
+        }
+        // Half the headroom, so a late wake-up still leaves time to refill before the
+        // device runs dry, and never so long that input feels sticky.
+        let half = self.audio.headroom() / 2;
+        half.clamp(Duration::from_micros(250), Duration::from_millis(4))
     }
 
     // --- Speech ----------------------------------------------------------

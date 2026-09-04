@@ -7,12 +7,13 @@
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::Instant;
 use std::sync::mpsc::Receiver;
 
 use accesskit_winit::{Adapter, Event as AccessEvent, WindowEvent as AccessWindowEvent};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -58,6 +59,8 @@ pub struct App {
     /// Whether the window has been shown yet. It is created hidden and shown one iteration
     /// later: see the note in `resumed`.
     shown: bool,
+    /// Set when something other than a new frame means the window needs painting again.
+    redraw_wanted: bool,
     /// What was last published, so the tree is only pushed when it changes. Compared rather
     /// than diffed because a tree update is cheap and a comparison is cheaper than working
     /// out what moved.
@@ -134,6 +137,7 @@ impl App {
             #[cfg(any(windows, target_os = "macos"))]
             native_failed: false,
             shown: false,
+            redraw_wanted: true,
             published: Published::default(),
         }
     }
@@ -572,6 +576,11 @@ impl ApplicationHandler<AccessEvent> for App {
 
             WindowEvent::RedrawRequested => self.present(),
 
+            // The surface follows the window's size inside `present`, so a resize only needs
+            // to ask for one. Explicit because redraws are no longer unconditional: with a
+            // paused game nothing else would ask, and the picture would stay the old size.
+            WindowEvent::Resized(_) => self.redraw_wanted = true,
+
             _ => {}
         }
     }
@@ -670,7 +679,19 @@ impl ApplicationHandler<AccessEvent> for App {
         self.publish_access();
 
         self.session.set_held_buttons(self.input.buttons());
-        self.session.run_frames();
+        let drew = self.session.run_frames();
+
+        // Sleep until there is something to do, rather than asking again immediately.
+        //
+        // The frame loop is paced by the audio queue, which limits how fast the emulator
+        // runs and not how fast this loop spins: with ControlFlow::Poll and a full queue,
+        // `run_frames` returned at once and everything here ran again, hundreds of thousands
+        // of times a second, for a core at 100% and no benefit at all. The wait is short
+        // enough that input and the accessibility tree are still handled promptly, and winit
+        // wakes early anyway when a real event arrives.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + self.session.idle_for(),
+        ));
 
         if let Some(window) = self.window.as_ref() {
             // Grow or shrink the window when the map is toggled, so the game
@@ -680,8 +701,15 @@ impl ApplicationHandler<AccessEvent> for App {
                 self.map_shown = shown;
                 // In map-only mode the window stays square regardless.
                 let _ = window.request_inner_size(window_size(self.map_only, shown));
+                self.redraw_wanted = true;
             }
-            window.request_redraw();
+            // Only when the picture can have changed. A frame produces a new one; a resize
+            // or a map toggle needs the old one blitted again. Redrawing on every turn of
+            // the loop meant blitting and presenting far faster than the screen can show it.
+            if drew || self.redraw_wanted {
+                self.redraw_wanted = false;
+                window.request_redraw();
+            }
         }
     }
 }

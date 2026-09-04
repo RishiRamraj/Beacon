@@ -6,6 +6,7 @@
 //! audio queue drains and no faster.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
@@ -34,6 +35,10 @@ pub struct Audio {
     /// The queue length above which the emulator has run far enough ahead to wait. Derived
     /// from the device's rate, so pacing does not depend on it being 48kHz.
     high_water: usize,
+    /// Samples consumed per second: the device's rate times its channel count. What turns a
+    /// queue depth into an amount of TIME, which is what the event loop needs to know in
+    /// order to sleep rather than spin.
+    samples_per_sec: usize,
     // Held to keep the device alive; dropping this stops playback.
     _stream: cpal::Stream,
 }
@@ -155,6 +160,7 @@ impl Audio {
             shared,
             sample_rate,
             high_water: target * 2,
+            samples_per_sec: (sample_rate as usize) * channels.max(1),
             _stream: stream,
         })
     }
@@ -181,6 +187,20 @@ impl Audio {
             .lock()
             .map(|s| s.queue.len() >= self.high_water)
             .unwrap_or(false)
+    }
+
+    /// How long the emulator may do nothing at all before the audio queue needs refilling.
+    ///
+    /// The pacing rule above says WHETHER to produce a frame; this says how long until the
+    /// answer could change, which is what lets the event loop wait instead of asking again
+    /// as fast as the CPU allows. Zero when the queue is at or below the mark: produce now.
+    pub fn headroom(&self) -> Duration {
+        let queued = self.shared.lock().map(|s| s.queue.len()).unwrap_or(0);
+        let spare = queued.saturating_sub(self.high_water);
+        if spare == 0 || self.samples_per_sec == 0 {
+            return Duration::ZERO;
+        }
+        Duration::from_secs_f64(spare as f64 / self.samples_per_sec as f64)
     }
 
     pub fn underruns(&self) -> u64 {
