@@ -6984,3 +6984,55 @@ fn alttp_the_nearest_walkable_search_looks_south_and_never_up_and_left_first() {
         .unwrap();
     assert_eq!(ring2, "16", "a radius-2 ring has sixteen cells");
 }
+
+#[test]
+fn alttp_the_guide_tone_is_high_only_toward_the_route() {
+    // End to end, through the follower rather than the tone function alone: a goal to the
+    // east, and the tone read off the live beacon as Link faces each way in turn. An
+    // inversion anywhere between the waypoint and the pitch — the sign of dx/dy, the facing
+    // codes, the dominant axis — comes out here, where testing path_tone by itself would
+    // still pass.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // Open floor, Link at tile (32,40), and a goal ten tiles due east of him.
+    let facing = |dir: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((32, 40), (10, 10), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E002F, dir);
+        set(0x7E005D, 0x00); // awake
+        ram
+    };
+
+    let east = facing(6);
+    plugin.on_frame(&east, 0);
+    plugin.on_frame(&east, 1);
+    plugin
+        .eval("return tostring(pathfind_to((32 + 10) * 8 + 4, 40 * 8 + 4))", &east)
+        .unwrap();
+
+    let pitch_when = |plugin: &mut LuaPlugin, ram: &[u8], frame: u64| -> (f32, f32, f32) {
+        plugin.on_frame(ram, frame);
+        let b = plugin
+            .beacons()
+            .into_iter()
+            .find(|b| b.id == "path")
+            .expect("the guide is sounding");
+        (b.pitch, b.dx, b.dy)
+    };
+
+    let (toward, dx, dy) = pitch_when(&mut plugin, &east, 2);
+    assert!(
+        dx > 0.0 && dy.abs() < 8.0,
+        "the route runs east, so the beacon points east: dx={dx} dy={dy}"
+    );
+
+    let (away, _, _) = pitch_when(&mut plugin, &facing(4), 3); // west, the wrong way
+    let (aside, _, _) = pitch_when(&mut plugin, &facing(0), 4); // north, across it
+
+    assert!(
+        toward > aside && aside > away,
+        "high toward the route, middle across it, low away from it: \
+         east={toward} north={aside} west={away}"
+    );
+}
