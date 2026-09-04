@@ -53,8 +53,15 @@ fn main() {
     // library linked, silently. That cost a measurement: a profile said the PPU's pixel
     // output was a fifth of all cycles, an experiment stubbed it out and showed no change
     // at all, and the reason was that the experiment was never compiled.
+    // Bumped whenever graft_video_toggle changes what it writes. The grafts live in this
+    // script rather than in the vendored source, so the source fingerprint cannot see them:
+    // without this, an existing build tree keeps a library built before the graft and the
+    // link fails on a symbol that only the graft defines. Which is exactly how the Windows
+    // cross-build broke while the Linux one — whose tree happened to be newer — was fine.
+    const GRAFTS: &str = "video-toggle/1";
+
     let stamp = tree.join(".beacon-inputs");
-    let want = format!("{opt}\n{}", fingerprint(&vendor.join("src")));
+    let want = format!("{opt}\n{GRAFTS}\n{}", fingerprint(&vendor.join("src")));
     let stale = std::fs::read_to_string(&stamp)
         .map(|s| s != want)
         .unwrap_or(true);
@@ -68,6 +75,14 @@ fn main() {
         copy_tree(&vendor, &tree);
         graft_video_toggle(&tree);
     }
+    assert!(
+        std::fs::read_to_string(src.join("ppu.cpp"))
+            .map(|s| s.contains("beacon_ppu_render_pixels"))
+            .unwrap_or(false),
+        "the build tree at {} has no video toggle grafted in - it predates the graft, and \
+         the stamp should have forced a fresh copy",
+        tree.display()
+    );
     // The vendored tree may carry objects from an in-place build of its own; those are not
     // this build's, and leaving them means make has nothing to do.
     if stale {
@@ -220,30 +235,35 @@ fn graft_video_toggle(tree: &Path) {
     let path = tree.join("src/ppu.cpp");
     let source = std::fs::read_to_string(&path).expect("vendored ppu.cpp is readable");
 
-    // The flag: C linkage, so the shim can reach it without name mangling.
+    // Written with concat! and explicit newlines, because a `\`-continued Rust string eats the
+    // indentation of every following line — which silently turned these patterns into text that
+    // matches nothing, and the graft then reported the vendored file as changed when it had not.
     let anchor = "void PPU::cycleBackgroundAbove() {";
-    let flag = "\
-// Grafted by beacon's build script: see graft_video_toggle in crates/bsnes-sys/build.rs.\n\
-extern \"C\" bool beacon_ppu_render_pixels;\n\
-extern \"C\" bool beacon_ppu_render_pixels = true;\n\n";
+    let flag = concat!(
+        "// Grafted by beacon's build script: graft_video_toggle in crates/bsnes-sys/build.rs.\n",
+        "extern \"C\" bool beacon_ppu_render_pixels;\n",
+        "extern \"C\" bool beacon_ppu_render_pixels = true;\n",
+        "\n",
+    );
+    let call = concat!(
+        "  else if(Cycle >= 56 && Cycle <= 1078 && (Cycle - 56) % 4 == 2) {\n",
+        "    cycleBackgroundAbove();\n",
+        "    cycleRenderPixel();\n",
+        "  }",
+    );
+    let gated = concat!(
+        "  else if(Cycle >= 56 && Cycle <= 1078 && (Cycle - 56) % 4 == 2) {\n",
+        "    if(beacon_ppu_render_pixels) {\n",
+        "      cycleBackgroundAbove();\n",
+        "      cycleRenderPixel();\n",
+        "    }\n",
+        "  }",
+    );
+
     assert!(
         source.contains(anchor),
         "vendored ppu.cpp no longer contains {anchor:?} - the video toggle graft needs updating"
     );
-
-    // The one call site, in the per-dot cycle template.
-    let call = "\
-  else if(Cycle >= 56 && Cycle <= 1078 && (Cycle - 56) % 4 == 2) {\n\
-    cycleBackgroundAbove();\n\
-    cycleRenderPixel();\n\
-  }";
-    let gated = "\
-  else if(Cycle >= 56 && Cycle <= 1078 && (Cycle - 56) % 4 == 2) {\n\
-    if(beacon_ppu_render_pixels) {\n\
-      cycleBackgroundAbove();\n\
-      cycleRenderPixel();\n\
-    }\n\
-  }";
     assert!(
         source.contains(call),
         "vendored ppu.cpp no longer contains the per-dot render call - the graft needs updating"
