@@ -7153,21 +7153,41 @@ fn alttp_pressing_into_a_wall_says_stuck() {
         "not pressing anything is not stuck: {quiet:?}"
     );
 
-    // Pressing into a block is how a block is used, and the cue that names it has just done
-    // so — being held against something with a name is not being stuck.
+    // Something with a name still says it, and then says this too. A log is named the moment
+    // he faces it, which tells him what it is and nothing about walking having stopped
+    // working — so the name comes first and the cue follows.
     let mut p4 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
-    let block = held(0x02, (32, 40), Some(0x27)); // hookshottable: reads as "Block."
-    let mut pushing = Vec::new();
+    let log = held(0x02, (32, 40), Some(0x27)); // hookshottable: a log, named "Block."
+    let mut against = Vec::new();
     for f in 0..40 {
-        pushing.extend(p4.on_frame(&block, f).iter().map(|i| i.text.clone()));
+        against.extend(p4.on_frame(&log, f).iter().map(|i| i.text.clone()));
+    }
+    let named = against.iter().position(|t| t == "Block.");
+    let stuck = against.iter().position(|t| t == "Stuck.");
+    assert!(named.is_some(), "the thing ahead is named: {against:?}");
+    assert!(stuck.is_some(), "and going nowhere against it is stuck: {against:?}");
+    assert!(named < stuck, "the name comes first: {against:?}");
+
+    // The exception: a block that gives when shoved. Half a second of stillness against one
+    // is the shove working, so nothing is said — but two seconds is a block wedged against
+    // something, and then he is told like anyone else.
+    let mut p5 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let shove = held(0x02, (32, 40), Some(0x70)); // manipulably replaced: a push block
+    let mut early = Vec::new();
+    for f in 0..60 {
+        early.extend(p5.on_frame(&shove, f).iter().map(|i| i.text.clone()));
     }
     assert!(
-        pushing.iter().any(|t| t == "Block."),
-        "the thing ahead is named: {pushing:?}"
+        !early.iter().any(|t| t == "Stuck."),
+        "a shove in progress is not being stuck: {early:?}"
     );
+    let mut late = Vec::new();
+    for f in 60..140 {
+        late.extend(p5.on_frame(&shove, f).iter().map(|i| i.text.clone()));
+    }
     assert!(
-        !pushing.iter().any(|t| t == "Stuck."),
-        "and being held against it is not being stuck: {pushing:?}"
+        late.iter().any(|t| t == "Stuck."),
+        "but a block that never moves is: {late:?}"
     );
 }
 

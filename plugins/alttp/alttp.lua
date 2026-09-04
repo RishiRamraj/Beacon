@@ -4712,9 +4712,10 @@ FACE.CLASSES = {
 -- pressing for as long as his patience lasts, and the only thing that tells him is silence.
 -- This says it instead.
 --
--- Reserved for the nameless case. Pressing into a bush, a block, a pot or a chest is how each
--- of those is used, and FACE has just named it, so being held against one is not being stuck.
-STUCK = { dir = nil, frames = 0, next_at = 0, x = nil, y = nil }
+-- Named or not. A bush is named the moment he faces it and then has to be CUT — knowing what
+-- it is does not tell him that walking has stopped working, so the name comes first and this
+-- follows. The one thing that earns patience is something that actually moves when shoved.
+STUCK = { dir = nil, frames = 0, said = nil, x = nil, y = nil }
 -- Half a second of pressing. Longer than the shove a block takes to give, so leaning on one
 -- reads as pushing rather than as a wall.
 STUCK.FRAMES = 30
@@ -4722,13 +4723,26 @@ STUCK.FRAMES = 30
 -- another cue, or simply not registered — and the player is then holding a direction against
 -- a wall with nothing to tell them, which is the state this exists to end.
 STUCK.AGAIN = 120
+-- Longer, for something that gives when pushed: a block takes about half a second of shoving
+-- to move, so half a second of stillness against one is progress rather than a wall. Two
+-- seconds of it is not — a block wedged against something never moves, and then he needs to
+-- be told like anyone else.
+STUCK.SHOVING = 120
 -- $00F0 is joypad1H_last, the directions actually HELD; $00F4 next to it is only the ones
 -- newly pressed, which is what the menus want and the opposite of what this does.
 STUCK.HELD = 0x7E00F0
 STUCK.DPAD = 0x0F -- kJoypadH_AnyDir: the four direction bits of the H byte
 
 function STUCK.forget()
-  STUCK.dir, STUCK.frames, STUCK.next_at = nil, 0, STUCK.FRAMES
+  STUCK.dir, STUCK.frames, STUCK.said = nil, 0, nil
+end
+
+-- Whether what he is pressing into is a block that shoves. 0x70-0x7F is the game's
+-- "manipulably replaced" class: the push blocks, which become 0x27 once moved.
+function STUCK.shoving(s)
+  local ax, ay = FACE.ahead(s)
+  local a = tile_attr_at(s, ax, ay)
+  return a ~= nil and a >= 0x70 and a <= 0x7F
 end
 
 function STUCK.update(s)
@@ -4744,15 +4758,16 @@ function STUCK.update(s)
   STUCK.x, STUCK.y = s.x, s.y
   -- A new direction is a fresh attempt, and any movement at all means he is not stuck.
   if moved or dpad ~= STUCK.dir then
-    STUCK.dir, STUCK.frames, STUCK.next_at = dpad, 0, STUCK.FRAMES
+    STUCK.dir, STUCK.frames, STUCK.said = dpad, 0, nil
     return
   end
 
   STUCK.frames = STUCK.frames + 1
-  -- Held off while what he is against has a name: the naming cue has said it, and the
-  -- moment that goes quiet this speaks, rather than counting the wait as spent.
-  if STUCK.frames >= STUCK.next_at and FACE.said == nil then
-    STUCK.next_at = STUCK.frames + STUCK.AGAIN
+  local wait = STUCK.shoving(s) and STUCK.SHOVING or STUCK.FRAMES
+  local due = (STUCK.said == nil and STUCK.frames >= wait)
+    or (STUCK.said ~= nil and STUCK.frames - STUCK.said >= STUCK.AGAIN)
+  if due then
+    STUCK.said = STUCK.frames
     say("Stuck.", { priority = "navigation", category = "on-demand" })
   end
 end
