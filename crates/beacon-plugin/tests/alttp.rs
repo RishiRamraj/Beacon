@@ -7257,3 +7257,76 @@ fn alttp_a_route_will_not_cross_solid_furniture() {
         "open floor still routes"
     );
 }
+
+#[test]
+fn alttp_the_game_over_menu_reads_its_three_choices() {
+    // Module 0x12 submodule 9 is the game's own GameOver_SaveAndOrContinue: three choices with
+    // subsubmodule_index for a cursor, wrapping both ways. The dialogue-box choice reader is no
+    // help — the marker is an animated fairy sprite, not a character in the text — so nothing
+    // read this screen at all, and dying left a blind player choosing in silence.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // The message buffer as the game leaves it, taken from a live death screen: three lines,
+    // split by the line commands 0x75 and 0x76, terminated by 0x7F.
+    let screen = |cursor: u8| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x12); // death
+        set(0x7E0011, 0x09); // the save-or-continue menu
+        set(0x7E00B0, cursor);
+        set(0x7EF36C, 24);
+        let text: [u8; 60] = [
+            0x7A, 0x00, 0x12, 0x1A, 0x2F, 0x1E, 0x59, 0x00, 0x27, 0x1D, 0x59, 0x02, 0x28, 0x27,
+            0x2D, 0x22, 0x27, 0x2E, 0x1E, 0x75, 0x12, 0x1A, 0x2F, 0x1E, 0x59, 0x00, 0x27, 0x1D,
+            0x59, 0x10, 0x2E, 0x22, 0x2D, 0x76, 0x03, 0x28, 0x59, 0x0D, 0x28, 0x2D, 0x59, 0x12,
+            0x1A, 0x2F, 0x1E, 0x59, 0x00, 0x27, 0x1D, 0x59, 0x02, 0x28, 0x27, 0x2D, 0x22, 0x27,
+            0x2E, 0x1E, 0x7F, 0x77,
+        ];
+        for (i, b) in text.iter().enumerate() {
+            set(0x7F1200 + i as u32, *b);
+        }
+        ram
+    };
+
+    // Arriving: the option under the cursor, and how many there are, so the shape of the menu
+    // is known once.
+    let first = screen(0);
+    plugin.on_frame(&first, 0);
+    let said: Vec<String> = plugin
+        .on_frame(&first, 1)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        said.iter().any(|t| t == "Save And Continue, 1 of 3."),
+        "the first choice, and the count: {said:?}"
+    );
+
+    // Moving: the option alone, which is all a move changes. Read out of the game's own text
+    // rather than written into the plugin, so a translated ROM reads in its own words.
+    for (cursor, expected) in [(1u8, "Save And Quit"), (2, "Do Not Save And Continue")] {
+        let moved = screen(cursor);
+        let out: Vec<String> = plugin
+            .on_frame(&moved, cursor as u64 + 2)
+            .iter()
+            .map(|i| i.text.clone())
+            .collect();
+        assert!(
+            out.iter().any(|t| t == expected),
+            "choice {cursor} reads as {expected:?}: {out:?}"
+        );
+    }
+
+    // Not said again while the cursor holds still.
+    let held = screen(2);
+    let quiet: Vec<String> = plugin
+        .on_frame(&held, 9)
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
+    assert!(
+        !quiet.iter().any(|t| t.contains("Save")),
+        "nothing repeated while the cursor sits: {quiet:?}"
+    );
+}

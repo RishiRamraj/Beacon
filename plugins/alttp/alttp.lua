@@ -2912,6 +2912,9 @@ function on_frame(frame)
   -- The pause screen shares module 0x0E with the text box and is likewise not in play.
   PAUSE.update(now)
 
+  -- The game-over menu, which is a third screen that is not in play and has to be read.
+  DEATH.update(now)
+
   -- Turn navigation on by itself at the very start of the quest — once Link is up
   -- out of bed and controllable in his house — so the opening guidance leads without
   -- the player first pressing the key. Setting nav_active is enough: nav_update,
@@ -4703,6 +4706,49 @@ FACE.CLASSES = {
   { say = "Block.", test = function(a) return SWEEP.is_block(a) or a == 0x27 end },
   { say = "Pot.", test = function(a) return SWEEP.is_pot(a) end },
 }
+
+-- The game-over menu: save and continue, save and quit, or continue without saving.
+--
+-- Module 0x12 submodule 9 is the game's GameOver_SaveAndOrContinue, and its cursor is
+-- subsubmodule_index — 0 to 2, wrapping both ways. The dialogue-box choice reader cannot help
+-- here: the marker is an animated FAIRY sprite rather than a character in the text, so there
+-- is nothing in the buffer for it to find the options by.
+--
+-- The options themselves are read out of the message buffer, as the three lines the game drew,
+-- rather than written out here. Whatever the game says is what gets said — including in a
+-- translated ROM, and including if the wording is not what anyone expected.
+DEATH = { at = nil, options = nil }
+DEATH.MENU = 0x09
+DEATH.CURSOR = 0x7E00B0 -- subsubmodule_index
+
+function DEATH.update(s)
+  if s == nil or s.module ~= 0x12 or s.submodule ~= DEATH.MENU then
+    DEATH.at, DEATH.options = nil, nil
+    return
+  end
+
+  -- The text lands a frame or two after the submodule does, so this keeps trying rather than
+  -- caching an empty answer.
+  if DEATH.options == nil then
+    local opts = {}
+    for _, line in ipairs(TEXT.lines(0, TEXT.next_break(0) or TEXT.MAX)) do
+      if line ~= "" then opts[#opts + 1] = line end
+    end
+    if #opts == 0 then return end
+    DEATH.options = opts
+  end
+
+  local i = mem.u8(DEATH.CURSOR)
+  if i == nil or i == DEATH.at then return end
+  local first = DEATH.at == nil
+  DEATH.at = i
+  local opt = DEATH.options[i + 1]
+  if opt == nil then return end
+  -- The count once, on arriving, so the shape of the menu is known; then the option alone on
+  -- each move, which is all a move changes.
+  local line = first and string.format("%s, %d of %d.", opt, i + 1, #DEATH.options) or opt
+  say(line, { priority = "critical", category = "menu" })
+end
 
 -- Pressing into something and going nowhere.
 --
