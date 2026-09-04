@@ -7105,7 +7105,9 @@ fn alttp_pressing_into_a_wall_says_stuck() {
         ram
     };
 
-    // Pressing left, never moving: said once, after half a second, and not again.
+    // Pressing left, never moving: said after half a second, then again every two seconds
+    // for as long as it lasts. Once is easy to miss — another cue talks over it, or it simply
+    // does not register — and the player is then holding a direction with nothing to tell them.
     let wall = held(0x02, (32, 40), None);
     let mut said = Vec::new();
     for f in 0..40 {
@@ -7114,7 +7116,16 @@ fn alttp_pressing_into_a_wall_says_stuck() {
     assert_eq!(
         said.iter().filter(|t| *t == "Stuck.").count(),
         1,
-        "said once when pressing into a wall gets nowhere: {said:?}"
+        "said once within the first two thirds of a second: {said:?}"
+    );
+    // Two more seconds of the same: exactly one more.
+    for f in 40..160 {
+        said.extend(plugin.on_frame(&wall, f).iter().map(|i| i.text.clone()));
+    }
+    assert_eq!(
+        said.iter().filter(|t| *t == "Stuck.").count(),
+        2,
+        "and again two seconds later, not continuously: {said:?}"
     );
 
     // Moving while pressing says nothing at all — a fresh plugin, so no latch carries over.

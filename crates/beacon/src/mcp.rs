@@ -315,7 +315,7 @@ fn dispatch(s: &mut Session, name: &str, args: &Value) -> Result<Value, String> 
                     None => return Err(format!("unknown SNES button '{n}'")),
                 }
             }
-            s.set_held_buttons(mask);
+            s.set_agent_buttons(mask);
             Ok(json!({ "held": names }))
         }
 

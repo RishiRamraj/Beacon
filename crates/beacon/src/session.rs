@@ -90,6 +90,9 @@ pub struct Session {
 
     /// Buttons currently held, supplied by whatever is driving the session.
     held_buttons: u16,
+    /// What an agent holds over the control socket, kept apart from the player's own input so
+    /// that the window loop's every-wake update does not wipe it.
+    agent_buttons: u16,
     /// Set by the quit action; the driver checks it and shuts down.
     quit: bool,
     /// When true, all output is silenced: the game and beacon audio is submitted
@@ -187,6 +190,7 @@ impl Session {
             map_buffer: Vec::new(),
             map_dims: (0, 0),
             held_buttons: 0,
+            agent_buttons: 0,
             quit: false,
             muted: false,
             audio_scratch: Vec::with_capacity(4096),
@@ -205,8 +209,25 @@ impl Session {
 
     /// Sets the buttons held this tick. The frame loop reads these; the driver
     /// (a device layer or an agent) writes them.
+    /// The buttons the local player is holding, from the keyboard and the gamepad.
+    ///
+    /// Combined with anything an agent is holding rather than replacing it. The window loop
+    /// calls this every wake with whatever the devices say, which is zero most of the time —
+    /// so a mask an agent set over the control socket used to survive for a fraction of a
+    /// frame and then be wiped. Nothing an agent pressed ever reached the game, in the
+    /// windowed app: set_buttons answered "held" and the console never saw it.
     pub fn set_held_buttons(&mut self, mask: u16) {
-        self.held_buttons = mask;
+        self.held_buttons = mask | self.agent_buttons;
+    }
+
+    /// The buttons an agent is holding over the control socket, until it says otherwise.
+    ///
+    /// Kept apart from the player's so that neither clears the other: an agent walking Link
+    /// to a waypoint does not want a keyboard with nothing pressed to release it, and a
+    /// player does not want an agent's forgotten button stuck down in their game.
+    pub fn set_agent_buttons(&mut self, mask: u16) {
+        self.agent_buttons = mask;
+        self.held_buttons |= mask;
     }
 
     /// Session time derived from the frame count rather than the wall clock.
