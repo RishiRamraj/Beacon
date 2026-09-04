@@ -45,24 +45,40 @@ fn main() {
         Some("1") => "-O2 -march=native",
         _ => "-O2",
     };
-    let stamp = tree.join(".beacon-cxxflags");
-    let stale = std::fs::read_to_string(&stamp).map(|s| s != opt).unwrap_or(true);
+    // What the built library depends on: the flags, and the state of the vendored source.
+    //
+    // Both have to be in here. The flags because they are a knob; the source because
+    // patching the core and rebuilding otherwise does NOTHING — cargo was told to watch
+    // only shim.cpp and bsnes.hpp, so editing ppu.cpp left this script unrun and the old
+    // library linked, silently. That cost a measurement: a profile said the PPU's pixel
+    // output was a fifth of all cycles, an experiment stubbed it out and showed no change
+    // at all, and the reason was that the experiment was never compiled.
+    let stamp = tree.join(".beacon-inputs");
+    let want = format!("{opt}\n{}", fingerprint(&vendor.join("src")));
+    let stale = std::fs::read_to_string(&stamp)
+        .map(|s| s != want)
+        .unwrap_or(true);
 
+    // A changed input means the copy is wrong as well as the objects: re-copy from the
+    // vendored tree rather than leaving a patched file behind an unpatched build.
+    if stale && tree.exists() {
+        let _ = std::fs::remove_dir_all(&tree);
+    }
     if !tree.exists() {
         copy_tree(&vendor, &tree);
     }
-    // A flag change has to rebuild, and the guard below is "does the library exist" — so
-    // without this, editing the flags above would silently keep the old library forever.
-    if stale && lib.exists() {
+    // The vendored tree may carry objects from an in-place build of its own; those are not
+    // this build's, and leaving them means make has nothing to do.
+    if stale {
         let _ = std::fs::remove_dir_all(tree.join("objs"));
     }
 
     println!("cargo:rerun-if-changed=csrc/shim.cpp");
     println!("cargo:rerun-if-changed=csrc/shim.h");
-    println!(
-        "cargo:rerun-if-changed={}",
-        vendor.join("src/bsnes.hpp").display()
-    );
+    // The whole vendored source, not just its public header: a patch anywhere in the core
+    // has to rebuild it. Cargo walks a directory given here.
+    println!("cargo:rerun-if-changed={}", vendor.join("src").display());
+    println!("cargo:rerun-if-changed={}", vendor.join("Makefile").display());
 
     if !lib.exists() {
         let jobs = std::thread::available_parallelism()
@@ -97,7 +113,7 @@ fn main() {
     }
 
     assert!(lib.exists(), "expected {} after build", lib.display());
-    let _ = std::fs::write(&stamp, opt);
+    let _ = std::fs::write(&stamp, &want);
 
     cc::Build::new()
         .cpp(true)
@@ -147,4 +163,35 @@ fn copy_tree(from: &Path, to: &Path) {
             std::fs::copy(entry.path(), &dest).expect("could not copy a vendored file");
         }
     }
+}
+
+/// A cheap description of a source tree: every file's path, length and modification time.
+///
+/// Enough to notice an edit, a new file or a removed one, which is what decides whether the
+/// core has to be rebuilt. Not a hash of the contents — that would mean reading 25MB on every
+/// build to catch a case (same size, same mtime, different bytes) that does not happen.
+fn fingerprint(dir: &Path) -> String {
+    fn walk(dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if let Ok(meta) = entry.metadata() {
+                let stamp = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                out.push(format!("{} {} {stamp}", path.display(), meta.len()));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    files.sort();
+    files.join("\n")
 }
