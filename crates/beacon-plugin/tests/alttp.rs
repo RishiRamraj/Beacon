@@ -6938,3 +6938,49 @@ fn alttp_a_destination_can_require_a_facing_as_well_as_a_place() {
         "facing it names it: {names:?}"
     );
 }
+
+#[test]
+fn alttp_the_nearest_walkable_search_looks_south_and_never_up_and_left_first() {
+    // This ordering has caused two separate "leads to the wrong side of the thing" bugs, and
+    // it is invisible at every call site that depends on it. Scanning a square ring as
+    // `for dy = -r, r do for dx = -r, r` puts (-1, -1) first, so every answer was the
+    // NORTH-WEST DIAGONAL of what was asked about: a route seeded on Link started up and to
+    // the left of him and the guide's first instruction was to walk back to it, and chest
+    // waypoints landed at a corner of the chest instead of under it.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let ram = vec![0u8; 128 * 1024];
+
+    let probe = r#"
+        local out = {}
+        for _, d in ipairs(ring(1)) do out[#out + 1] = d[1] .. "," .. d[2] end
+        return table.concat(out, " ")
+    "#;
+    let order = plugin.eval(probe, &ram).unwrap();
+    let first_four: Vec<&str> = order.split(' ').take(4).collect();
+
+    // The four cardinals come first — a step away is nearer than a diagonal step, which the
+    // square scan did not know — and south leads, because Link's stored position is his head
+    // and the ground he stands on is below it.
+    assert_eq!(first_four[0], "0,1", "south first: {order}");
+    assert!(
+        first_four.contains(&"0,-1") && first_four.contains(&"1,0") && first_four.contains(&"-1,0"),
+        "all four cardinals before any diagonal: {order}"
+    );
+    for cell in &first_four {
+        let (dx, dy) = cell.split_once(',').unwrap();
+        assert!(
+            dx == "0" || dy == "0",
+            "no diagonal among the first four: {order}"
+        );
+    }
+
+    // Every offset in the ring is on it, and the whole ring is covered.
+    let ring2 = plugin
+        .eval(
+            "local n = 0 for _, d in ipairs(ring(2)) do n = n + 1 end return tostring(n)",
+            &ram,
+        )
+        .unwrap();
+    assert_eq!(ring2, "16", "a radius-2 ring has sixteen cells");
+}

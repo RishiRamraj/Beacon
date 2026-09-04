@@ -1806,16 +1806,47 @@ local function ow_walk(w, tx, ty)
   return a ~= nil and not IMPASSABLE[a]
 end
 
+-- The ring of offsets at radius `r`, nearest first and southward before northward.
+--
+-- Global so the order can be asserted directly: it has now been the cause of two separate
+-- "the guide leads to the wrong side of the thing" bugs, and it is invisible at the call
+-- sites that depend on it.
+--
+-- The order is the whole point. Scanning a square ring as `for dy = -r, r do for dx = -r, r`
+-- puts (-r, -r) first, so every "nearest walkable tile" answer was the NORTH-WEST DIAGONAL
+-- of whatever was asked about. For a route seeded on Link that put the start of his path up
+-- and to the left of him, and the guide's first instruction was to walk back to it: asked
+-- to lead him right, it led him backwards. The same bias sent chest waypoints to a corner
+-- of the chest.
+--
+-- So: true distance first (a cardinal neighbour is nearer than a diagonal one, which the
+-- square ring does not know), and among equals the one below before the one above, because
+-- Link's stored position is his head and the ground he stands on is south of it.
+function ring(r)
+  local out = {}
+  for dy = -r, r do
+    for dx = -r, r do
+      if math.max(math.abs(dx), math.abs(dy)) == r then
+        out[#out + 1] = { dx, dy }
+      end
+    end
+  end
+  table.sort(out, function(a, b)
+    local da, db = math.abs(a[1]) + math.abs(a[2]), math.abs(b[1]) + math.abs(b[2])
+    if da ~= db then return da < db end
+    if a[2] ~= b[2] then return a[2] > b[2] end -- south first: that is where his feet are
+    return a[1] < b[1]
+  end)
+  return out
+end
+
 -- The nearest walkable tile to (tx,ty), spiralling out — Link's $0020/$0022 is his
 -- head, often inside a wall attribute, so a route must seed from real footing.
 local function ow_nearest_walk(w, tx, ty)
-  for r = 0, 12 do
-    for dy = -r, r do
-      for dx = -r, r do
-        if math.max(math.abs(dx), math.abs(dy)) == r and ow_walk(w, tx + dx, ty + dy) then
-          return tx + dx, ty + dy
-        end
-      end
+  if ow_walk(w, tx, ty) then return tx, ty end
+  for r = 1, 12 do
+    for _, d in ipairs(ring(r)) do
+      if ow_walk(w, tx + d[1], ty + d[2]) then return tx + d[1], ty + d[2] end
     end
   end
   return nil
@@ -1841,7 +1872,9 @@ local OW_ASTAR_CAP = 40000 -- node budget; bounds a worst-case mazey route
 -- list of world tiles {tx,ty}, or nil if unreachable / off the map.
 local function ow_plan_path(s, gx, gy, goal_area)
   local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
-  local sx, sy = ow_nearest_walk(w, s.x >> 3, s.y >> 3)
+  -- From under his feet: his stored position is the top of his sprite, so the tile it
+  -- lands in is regularly something he is standing behind rather than on.
+  local sx, sy = ow_nearest_walk(w, (s.x + 8) >> 3, (s.y + 12) >> 3)
   if goal_area == nil then gx, gy = ow_nearest_walk(w, gx, gy) end
   if sx == nil or gx == nil then return nil end
   local function key(x, y) return y * 512 + x end
@@ -2005,9 +2038,9 @@ local function route_start(s)
   local lv = (s.module == 0x07) and mem.u8(LOWER_LEVEL) or 0
   local tx, ty = s.x >> 3, s.y >> 3
   if tile_passable(s, tx, ty, lv) then return tx, ty end
+  -- `ring` puts the tile below him first, which is where his feet are.
   for r = 1, 4 do
-    -- Below first: his feet are about a tile under his stored position.
-    for _, d in ipairs({ { 0, r }, { 0, -r }, { r, 0 }, { -r, 0 }, { r, r }, { -r, r }, { r, -r }, { -r, -r } }) do
+    for _, d in ipairs(ring(r)) do
       if tile_passable(s, tx + d[1], ty + d[2], lv) then return tx + d[1], ty + d[2] end
     end
   end
@@ -2248,12 +2281,14 @@ end
 -- the sprite itself yields "no path"; snap to a tile beside it instead.
 local function walkable_near(s, wx, wy, level)
   local tx, ty = wx >> 3, wy >> 3
-  for r = 0, 8 do
-    for dy = -r, r do
-      for dx = -r, r do
-        if math.max(math.abs(dx), math.abs(dy)) == r and tile_passable(s, tx + dx, ty + dy, level) then
-          return (tx + dx) * 8 + 4, (ty + dy) * 8 + 4
-        end
+  if tile_passable(s, tx, ty, level) then return tx * 8 + 4, ty * 8 + 4 end
+  -- `ring` rather than a square scan: nearest first, and a cardinal neighbour before a
+  -- diagonal one. The square scan always answered with the north-west diagonal, which is
+  -- how chest waypoints came to sit at a corner of the chest.
+  for r = 1, 8 do
+    for _, d in ipairs(ring(r)) do
+      if tile_passable(s, tx + d[1], ty + d[2], level) then
+        return (tx + d[1]) * 8 + 4, (ty + d[2]) * 8 + 4
       end
     end
   end
