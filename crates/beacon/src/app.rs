@@ -97,7 +97,10 @@ fn blit(
     sh: usize,
     stride: usize,
 ) {
-    if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
+    // An empty source means there is nothing to draw — the emulator has been told not to
+    // compose a picture — and the destination has already been cleared, so leave it black
+    // rather than scaling nothing into it a pixel at a time.
+    if dw == 0 || dh == 0 || sw == 0 || sh == 0 || src.is_empty() {
         return;
     }
     for y in 0..dh {
@@ -386,12 +389,18 @@ impl App {
 
         let (win_w, win_h) = (size.width as usize, size.height as usize);
 
-        // The game picture.
+        // The game picture. Empty when the emulator has been told not to draw one, so the
+        // panel stays black rather than showing whichever frame was last composed — and the
+        // scaling work is skipped too, which is the point of turning it off.
         let info = self.session.frame_info();
         // `pitch` is a byte stride; the framebuffer is 32-bit pixels.
         let game_stride = (info.pitch as usize / 4).max(info.width as usize);
         let (gw, gh) = (info.width as usize, info.height as usize);
-        let game = self.session.framebuffer();
+        let game: &[u32] = if self.session.video_enabled() {
+            self.session.framebuffer()
+        } else {
+            &[]
+        };
 
         // The map, if shown, sits in a square panel to the right of the game.
         let map = self.session.map_view();

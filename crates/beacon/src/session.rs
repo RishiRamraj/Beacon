@@ -167,7 +167,7 @@ impl Session {
         settings: Settings,
         rom_id: Option<&str>,
     ) -> Self {
-        Session {
+        let mut session = Session {
             emu,
             audio,
             arbiter,
@@ -202,7 +202,11 @@ impl Session {
             underrun_baseline: None,
             announcement: None,
             at_listening: false,
-        }
+        };
+        // The core starts out drawing, so a session opened with the setting off has to say so
+        // before the first frame rather than after someone changes something.
+        session.apply_video();
+        session
     }
 
     // --- Driving the frame loop ------------------------------------------
@@ -653,6 +657,7 @@ impl Session {
             screen_reader: self.settings.speech.screen_reader,
             beacons: self.settings.beacons.enabled,
             braille: self.settings.braille.enabled,
+            video: self.settings.video.enabled,
             json_events: self.settings.speech.json_events,
             muted: self.muted,
             map_shown: self.show_map,
@@ -861,6 +866,7 @@ impl Session {
         let (plugin, spec) = rom::select_plugin(sha1.as_deref(), &bytes);
 
         self.emu = Some(emu);
+        self.apply_video();
         self.plugin = plugin;
         self.reload_spec = spec;
         self.rom = bytes;
@@ -1143,8 +1149,27 @@ impl Session {
         // Verbosity lives in two places; keep the live arbiter aligned with the
         // stored setting.
         self.arbiter.set_verbosity(self.settings.arbiter.verbosity);
+        // Drawing the picture is a live property of the emulator, not something read at load,
+        // so a change here has to reach it now.
+        self.apply_video();
         self.persist_settings();
         Ok(())
+    }
+
+    /// Tells the emulator whether to compose a picture, from the setting.
+    ///
+    /// Called on every change and on every ROM opened, because a fresh emulator starts out
+    /// drawing — the flag lives in the core, not in the save file.
+    fn apply_video(&mut self) {
+        let on = self.settings.video.enabled;
+        if let Some(emu) = self.emu.as_mut() {
+            emu.set_video_enabled(on);
+        }
+    }
+
+    /// Whether the emulator is drawing at all, so the window knows there is nothing to blit.
+    pub fn video_enabled(&self) -> bool {
+        self.settings.video.enabled
     }
 
     /// Rebuilds the plugin from its source, picking up edits on disk.

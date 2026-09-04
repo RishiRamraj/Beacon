@@ -28,6 +28,7 @@ pub struct Settings {
     pub arbiter: ArbiterSettings,
     pub braille: Braille,
     pub beacons: Beacons,
+    pub video: Video,
     /// Key bindings. Serialized as `[keys]`; the field is `keymap` to avoid
     /// colliding with [`Settings::keys`], the list of scalar setting names.
     #[serde(rename = "keys")]
@@ -366,6 +367,7 @@ impl Settings {
             "arbiter.bucket_capacity",
             "arbiter.bucket_refill_per_sec",
             "braille.enabled",
+            "video.enabled",
             "braille.verbosity",
             "beacons.enabled",
             "beacons.volume_max",
@@ -388,6 +390,7 @@ impl Settings {
             "arbiter.bucket_capacity" => self.arbiter.bucket_capacity.to_string(),
             "arbiter.bucket_refill_per_sec" => self.arbiter.bucket_refill_per_sec.to_string(),
             "braille.enabled" => self.braille.enabled.to_string(),
+            "video.enabled" => self.video.enabled.to_string(),
             "braille.verbosity" => self.braille.verbosity.to_string(),
             "beacons.enabled" => self.beacons.enabled.to_string(),
             "beacons.volume_max" => self.beacons.volume_max.to_string(),
@@ -431,6 +434,7 @@ impl Settings {
                 self.arbiter.bucket_refill_per_sec = parse::<f32>(key, value)?.max(0.0)
             }
             "braille.enabled" => self.braille.enabled = parse(key, value)?,
+            "video.enabled" => self.video.enabled = parse(key, value)?,
             "braille.verbosity" => self.braille.verbosity = parse::<u8>(key, value)?.min(3),
             "beacons.enabled" => self.beacons.enabled = parse(key, value)?,
             "beacons.volume_max" => {
@@ -516,6 +520,24 @@ mod tests {
             s.set(key, &value)
                 .unwrap_or_else(|e| panic!("set {key} = {value:?}: {e}"));
         }
+    }
+
+    #[test]
+    fn video_is_on_until_someone_turns_it_off() {
+        // On by default: Beacon is used by sighted developers and by sighted people helping,
+        // and a black window is a poor first impression for either. Off is a deliberate choice
+        // by a player who cannot see the picture and would rather have the CPU back.
+        assert!(Settings::default().video.enabled);
+        assert_eq!(Settings::default().get("video.enabled").unwrap(), "true");
+
+        let mut s = Settings::default();
+        s.set("video.enabled", "false").unwrap();
+        assert!(!s.video.enabled);
+
+        // And it survives a round trip through the file, or turning it off would not stick.
+        let text = toml::to_string(&s).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert!(!back.video.enabled);
     }
 
     #[test]

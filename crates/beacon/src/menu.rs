@@ -45,6 +45,8 @@ pub struct Context {
     pub screen_reader: bool,
     pub beacons: bool,
     pub braille: bool,
+    /// Whether the emulator draws a picture. Off saves a good part of a CPU core.
+    pub video: bool,
     pub json_events: bool,
     pub muted: bool,
     pub map_shown: bool,
@@ -216,6 +218,9 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
             ),
             toggle("Spatial audio", ctx.beacons, "beacons.enabled"),
             toggle("Braille", ctx.braille, "braille.enabled"),
+            // Worth a menu entry rather than only a config file: drawing the picture is the
+            // single largest cost in the program, and a player who cannot see it is paying it.
+            toggle("Video", ctx.video, "video.enabled"),
             Entry::act(state("Mute", ctx.muted), Act::ToggleMute),
         ],
 
@@ -726,6 +731,35 @@ mod tests {
     }
 
     #[test]
+    fn video_can_be_turned_off_from_the_menu() {
+        // The largest single cost in the program, and of no use to a player who cannot see it —
+        // so it belongs where a player will find it, not only in a config file.
+        let ctx = Context {
+            video: true,
+            ..ctx()
+        };
+        let mut menu = Menu::open(&ctx);
+        menu.navigate(4); // Settings
+        menu.choose(&ctx);
+        let labels: Vec<String> = menu.shown().into_iter().map(|e| e.label).collect();
+        assert!(
+            labels.contains(&"Video: on".to_string()),
+            "the setting is on the Settings level: {labels:?}"
+        );
+
+        let at = labels.iter().position(|l| l == "Video: on").unwrap();
+        menu.select(at);
+        assert_eq!(
+            menu.choose(&ctx),
+            Chosen::Act(Act::SetSetting {
+                key: "video.enabled",
+                value: "false".to_string(),
+                said: "Video: off.".to_string()
+            })
+        );
+    }
+
+    #[test]
     fn a_toggle_says_what_it_is_set_to_and_chooses_the_opposite() {
         // A toggle whose label does not say its state has to be activated to find out — which
         // for a toggle means changing the thing you were only asking about.
@@ -737,7 +771,7 @@ mod tests {
         menu.navigate(4); // Settings
         menu.choose(&ctx);
 
-        assert_eq!(menu.navigate(1), "Speech: on, 2 of 6.");
+        assert_eq!(menu.navigate(1), "Speech: on, 2 of 7.");
         assert_eq!(
             menu.choose(&ctx),
             Chosen::Act(Act::SetSetting {
@@ -750,9 +784,9 @@ mod tests {
 
         assert_eq!(
             menu.navigate(1),
-            "Announce through screen reader: off, 3 of 6."
+            "Announce through screen reader: off, 3 of 7."
         );
-        assert_eq!(menu.navigate(1), "Spatial audio: off, 4 of 6.");
+        assert_eq!(menu.navigate(1), "Spatial audio: off, 4 of 7.");
         assert_eq!(
             menu.choose(&ctx),
             Chosen::Act(Act::SetSetting {
@@ -774,7 +808,7 @@ mod tests {
         menu.navigate(4); // Settings
         menu.choose(&ctx);
         // The Settings entry carries the level in force, so it can be read without entering.
-        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 6, submenu.");
+        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 7, submenu.");
         menu.choose(&ctx); // into Verbosity
 
         assert_eq!(menu.announce(), "critical only, 1 of 4.");
