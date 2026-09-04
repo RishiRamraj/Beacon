@@ -104,6 +104,21 @@ end
 
 -- Whether the player is actually controlling Link, as opposed to sitting in a
 -- menu, a transition, or the intro.
+-- Where Link STANDS, as world pixels.
+--
+-- $0020/$0022 is the top-left of his sprite, not his footing: the game's own collision probes
+-- run from x+0..x+15 and y+8..y+24 (kDetectTiles in zelda3's tile_detect), so the ground he is
+-- on is the tile around (x+8, y+12) — a tile and a half south of where his stored position
+-- lands.
+--
+-- Every planner already seeds there. Every follower used to compare against the stored
+-- position instead, and that half-tile of disagreement is why a route wanted him to step down
+-- before heading off: the waypoints were laid where his feet would be, and measured against
+-- his head. Global so it can be asserted, and so nothing has to re-derive it.
+function foot(s)
+  return s.x + 8, s.y + 12
+end
+
 local function in_play(s)
   return (s.module == 0x07 or s.module == 0x09) and s.submodule == 0
 end
@@ -1872,9 +1887,8 @@ local OW_ASTAR_CAP = 40000 -- node budget; bounds a worst-case mazey route
 -- list of world tiles {tx,ty}, or nil if unreachable / off the map.
 local function ow_plan_path(s, gx, gy, goal_area)
   local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
-  -- From under his feet: his stored position is the top of his sprite, so the tile it
-  -- lands in is regularly something he is standing behind rather than on.
-  local sx, sy = ow_nearest_walk(w, (s.x + 8) >> 3, (s.y + 12) >> 3)
+  local fx, fy = foot(s)
+  local sx, sy = ow_nearest_walk(w, fx >> 3, fy >> 3)
   if goal_area == nil then gx, gy = ow_nearest_walk(w, gx, gy) end
   if sx == nil or gx == nil then return nil end
   local function key(x, y) return y * 512 + x end
@@ -1972,6 +1986,7 @@ local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 -- Global so it can be probed directly, and because the file is at Lua's local limit.
 function path_tone(direction, dx, dy)
   local d = DIRS[direction]
+
   -- Standing on the corner, or facing something the game does not name: the tone says
   -- nothing rather than guessing, which is what the middle of the three means anyway.
   if d == nil or (dx == 0 and dy == 0) then return PATH_TONE.side end
@@ -1993,7 +2008,8 @@ end
 -- the heading maths and tone live in one place. `duck` drops the volume while an enemy is
 -- engaged, so the threat tone reads over the guide without the guide dropping out entirely.
 local function aim_path_beacon(s, w, duck)
-  local dx, dy = (w[1] * 8 + 4) - s.x, (w[2] * 8 + 4) - s.y
+  local fx, fy = foot(s)
+  local dx, dy = (w[1] * 8 + 4) - fx, (w[2] * 8 + 4) - fy
   beacon.set("path", {
     x = dx, y = dy,
     pitch = path_tone(s.direction, dx, dy),
@@ -2036,7 +2052,8 @@ end
 -- always done this (ow_nearest_walk); the room router never did.
 local function route_start(s)
   local lv = (s.module == 0x07) and mem.u8(LOWER_LEVEL) or 0
-  local tx, ty = s.x >> 3, s.y >> 3
+  local fx, fy = foot(s)
+  local tx, ty = fx >> 3, fy >> 3
   if tile_passable(s, tx, ty, lv) then return tx, ty end
   -- `ring` puts the tile below him first, which is where his feet are.
   for r = 1, 4 do
@@ -2115,8 +2132,16 @@ end
 -- it. Searching from the end also means a route re-planned under his feet, or a warp,
 -- picks up from where he is rather than from where the old route thought he was.
 function route_advance(path, wp, x, y)
+  local tx, ty = x >> 3, y >> 3
   for k = #path, wp, -1 do
     local w = path[k]
+    -- The tile he is standing on is not somewhere to be sent. It counts as reached whatever
+    -- the pixel distance says, because a waypoint at the centre of his own tile is still up
+    -- to half a tile away from him — enough for the dominant-axis rule to call it a heading
+    -- and send him a step down before a leg that runs west, which is what it did. Distance
+    -- alone could not express that: the answer is not a wider radius, it is that his own
+    -- tile is not a destination.
+    if w[1] == tx and w[2] == ty then return k + 1 end
     if math.abs(w[1] * 8 + 4 - x) + math.abs(w[2] * 8 + 4 - y) <= WAYPOINT_REACHED then
       return k + 1
     end
@@ -2165,7 +2190,8 @@ local function pathfind_update(s)
   end
 
   local path = pathfind_path
-  pathfind_wp = route_advance(path, pathfind_wp, s.x, s.y)
+  local fx, fy = foot(s)
+  pathfind_wp = route_advance(path, pathfind_wp, fx, fy)
   if pathfind_wp > #path then
     -- On the spot. If the errand also needs him pointed a particular way, that is the
     -- rest of arriving: say what to do and which way once, then keep the guide sounding
@@ -2191,7 +2217,7 @@ local function pathfind_update(s)
 
   -- Duck the guide while an enemy is engaged, so the threat tone reads clearly over
   -- it, but keep guiding — full volume returns once the enemy backs off.
-  aim_path_beacon(s, route_aim(path, pathfind_wp, s.x, s.y), combat_engaged)
+  aim_path_beacon(s, route_aim(path, pathfind_wp, fx, fy), combat_engaged)
 end
 
 -- Tile-attribute classes, named like the collision sets (IMPASSABLE, COLLIDE_*),
@@ -2642,12 +2668,13 @@ local function ow_route_update(s)
   end
   local path = ow_route_path
   if path == nil then beacon.clear("path"); return end
-  ow_route_wp = route_advance(path, ow_route_wp, s.x, s.y)
+  local fx, fy = foot(s)
+  ow_route_wp = route_advance(path, ow_route_wp, fx, fy)
   if ow_route_wp > #path then
     ow_route_stop(); beacon.clear("path"); return
   end
   -- duck the guide in a fight
-  aim_path_beacon(s, route_aim(path, ow_route_wp, s.x, s.y), combat_engaged)
+  aim_path_beacon(s, route_aim(path, ow_route_wp, fx, fy), combat_engaged)
 end
 
 -- The opening context navigation auto-starts in: Link up and controllable in his

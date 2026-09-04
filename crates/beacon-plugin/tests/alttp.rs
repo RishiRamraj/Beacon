@@ -640,7 +640,12 @@ fn alttp_pathfinder_clears_the_guide_on_arrival() {
 
     // Walk Link onto the door tile: the guide falls silent (no generic arrival
     // chatter) and the beacon clears.
-    let at_door = dungeon_frame((10, 15), (10, 15), &[]);
+    //
+    // Standing ON a tile means his FEET are on it, and $0020 is the top of his sprite, so his
+    // stored position is two rows above the tile he is standing on. The route is planned and
+    // followed in that same footing space; measuring one against the other is what used to
+    // make a route ask him to step down half a tile before setting off.
+    let at_door = dungeon_frame((10, 13), (10, 15), &[]);
     let out = plugin.on_frame(&at_door, 2);
     assert!(
         !out.iter().any(|i| i.text.contains("arrived")),
@@ -4343,7 +4348,8 @@ fn alttp_the_sanctuary_chest_speaks_its_arrival_line_on_reaching_it() {
 
     // Now walk him to where it is opened from: the tile below it, since the guide leads
     // there rather than onto the chest itself.
-    let on = frame((156, 76));
+    // His feet on the tile below the chest, so his stored position is two rows above it.
+    let on = frame((156, 74));
     for f in 6..14 {
         said.extend(p.on_frame(&on, f).iter().map(|i| i.text.clone()));
     }
@@ -6698,15 +6704,20 @@ fn alttp_the_guide_skips_a_corner_link_has_already_passed() {
     let probe = r#"
         -- Waypoints at tiles 0, 5 and 10 along a row; 8 pixels a tile, centres at +4.
         local path = { { 0, 0 }, { 5, 0 }, { 10, 0 } }
+        -- Standing anywhere in a waypoint's own tile counts as reached, however the pixel
+        -- distance falls: his own tile is not a destination. At the far corner of tile 5 the
+        -- centre is 7 pixels away, which no radius worth having would forgive.
+        local corner_of_5 = route_advance(path, 2, 5 * 8 + 7, 7)
         local at_start  = route_advance(path, 1, 0 * 8 + 4, 4)
         local at_corner = route_advance(path, 1, 5 * 8 + 4, 4)
         local at_goal   = route_advance(path, 1, 10 * 8 + 4, 4)
         local midway    = route_advance(path, 2, 3 * 8 + 4, 4)
         return at_start .. "," .. at_corner .. "," .. at_goal .. "," .. midway
+            .. "," .. corner_of_5
     "#;
     assert_eq!(
         plugin.eval(probe, &ram).unwrap(),
-        "2,3,4,2",
+        "2,3,4,2,3",
         "reaching a waypoint moves past it; the goal ends the route; between two \
          waypoints nothing moves"
     );
@@ -6877,8 +6888,10 @@ fn alttp_a_destination_can_require_a_facing_as_well_as_a_place() {
 
     // Link standing where the guide puts him for a chest — the tile below it — first
     // facing south (away from it), then north (into it). 0 north, 2 south.
+    // His FEET on the tile below the chest — two rows below his stored position, which is the
+    // top of his sprite — so his head is level with the chest, exactly as it looks in play.
     let at_chest = |dir: u8| -> Vec<u8> {
-        let mut ram = dungeon_frame((32, 41), (10, 10), &[]);
+        let mut ram = dungeon_frame((32, 39), (10, 10), &[]);
         let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
         set(0x7E00A0, 0x04);
         set(0x7E00A1, 0x01); // room 0x0104, the intro house
