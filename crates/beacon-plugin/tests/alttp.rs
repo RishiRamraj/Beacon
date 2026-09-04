@@ -7170,3 +7170,70 @@ fn alttp_pressing_into_a_wall_says_stuck() {
         "and being held against it is not being stuck: {pushing:?}"
     );
 }
+
+#[test]
+fn alttp_a_route_will_not_cross_solid_furniture() {
+    // Reported as the guide leading north through LOGS and leaving the player pressing into
+    // them. The impassable set was hand-written and covered walls, pits and water; every kind
+    // of furniture the game also treats as collision was missing, so routes ran straight
+    // through it. Taken from zelda3's TileDetect_ExecuteInner now — every handler that sets
+    // the collision accumulator — with one deliberate exception, below.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // A wall of one attribute across Link's only way north, and a goal beyond it.
+    let blocked_by = |attr: u8| -> bool {
+        let mut ram = dungeon_frame((32, 40), (10, 10), &[]);
+        {
+            let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+            set(0x7E005D, 0x00);
+            // A full-width band, so there is no way round it inside the window.
+            for tx in 0..64u32 {
+                set(0x7F2000 + 36 * 64 + tx, attr);
+            }
+        }
+        let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        p.on_frame(&ram, 0);
+        p.on_frame(&ram, 1);
+        // Ask for a route to the far side of the band.
+        p.eval("return tostring(pathfind_to(32 * 8 + 4, 30 * 8 + 4))", &ram)
+            .unwrap()
+            == "false"
+    };
+
+    for (attr, what) in [
+        (0x27u8, "a log, a statue, a hookshot peg, a shoved block"),
+        (0x57, "bonk rocks"),
+        (0x58, "a chest"),
+        (0x70, "a push block"),
+        (0xC0, "a torch"),
+        (0x46, "a Hylian plaque"),
+        (0x01, "a wall, the case that always worked"),
+    ] {
+        assert!(
+            blocked_by(attr),
+            "0x{attr:02X} is solid to the game, so no route may cross it: {what}"
+        );
+    }
+
+    // The exception, and the reason it cannot simply be the game's list: a doorway is
+    // collision too, and a route whose whole purpose is to lead Link out of a room has to be
+    // allowed through one.
+    assert!(
+        !blocked_by(0x86),
+        "0x86 is an indoor doorway - blocking it walls the room in"
+    );
+    assert!(!blocked_by(0x8E), "0x8E is an entrance out of the room");
+
+    // Sanity: the plugin still loads and routes over ordinary floor.
+    let plain = dungeon_frame((32, 40), (10, 10), &[]);
+    plugin.on_frame(&plain, 0);
+    plugin.on_frame(&plain, 1);
+    assert_eq!(
+        plugin
+            .eval("return tostring(pathfind_to(32 * 8 + 4, 30 * 8 + 4))", &plain)
+            .unwrap(),
+        "true",
+        "open floor still routes"
+    );
+}

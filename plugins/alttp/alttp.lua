@@ -1332,13 +1332,38 @@ end
 -- ===========================================================================
 
 -- Tiles a route may not cross: walls/cliffs, pits, water, and solid objects.
+-- What Link cannot walk through, taken from the game's own collision classifier rather than
+-- from observation: every tile whose handler in zelda3's TileDetect_ExecuteInner sets the
+-- collision accumulator (R14). The list used to be hand-written and was missing most of the
+-- furniture — a route led north through LOGS, which are solid, and left the player pressing
+-- into them with the guide insisting. Logs are 0x27 with statues and hookshot pegs; so were
+-- chests, push blocks, bonk rocks, torches and manual doors.
 local IMPASSABLE = {}
 for _, a in ipairs({
-  0x01, 0x02, 0x03, 0x0B, 0x26, 0x43, 0x6C, 0x6D, 0x6E, 0x6F, -- wall / cliff
-  0x20,                                                       -- pit / hole
-  0x08, 0x4B,                                                 -- deep water (0x09 shallow is wadeable)
-  0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56,                   -- solid object
+  0x01, 0x02, 0x03, 0x26, 0x43, -- standard collision: wall, cliff
+  0x0B,                         -- indoor wall; deep water outdoors, so solid either way
+  0x20,                         -- pit / hole
+  0x08, 0x4B,                   -- deep water (0x09 shallow is wadeable)
+  0x27,                         -- hookshottable: a log, a statue, a peg, a shoved block
+  0x44, 0x46, 0x57,             -- spike, Hylian plaque, bonk rocks
+  0x67,                         -- crystal peg, up
 }) do IMPASSABLE[a] = true end
+for _, a in ipairs({ 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56 }) do IMPASSABLE[a] = true end -- liftable
+for a = 0x58, 0x5D do IMPASSABLE[a] = true end -- chest
+IMPASSABLE[0x63] = true                        -- minigame chest
+for a = 0x70, 0x7F do IMPASSABLE[a] = true end -- manipulably replaced: push blocks
+for a = 0xC0, 0xCF do IMPASSABLE[a] = true end -- lightable torch
+
+-- Ways THROUGH are left out on purpose, though the game counts them as collision. A route
+-- exists to lead Link through doorways, so a doorway that reads as solid is a room with no
+-- exits: 0x80-0x8D are the indoor door tiles (TileHandlerIndoor_80 — the Sanctuary escape's
+-- own doorway is 0x86), 0x8E and 0x8F the entrances he walks into to leave a room, and
+-- 0xA0-0xA5 the doors a dungeon toggles open. The furniture above has no such excuse.
+
+-- Solid indoors only. Outdoors 0x6C-0x6F are ordinary ground and 0x42 is not a gravestone,
+-- so blocking them there would refuse routes over walkable land.
+local IMPASSABLE_INDOORS = {}
+for _, a in ipairs({ 0x42, 0x6C, 0x6D, 0x6E, 0x6F }) do IMPASSABLE_INDOORS[a] = true end
 -- Flaggable doors (0xF0-0xFF): locked doors and doors held shut by a room flag.
 -- The game's own tile classifier makes every value in this range a solid
 -- collision (zelda3 tile_detect.c TileBehavior_FlaggableDoor); opening one
@@ -1376,7 +1401,7 @@ local function tile_passable(s, wtx, wty, level)
   -- still decides whether to aim beyond the door; this just lets the path cross it.
   if attr >= 0xF0 and attr <= 0xFF then return mem.u8(0x7EF36F) > 0 end
   if IMPASSABLE[attr] then return false end
-  if s.module == 0x07 and attr == 0x04 then return false end -- indoor wall
+  if s.module == 0x07 and (attr == 0x04 or IMPASSABLE_INDOORS[attr]) then return false end
   -- 0x1C is the upper layer's overlay mask (zelda3 TileBehavior_OverlayMask_1C): the
   -- raised platform is absent here. On the UPPER floor (level 0) that means this square
   -- is a one-way drop to the level below, not standable — block it so A* can't walk
@@ -2271,9 +2296,21 @@ local function chest_stand(s, tx, ty, level)
   -- Measure the chest rather than assuming its size: down for its bottom row, east for
   -- its right column. They are drawn 2x2, but measuring is what makes the answer right
   -- for whatever the room actually holds.
+  --
+  -- Bounded, because the tile read wraps at the window edge: a long run of chest tiles — a
+  -- room full of them, or garbage read mid-load — walked the unbounded version around the
+  -- window forever and hung the frame with everything in it. Four is generous for a 2x2 and,
+  -- more to the point, finite.
+  local SPAN = 4
   local by, bx = ty, tx
-  while CHEST_TILES[tile_attr_at(s, tx * 8, (by + 1) * 8, level) or 0] do by = by + 1 end
-  while CHEST_TILES[tile_attr_at(s, (bx + 1) * 8, ty * 8, level) or 0] do bx = bx + 1 end
+  for _ = 1, SPAN do
+    if not CHEST_TILES[tile_attr_at(s, tx * 8, (by + 1) * 8, level) or 0] then break end
+    by = by + 1
+  end
+  for _ = 1, SPAN do
+    if not CHEST_TILES[tile_attr_at(s, (bx + 1) * 8, ty * 8, level) or 0] then break end
+    bx = bx + 1
+  end
   local sy = by + 1
   -- Under whichever column of it Link is already nearest: he is as wide as the chest, so
   -- any column below it opens the same chest. Always picking the named (left) one sent a
