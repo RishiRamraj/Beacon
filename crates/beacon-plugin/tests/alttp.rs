@@ -7081,3 +7081,81 @@ fn alttp_the_guide_never_steers_link_at_himself() {
          corner he is standing on; never past the destination"
     );
 }
+
+#[test]
+fn alttp_pressing_into_a_wall_says_stuck() {
+    // A tone names a direction; nothing about it says Link has stopped moving. So a player
+    // who cannot see can stand pressing into a wall indefinitely, told only by silence —
+    // which is indistinguishable from the guide having nothing to say.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    // $00F0 is joypad1H_last, the directions actually held. 0x02 is left.
+    let held = |dir: u8, at: (u16, u16), ahead: Option<u8>| -> Vec<u8> {
+        let mut ram = dungeon_frame(at, (10, 10), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E00F0, dir);
+        set(0x7E005D, 0x00); // plain ground, not recoiling or swimming
+        set(0x7E002F, 4); // facing west, the way he is pressing
+        if let Some(attr) = ahead {
+            // The tile his facing actually reaches, by the same reach the bush cue uses.
+            let (ax, ay) = faced_tile(at, 4);
+            set(0x7F2000 + (ay as u32 & 63) * 64 + (ax as u32 & 63), attr);
+        }
+        ram
+    };
+
+    // Pressing left, never moving: said once, after half a second, and not again.
+    let wall = held(0x02, (32, 40), None);
+    let mut said = Vec::new();
+    for f in 0..40 {
+        said.extend(plugin.on_frame(&wall, f).iter().map(|i| i.text.clone()));
+    }
+    assert_eq!(
+        said.iter().filter(|t| *t == "Stuck.").count(),
+        1,
+        "said once when pressing into a wall gets nowhere: {said:?}"
+    );
+
+    // Moving while pressing says nothing at all — a fresh plugin, so no latch carries over.
+    let mut p2 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut moving = Vec::new();
+    for f in 0..40 {
+        // A pixel of progress each frame is not being stuck.
+        let ram = held(0x02, (32, 40 + (f % 3) as u16), None);
+        moving.extend(p2.on_frame(&ram, f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        !moving.iter().any(|t| t == "Stuck."),
+        "moving is not stuck: {moving:?}"
+    );
+
+    // Nothing held: standing still is not being stuck either.
+    let mut p3 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let idle = held(0x00, (32, 40), None);
+    let mut quiet = Vec::new();
+    for f in 0..40 {
+        quiet.extend(p3.on_frame(&idle, f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        !quiet.iter().any(|t| t == "Stuck."),
+        "not pressing anything is not stuck: {quiet:?}"
+    );
+
+    // Pressing into a block is how a block is used, and the cue that names it has just done
+    // so — being held against something with a name is not being stuck.
+    let mut p4 = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let block = held(0x02, (32, 40), Some(0x27)); // hookshottable: reads as "Block."
+    let mut pushing = Vec::new();
+    for f in 0..40 {
+        pushing.extend(p4.on_frame(&block, f).iter().map(|i| i.text.clone()));
+    }
+    assert!(
+        pushing.iter().any(|t| t == "Block."),
+        "the thing ahead is named: {pushing:?}"
+    );
+    assert!(
+        !pushing.iter().any(|t| t == "Stuck."),
+        "and being held against it is not being stuck: {pushing:?}"
+    );
+}

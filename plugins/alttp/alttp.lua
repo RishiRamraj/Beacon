@@ -3052,6 +3052,7 @@ function on_frame(frame)
   -- this frame.
   nav_update(now)
   FACE.update(now)
+  STUCK.update(now) -- pressing into a wall, which FACE has no name for
   HAZARD.update(now) -- a pit in front of Link, guide or no guide
   room_route_update(now)
 
@@ -4665,6 +4666,53 @@ FACE.CLASSES = {
   { say = "Block.", test = function(a) return SWEEP.is_block(a) or a == 0x27 end },
   { say = "Pot.", test = function(a) return SWEEP.is_pot(a) end },
 }
+
+-- Pressing into something and going nowhere.
+--
+-- The guide names a direction and a player who cannot see takes it — into a wall, when the
+-- route was wrong, or when he has drifted off it, or when the way on is somewhere the tone
+-- has not got to yet. Nothing about a tone says he has stopped moving, so he can stand there
+-- pressing for as long as his patience lasts, and the only thing that tells him is silence.
+-- This says it instead.
+--
+-- Reserved for the nameless case. Pressing into a bush, a block, a pot or a chest is how each
+-- of those is used, and FACE has just named it, so being held against one is not being stuck.
+STUCK = { dir = nil, frames = 0, said = false, x = nil, y = nil }
+-- Half a second of pressing. Longer than the shove a block takes to give, so leaning on one
+-- reads as pushing rather than as a wall.
+STUCK.FRAMES = 30
+-- $00F0 is joypad1H_last, the directions actually HELD; $00F4 next to it is only the ones
+-- newly pressed, which is what the menus want and the opposite of what this does.
+STUCK.HELD = 0x7E00F0
+STUCK.DPAD = 0x0F -- kJoypadH_AnyDir: the four direction bits of the H byte
+
+function STUCK.forget()
+  STUCK.dir, STUCK.frames, STUCK.said = nil, 0, false
+end
+
+function STUCK.update(s)
+  -- Link's state ($7E005D) has to be plain ground: recoiling from a hit, swimming, falling
+  -- and holding something overhead all move him on their own terms, and none of them is a
+  -- player pressing into a wall.
+  if s == nil or not in_play(s) or mem.u8(0x7E005D) ~= 0 then STUCK.forget(); return end
+
+  local dpad = mem.u8(STUCK.HELD) & STUCK.DPAD
+  if dpad == 0 then STUCK.forget(); return end
+
+  local moved = STUCK.x == nil or s.x ~= STUCK.x or s.y ~= STUCK.y
+  STUCK.x, STUCK.y = s.x, s.y
+  -- A new direction is a fresh attempt, and any movement at all means he is not stuck.
+  if moved or dpad ~= STUCK.dir then
+    STUCK.dir, STUCK.frames, STUCK.said = dpad, 0, false
+    return
+  end
+
+  STUCK.frames = STUCK.frames + 1
+  if STUCK.frames >= STUCK.FRAMES and not STUCK.said and FACE.said == nil then
+    STUCK.said = true
+    say("Stuck.", { priority = "navigation", category = "on-demand" })
+  end
+end
 
 function FACE.update(s)
   if s == nil or not in_play(s) then FACE.said = nil; return end
