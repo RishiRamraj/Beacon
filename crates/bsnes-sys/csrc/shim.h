@@ -104,6 +104,13 @@ void beacon_bsnes_set_audio_spec(beacon_audio_spec spec);
 void beacon_bsnes_set_video_spec(beacon_video_spec spec);
 void beacon_bsnes_set_input_spec(beacon_input_spec spec);
 void beacon_bsnes_set_region(unsigned region);
+
+/* Whether the PPU composes pixels at all. On by default. Off skips the picture
+   and nothing else — object evaluation and VRAM fetches still run, so the game
+   behaves identically either way — and saves roughly an eighth of a core, the
+   picture being the largest single cost in the program and of no use to a player
+   who cannot see it. See graft_video_toggle in crates/bsnes-sys/build.rs. */
+void beacon_bsnes_set_video_enabled(int enabled);
 unsigned beacon_bsnes_get_region(void);
 
 /* Registers a database file (boards.bml and friends) that bsnes-jg asks for by

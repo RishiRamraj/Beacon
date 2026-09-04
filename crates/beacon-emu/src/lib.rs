@@ -436,6 +436,18 @@ impl Emulator {
         self.frame = 0;
     }
 
+    /// Whether the PPU composes a picture at all. On by default.
+    ///
+    /// Off, the emulator runs everything except the pixels: object evaluation still sets the
+    /// flags the game can read, and VRAM fetches still contend as the hardware does, so the
+    /// game behaves identically — there is simply nothing to look at. Composing the picture
+    /// is the largest single cost in Beacon (profiled at about three fifths of all cycles),
+    /// and a player who cannot see it is paying for it, which is the whole reason this exists.
+    pub fn set_video_enabled(&mut self, enabled: bool) {
+        // SAFETY: sets a plain bool in the core; no preconditions beyond a loaded emulator.
+        unsafe { sys::beacon_bsnes_set_video_enabled(enabled as std::ffi::c_int) };
+    }
+
     /// The region bsnes-jg detected from the ROM.
     pub fn region(&self) -> Region {
         // SAFETY: no preconditions beyond a loaded emulator.

@@ -258,6 +258,13 @@ int beacon_bsnes_add_database(const char *name, const uint8_t *data,
   BEACON_CATCH(BEACON_ERR_EXCEPTION)
 }
 
+/* Defined in the grafted ppu.cpp; see graft_video_toggle in build.rs. */
+extern bool beacon_ppu_render_pixels;
+
+void beacon_bsnes_set_video_enabled(int enabled) {
+  beacon_ppu_render_pixels = enabled != 0;
+}
+
 void beacon_bsnes_install_callbacks(void) {
   BEACON_TRY
   Bsnes::setOpenFileCallback(nullptr, open_file);

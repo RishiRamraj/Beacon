@@ -66,6 +66,7 @@ fn main() {
     }
     if !tree.exists() {
         copy_tree(&vendor, &tree);
+        graft_video_toggle(&tree);
     }
     // The vendored tree may carry objects from an in-place build of its own; those are not
     // this build's, and leaving them means make has nothing to do.
@@ -194,4 +195,62 @@ fn fingerprint(dir: &Path) -> String {
     walk(dir, &mut files);
     files.sort();
     files.join("\n")
+}
+
+/// Makes the PPU's pixel output switchable at runtime, in the COPY of the vendored tree.
+///
+/// Beacon's player cannot see the picture, and drawing it is the single largest cost in the
+/// program: profiled at around three fifths of all cycles, and measured to take a running
+/// game from 81% of a core to 67% when stubbed out. So it is worth being able to turn off —
+/// but only by choice, since a sighted developer, or a sighted person helping, needs it.
+///
+/// Grafted onto the copy rather than committed into the submodule, which stays exactly as
+/// upstream published it: a patched submodule is a trap for anyone who clones and builds.
+/// A literal string replacement rather than a patch file, because it needs no `patch` binary
+/// and because it fails loudly here — with the text it expected — if upstream ever moves.
+///
+/// What is switched off is only the output: the background shifters and the pixel
+/// composition. Object EVALUATION still runs, because the range and time-over flags it sets
+/// are readable by the game at $213E and are therefore part of how the game behaves. The
+/// VRAM tile fetches still run too: they model access contention a CPU read during rendering
+/// can observe. Skipping those as well would save perhaps another twenty points and is
+/// deliberately not done — the game has to behave identically whether or not anyone is
+/// looking at it.
+fn graft_video_toggle(tree: &Path) {
+    let path = tree.join("src/ppu.cpp");
+    let source = std::fs::read_to_string(&path).expect("vendored ppu.cpp is readable");
+
+    // The flag: C linkage, so the shim can reach it without name mangling.
+    let anchor = "void PPU::cycleBackgroundAbove() {";
+    let flag = "\
+// Grafted by beacon's build script: see graft_video_toggle in crates/bsnes-sys/build.rs.\n\
+extern \"C\" bool beacon_ppu_render_pixels;\n\
+extern \"C\" bool beacon_ppu_render_pixels = true;\n\n";
+    assert!(
+        source.contains(anchor),
+        "vendored ppu.cpp no longer contains {anchor:?} - the video toggle graft needs updating"
+    );
+
+    // The one call site, in the per-dot cycle template.
+    let call = "\
+  else if(Cycle >= 56 && Cycle <= 1078 && (Cycle - 56) % 4 == 2) {\n\
+    cycleBackgroundAbove();\n\
+    cycleRenderPixel();\n\
+  }";
+    let gated = "\
+  else if(Cycle >= 56 && Cycle <= 1078 && (Cycle - 56) % 4 == 2) {\n\
+    if(beacon_ppu_render_pixels) {\n\
+      cycleBackgroundAbove();\n\
+      cycleRenderPixel();\n\
+    }\n\
+  }";
+    assert!(
+        source.contains(call),
+        "vendored ppu.cpp no longer contains the per-dot render call - the graft needs updating"
+    );
+
+    let patched = source
+        .replacen(anchor, &format!("{flag}{anchor}"), 1)
+        .replacen(call, gated, 1);
+    std::fs::write(&path, patched).expect("vendored ppu.cpp is writable in the build copy");
 }

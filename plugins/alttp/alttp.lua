@@ -2053,7 +2053,7 @@ local function pathfind_replan(s)
   local tiles = planned_route(s, sx, sy, pathfind_goal[1], pathfind_goal[2], pathfind_goal[3])
   if tiles == nil then return false end
   pathfind_path = tiles
-  pathfind_wp = math.min(2, #pathfind_path)
+  pathfind_wp = route_start_wp(pathfind_path)
   pathfind_area = area_id(s)
   pathfind_replan_in = REPLAN_INTERVAL
   return true
@@ -2095,6 +2095,18 @@ function pathfind_stop()
   beacon.clear("path")
 end
 
+-- Where to start following a freshly planned route.
+--
+-- The second waypoint, because the first IS where Link is standing: every planner seeds its
+-- search at his own tile and hands that tile back as the head of the path. Steering for it
+-- means steering him at himself — and since the seed is the ground under his feet rather than
+-- his stored position, "at himself" is a diagonal a tile or so away, so the guide sent him
+-- south-east to a corner whose route then ran west. The room follower always skipped it; the
+-- overworld follower did not, which is the whole of that bug.
+function route_start_wp(path)
+  return math.min(2, #path)
+end
+
 -- The waypoint to steer for, given where Link actually is.
 --
 -- The FURTHEST one already reached decides it, not merely the next one in the list. A
@@ -2110,6 +2122,31 @@ function route_advance(path, wp, x, y)
     end
   end
   return wp
+end
+
+-- How close to a corner counts as being on it, for the purpose of aiming past it. Wider
+-- than WAYPOINT_REACHED on purpose: that decides when a waypoint is DONE, this decides when
+-- it has stopped being worth steering at.
+local CORNER_NEAR = 20
+
+-- The waypoint to point the tone at: the one being followed, or the one after it when Link
+-- is already at that corner.
+--
+-- Standing on a corner, the direction to it says nothing — and a pixel either side of the
+-- diagonal it says something arbitrary, which is how a corner 12 east and 13 south of him
+-- produced a confident "go south" for a route that ran west. What he needs there is the
+-- direction of the leg that follows, which is what a sighted player reads off the map.
+--
+-- Never applied to the last waypoint: that one is the destination, not a corner, and arriving
+-- at it is the whole point.
+function route_aim(path, wp, x, y)
+  local w = path[wp]
+  if w == nil then return nil end
+  local nxt = path[wp + 1]
+  if nxt == nil then return w end
+  local d = math.abs(w[1] * 8 + 4 - x) + math.abs(w[2] * 8 + 4 - y)
+  if d <= CORNER_NEAR then return nxt end
+  return w
 end
 
 -- Advance the follower one frame and place or clear the guide beacon.
@@ -2154,7 +2191,7 @@ local function pathfind_update(s)
 
   -- Duck the guide while an enemy is engaged, so the threat tone reads clearly over
   -- it, but keep guiding — full volume returns once the enemy backs off.
-  aim_path_beacon(s, path[pathfind_wp], combat_engaged)
+  aim_path_beacon(s, route_aim(path, pathfind_wp, s.x, s.y), combat_engaged)
 end
 
 -- Tile-attribute classes, named like the collision sets (IMPASSABLE, COLLIDE_*),
@@ -2600,7 +2637,7 @@ local function ow_route_update(s)
   if ow_route_path == nil or ow_replan_in <= 0 then
     -- ow_route_goal holds tile coordinates, which ow_plan_path expects directly.
     ow_route_path = ow_plan_path(s, ow_route_goal[1], ow_route_goal[2], ow_route_goal.area)
-    ow_route_wp = 1
+    ow_route_wp = ow_route_path and route_start_wp(ow_route_path) or 1
     ow_replan_in = REPLAN_INTERVAL
   end
   local path = ow_route_path
@@ -2609,7 +2646,8 @@ local function ow_route_update(s)
   if ow_route_wp > #path then
     ow_route_stop(); beacon.clear("path"); return
   end
-  aim_path_beacon(s, path[ow_route_wp], combat_engaged) -- duck the guide in a fight
+  -- duck the guide in a fight
+  aim_path_beacon(s, route_aim(path, ow_route_wp, s.x, s.y), combat_engaged)
 end
 
 -- The opening context navigation auto-starts in: Link up and controllable in his

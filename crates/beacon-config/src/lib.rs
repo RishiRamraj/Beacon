@@ -102,6 +102,25 @@ impl Default for ArbiterSettings {
     }
 }
 
+/// Whether the emulator draws a picture at all.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Video {
+    /// On by default: Beacon is used by sighted developers and by sighted people helping,
+    /// and a black window is a poor first impression for either.
+    ///
+    /// Off, the emulator skips composing pixels — everything the game can observe still
+    /// happens — which is worth about an eighth of a CPU core to a player who cannot see the
+    /// picture anyway. It is the largest single cost in the program.
+    pub enabled: bool,
+}
+
+impl Default for Video {
+    fn default() -> Self {
+        Video { enabled: true }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Braille {

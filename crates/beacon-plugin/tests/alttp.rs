@@ -7036,3 +7036,35 @@ fn alttp_the_guide_tone_is_high_only_toward_the_route() {
          east={toward} north={aside} west={away}"
     );
 }
+
+#[test]
+fn alttp_the_guide_never_steers_link_at_himself() {
+    // Reported as the tone being high while facing away from the route: it was high toward
+    // the FIRST waypoint of the path, which is the tile the planner seeded on — Link's own
+    // footing. Twelve pixels east and thirteen south of him, so "go south" by one pixel of
+    // margin, for a route whose first real leg ran west.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let ram = vec![0u8; 128 * 1024];
+
+    let probe = r#"
+        -- A route as the planners hand it over: the head is where he already stands.
+        local path = { { 280, 357 }, { 270, 357 }, { 270, 334 } }
+        local first = route_start_wp(path)
+        local single = route_start_wp({ { 5, 5 } })
+        -- Standing all but on the seed tile, as he was: aim at the leg, not at his own feet.
+        local aimed = route_aim(path, first, 2232, 2847)
+        -- Well short of the next corner: that corner is what to steer at.
+        local mid = route_aim(path, 2, 2100, 2860)
+        -- The last waypoint is a destination, never skipped however close he is.
+        local last = route_aim(path, 3, 270 * 8 + 4, 334 * 8 + 4)
+        return table.concat({ first, single, aimed[1] .. "," .. aimed[2],
+                              mid[1] .. "," .. mid[2], last[1] .. "," .. last[2] }, "|")
+    "#;
+    assert_eq!(
+        plugin.eval(probe, &ram).unwrap(),
+        "2|1|270,357|270,357|270,334",
+        "follow from the second waypoint; a one-waypoint path is all there is; aim past a \
+         corner he is standing on; never past the destination"
+    );
+}

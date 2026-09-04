@@ -85,6 +85,7 @@ extern "C" {
     pub fn beacon_bsnes_set_video_spec(spec: VideoSpec);
     pub fn beacon_bsnes_set_input_spec(spec: InputSpec);
     pub fn beacon_bsnes_set_region(region: c_uint);
+    pub fn beacon_bsnes_set_video_enabled(enabled: c_int);
     pub fn beacon_bsnes_get_region() -> c_uint;
 
     /// Registers a database bsnes-jg requests by name during cartridge load.
