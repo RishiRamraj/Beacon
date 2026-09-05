@@ -87,7 +87,9 @@ label = "Guide back to the marker"
 [[command]]
 id    = "sweep"
 label = "Sweep the room for loot, then enemies, then pots"
-key   = "KeyS"                       # "s" for sweep; rebindable
+key   = "KeyU"                       # rebindable. NOT "s" for sweep: s is the SNES X button,
+                                     # so that suggestion could never be applied and the
+                                     # command shipped with no key at all.
 
 [[command]]
 id    = "objective"

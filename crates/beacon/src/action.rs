@@ -275,6 +275,30 @@ mod tests {
         assert_eq!(keymap.action_for("KeyP"), None);
     }
 
+    /// A plugin may SUGGEST a default key, and the host refuses one the game owns — rightly,
+    /// since a rebind must never steal a SNES button mid-fight. The failure mode is quiet: the
+    /// command simply ships with no key. That is what happened to the ALttP room sweep, whose
+    /// manifest asked for "s" whilst s is the X button, so the most useful command in the
+    /// plugin was unbound out of the box and nothing said so.
+    #[test]
+    fn a_plugins_suggested_keys_are_all_ones_the_host_can_accept() {
+        let registry = beacon_plugin::Registry::builtin();
+        let mut suggested = 0;
+        for spec in registry.specs() {
+            for cmd in &spec.manifest.commands {
+                let Some(key) = &cmd.key else { continue };
+                suggested += 1;
+                assert!(
+                    !crate::input::is_game_input_name(key),
+                    "{} suggests {key}, which drives the game: the suggestion can never be \
+                     applied, so the command would ship unbound",
+                    cmd.id
+                );
+            }
+        }
+        assert!(suggested > 0, "the built-in plugin suggests at least one key");
+    }
+
     #[test]
     fn bindables_include_standard_commands_without_a_plugin() {
         use beacon_plugin::NullPlugin;
