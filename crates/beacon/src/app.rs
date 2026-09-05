@@ -61,6 +61,8 @@ pub struct App {
     shown: bool,
     /// Set when something other than a new frame means the window needs painting again.
     redraw_wanted: bool,
+    /// Whether the window has the keyboard, as last reported. `None` until it is first told.
+    focused: Option<bool>,
     /// What was last published, so the tree is only pushed when it changes. Compared rather
     /// than diffed because a tree update is cheap and a comparison is cheaper than working
     /// out what moved.
@@ -141,6 +143,7 @@ impl App {
             native_failed: false,
             shown: false,
             redraw_wanted: true,
+            focused: None,
             published: Published::default(),
         }
     }
@@ -585,6 +588,17 @@ impl ApplicationHandler<AccessEvent> for App {
 
             WindowEvent::RedrawRequested => self.present(),
 
+            // Said out loud because it decides whether anything works at all: keys reach the
+            // window that has the focus, and a screen reader reads the window that has the
+            // focus. When neither happened on Windows, this is the line that would have
+            // answered why in one word.
+            WindowEvent::Focused(has) => {
+                if self.focused != Some(has) {
+                    self.focused = Some(has);
+                    eprintln!("window: {}", if has { "focused" } else { "not focused" });
+                }
+            }
+
             // The surface follows the window's size inside `present`, so a resize only needs
             // to ask for one. Explicit because redraws are no longer unconditional: with a
             // paused game nothing else would ask, and the picture would stay the old size.
@@ -679,6 +693,13 @@ impl ApplicationHandler<AccessEvent> for App {
         if !self.shown {
             if let Some(window) = self.window.as_ref() {
                 window.set_visible(true);
+                // And ASK FOR THE KEYBOARD. Beacon is a console-subsystem executable on
+                // Windows, so a console window opens beside the game and keeps the focus: keys
+                // went to the console, and a screen reader inspecting the focused window
+                // inspected the console too — which is why nothing responded to a key and the
+                // accessibility tree was never once asked for. Showing a window does not focus
+                // it; this says so out loud.
+                window.focus_window();
                 self.shown = true;
             }
         }
