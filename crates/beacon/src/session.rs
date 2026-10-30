@@ -1152,6 +1152,8 @@ impl Session {
         // Drawing the picture is a live property of the emulator, not something read at load,
         // so a change here has to reach it now.
         self.apply_video();
+        self.audio
+            .set_buffer(Duration::from_millis(self.settings.audio.buffer_ms.into()));
         self.persist_settings();
         Ok(())
     }

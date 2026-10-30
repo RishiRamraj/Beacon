@@ -301,7 +301,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The device opens BEFORE the emulator, because the rate it settles on is the rate the
     // emulator has to produce. Asking a device to run at the emulator's rate instead is what
     // failed on Windows, where WASAPI shared mode serves only its own mix format.
-    let audio = audio::Audio::new()?;
+    let audio = audio::Audio::new(std::time::Duration::from_millis(
+        settings.audio.buffer_ms.into(),
+    ))?;
     let rate = audio.sample_rate();
 
     // No ROM is a legitimate start: an empty machine with a menu on it.

@@ -180,6 +180,9 @@ enabled = true     # spatial-audio tones for where things are
 volume_max = 0.5   # 0 to 1, loudness when a source is closest
 volume_min = 0.05  # 0 to 1, loudness at the far edge of range
 music_duck = 0.5   # 0 to 1, how far game audio ducks under a beacon
+
+[audio]
+buffer_ms = 50     # 20 to 500, delay before game sound and tones are heard; raise if it crackles
 ```
 
 ## Plugins

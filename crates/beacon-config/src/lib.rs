@@ -28,6 +28,7 @@ pub struct Settings {
     pub arbiter: ArbiterSettings,
     pub braille: Braille,
     pub beacons: Beacons,
+    pub audio: AudioSettings,
     pub video: Video,
     /// Key bindings. Serialized as `[keys]`; the field is `keymap` to avoid
     /// colliding with [`Settings::keys`], the list of scalar setting names.
@@ -172,6 +173,26 @@ impl Default for Beacons {
             // Dip the music ~6 dB while a beacon plays so the cue stays clear.
             music_duck: 0.5,
         }
+    }
+}
+
+/// How the sound reaches the device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioSettings {
+    /// How far ahead of the device the emulator may run, in milliseconds. This is the
+    /// delay between a frame and hearing it, so it is the latency of every game sound and
+    /// every beacon tone: a button press is heard this much later. Lower is more responsive;
+    /// too low and a slow frame starves the device, which clicks. Raise it if the audio
+    /// crackles. Clamped to 20-500.
+    pub buffer_ms: u32,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        // Three frames. A frame costs well under half its 16.7 ms on modest hardware, so
+        // this leaves room for a slow one without a delay a player can feel.
+        AudioSettings { buffer_ms: 50 }
     }
 }
 
@@ -373,6 +394,7 @@ impl Settings {
             "beacons.volume_max",
             "beacons.volume_min",
             "beacons.music_duck",
+            "audio.buffer_ms",
         ]
     }
 
@@ -396,6 +418,7 @@ impl Settings {
             "beacons.volume_max" => self.beacons.volume_max.to_string(),
             "beacons.volume_min" => self.beacons.volume_min.to_string(),
             "beacons.music_duck" => self.beacons.music_duck.to_string(),
+            "audio.buffer_ms" => self.audio.buffer_ms.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
         })
     }
@@ -446,6 +469,7 @@ impl Settings {
             "beacons.music_duck" => {
                 self.beacons.music_duck = parse::<f32>(key, value)?.clamp(0.0, 1.0)
             }
+            "audio.buffer_ms" => self.audio.buffer_ms = parse::<u32>(key, value)?.clamp(20, 500),
             other => return Err(Error::UnknownKey(other.to_string())),
         }
         Ok(())

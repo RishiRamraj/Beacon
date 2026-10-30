@@ -11,13 +11,6 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 
-/// How much audio to keep queued ahead of the output device, as a fraction of a second.
-///
-/// Long enough to absorb a slow frame, short enough that input does not feel detached from
-/// sound. Derived from the rate the device actually runs at rather than assumed, or the whole
-/// pacing loop would be wrong by the ratio between them.
-const TARGET_QUEUED_SECONDS: f32 = 0.1;
-
 /// Shared between the frame loop and the audio callback.
 struct Shared {
     /// Interleaved stereo samples awaiting playback.
@@ -34,6 +27,11 @@ pub struct Audio {
     sample_rate: u32,
     /// The queue length above which the emulator has run far enough ahead to wait. Derived
     /// from the device's rate, so pacing does not depend on it being 48kHz.
+    ///
+    /// This is the latency of everything heard: the queue sits at this depth in play, so a
+    /// sample waits this long behind it. It was once double what its comment claimed — a
+    /// 100 ms target with a `* 2` on the end — and every sound came a fifth of a second
+    /// after the button that caused it.
     high_water: usize,
     /// Samples consumed per second: the device's rate times its channel count. What turns a
     /// queue depth into an amount of TIME, which is what the event loop needs to know in
@@ -115,7 +113,10 @@ impl Audio {
     /// The rate that falls out is reported by [`Audio::sample_rate`] and handed to the
     /// emulator, which resamples to meet it — libsamplerate is vendored into bsnes-jg, so
     /// that is its job rather than something Beacon does again on the way out.
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    ///
+    /// `buffer` is how much audio to keep queued ahead of the device; see
+    /// [`Audio::set_buffer`].
+    pub fn new(buffer: Duration) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -131,10 +132,11 @@ impl Audio {
         // fails on a machine nobody can reach: what the device actually asked for.
         eprintln!("audio: {sample_rate} Hz, {channels} channel(s), {sample_format:?}");
 
-        let target = (sample_rate as f32 * TARGET_QUEUED_SECONDS) as usize * channels.max(1);
+        let samples_per_sec = (sample_rate as usize) * channels.max(1);
+        let high_water = queue_depth(buffer, samples_per_sec);
 
         let shared = Arc::new(Mutex::new(Shared {
-            queue: std::collections::VecDeque::with_capacity(target * 4),
+            queue: std::collections::VecDeque::with_capacity(high_water * 4),
             underruns: 0,
         }));
 
@@ -159,8 +161,8 @@ impl Audio {
         Ok(Audio {
             shared,
             sample_rate,
-            high_water: target * 2,
-            samples_per_sec: (sample_rate as usize) * channels.max(1),
+            high_water,
+            samples_per_sec,
             _stream: stream,
         })
     }
@@ -168,6 +170,14 @@ impl Audio {
     /// The rate the device settled on. The emulator is created to match it.
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Changes how much audio is kept queued ahead of the device, live.
+    ///
+    /// Shrinking it takes effect as the queue drains below the new mark; nothing queued is
+    /// thrown away, because dropping samples is a click.
+    pub fn set_buffer(&mut self, buffer: Duration) {
+        self.high_water = queue_depth(buffer, self.samples_per_sec);
     }
 
     /// Queues samples produced by a frame.
@@ -205,5 +215,22 @@ impl Audio {
 
     pub fn underruns(&self) -> u64 {
         self.shared.lock().map(|s| s.underruns).unwrap_or(0)
+    }
+}
+
+/// A duration of audio as a queue length, in interleaved samples.
+fn queue_depth(buffer: Duration, samples_per_sec: usize) -> usize {
+    (buffer.as_secs_f64() * samples_per_sec as f64) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_depth_is_the_buffer_with_no_hidden_multiplier() {
+        // 50 ms of 48 kHz stereo is 4800 interleaved samples. Not 9600: the doubling that
+        // made every sound a fifth of a second late must not come back.
+        assert_eq!(queue_depth(Duration::from_millis(50), 48_000 * 2), 4800);
     }
 }
