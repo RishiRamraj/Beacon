@@ -39,7 +39,7 @@ use mlua::{Function, Lua, Table, Value};
 use std::collections::BTreeMap;
 
 use crate::canvas::{self, Canvas};
-use crate::{BeaconState, CommandDecl, Error, Manifest, Plugin, PluginSpec, SoundCmd};
+use crate::{BeaconState, CommandDecl, Error, Manifest, MenuItem, Plugin, PluginSpec, SoundCmd};
 
 /// Work RAM is 128 KiB: bank $7E is the first 64 KiB, $7F the second.
 const WRAM_LEN: usize = 128 * 1024;
@@ -55,6 +55,8 @@ type Intents = Rc<RefCell<Vec<Intent>>>;
 type Beacons = Rc<RefCell<BTreeMap<String, BeaconState>>>;
 /// Sound commands issued since the host last took them.
 type Sounds = Rc<RefCell<Vec<SoundCmd>>>;
+/// A menu the plugin asked to have opened, until the host takes it.
+type MenuRequest = Rc<RefCell<Option<MenuItem>>>;
 
 /// The most sound commands kept between drains. A host that never drains them (the
 /// headless benchmark, a test) must not grow this without bound; past the cap the oldest
@@ -72,6 +74,7 @@ pub struct LuaPlugin {
     has_draw: bool,
     beacons: Beacons,
     sounds: Sounds,
+    menu: MenuRequest,
 }
 
 impl LuaPlugin {
@@ -100,6 +103,8 @@ impl LuaPlugin {
         install_beacon(&lua, &beacons)?;
         let sounds: Sounds = Rc::new(RefCell::new(Vec::new()));
         install_sound(&lua, &sounds)?;
+        let menu: MenuRequest = Rc::new(RefCell::new(None));
+        install_menu(&lua, &menu)?;
         crate::nav::install(&lua)?;
 
         // Modules first, in declared order, each its own chunk (its own local
@@ -130,6 +135,7 @@ impl LuaPlugin {
             has_draw,
             beacons,
             sounds,
+            menu,
         })
     }
 
@@ -236,6 +242,20 @@ impl Plugin for LuaPlugin {
 
     fn take_sounds(&mut self) -> Vec<SoundCmd> {
         std::mem::take(&mut self.sounds.borrow_mut())
+    }
+
+    fn take_menu(&mut self) -> Option<MenuItem> {
+        self.menu.borrow_mut().take()
+    }
+
+    fn menu_chosen(&mut self, id: &str, ram: &[u8]) -> Vec<Intent> {
+        self.stage_ram(ram);
+        if let Ok(Value::Function(f)) = self.lua.globals().get::<Value>("on_menu") {
+            if let Err(e) = f.call::<()>(id) {
+                eprintln!("plugin {} on_menu {id}: {e}", self.name);
+            }
+        }
+        self.drain()
     }
 
     fn eval(&mut self, code: &str, ram: &[u8]) -> Result<String, String> {
@@ -681,6 +701,40 @@ fn install_sound(lua: &Lua, sounds: &Sounds) -> Result<(), Error> {
     Ok(())
 }
 
+/// Installs `menu.open(tree)`: ask the host to show a menu of the plugin's own.
+///
+/// `tree` is `{ title = "...", items = { ... } }`; each item is `{ label = "...", id = "..." }`
+/// to choose, or `{ label = "...", items = { ... } }` for a submenu. Choosing calls the
+/// script's global `on_menu(id)`. The menu opens after the current call returns, and freezes
+/// the game while it is up, as Beacon's own menu does.
+fn install_menu(lua: &Lua, request: &MenuRequest) -> Result<(), Error> {
+    fn item(t: &Table, label_key: &str) -> mlua::Result<MenuItem> {
+        let label = t
+            .get::<Option<String>>(label_key)?
+            .or(t.get::<Option<String>>("label")?)
+            .unwrap_or_default();
+        let id = t.get::<Option<String>>("id")?;
+        let mut items = Vec::new();
+        if let Some(children) = t.get::<Option<Table>>("items")? {
+            for child in children.sequence_values::<Table>() {
+                items.push(item(&child?, "label")?);
+            }
+        }
+        Ok(MenuItem { label, id, items })
+    }
+    let table = lua.create_table()?;
+    let r = request.clone();
+    table.set(
+        "open",
+        lua.create_function(move |_, tree: Table| {
+            *r.borrow_mut() = Some(item(&tree, "title")?);
+            Ok(())
+        })?,
+    )?;
+    lua.globals().set("menu", table)?;
+    Ok(())
+}
+
 /// Exposes the manifest's named watches to Lua as a `watch` table.
 fn install_watch(lua: &Lua, manifest: &Manifest) -> Result<(), Error> {
     let watch = lua.create_table()?;
@@ -981,6 +1035,32 @@ mod tests {
         );
         // Taken means gone: the next take is empty.
         assert!(p.take_sounds().is_empty());
+    }
+
+    #[test]
+    fn a_plugin_menu_is_a_tree_and_choosing_calls_back() {
+        let mut p = plugin_from(
+            r#"
+            chosen = nil
+            on_command("poi", function()
+              menu.open({ title = "Navigate", items = {
+                { label = "Stop", id = "stop" },
+                { label = "Keys", items = { { label = "Small key - north", id = "k1" } } },
+              } })
+            end)
+            function on_menu(id) chosen = id; say("chose " .. id) end
+            "#,
+        );
+        let ram = vec![0u8; WRAM_LEN];
+        p.command("poi", &ram);
+        let m = p.take_menu().expect("a menu was asked for");
+        assert_eq!(m.label, "Navigate");
+        assert_eq!(m.items.len(), 2);
+        assert_eq!(m.items[0].id.as_deref(), Some("stop"));
+        assert_eq!(m.items[1].items[0].label, "Small key - north");
+        assert!(p.take_menu().is_none(), "taken once");
+        let said = p.menu_chosen("k1", &ram);
+        assert_eq!(said[0].text, "chose k1");
     }
 
     #[test]

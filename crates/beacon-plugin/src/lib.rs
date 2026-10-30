@@ -109,6 +109,28 @@ pub trait Plugin {
     fn take_sounds(&mut self) -> Vec<SoundCmd> {
         Vec::new()
     }
+
+    /// A menu the plugin asked the host to open since the last call, if any: a tree of
+    /// choices shown in Beacon's own menu, so it is read and driven exactly as the rest of the
+    /// menu is (by voice, screen reader, keys or pad). The root's label is the menu's title.
+    fn take_menu(&mut self) -> Option<MenuItem> {
+        None
+    }
+
+    /// The player chose the menu item with this id. Answers are spoken at once, as for a
+    /// command; the plugin may open another menu in reply.
+    fn menu_chosen(&mut self, _id: &str, _ram: &[u8]) -> Vec<Intent> {
+        Vec::new()
+    }
+}
+
+/// One line of a plugin's menu: something to choose (it has an `id`), or a submenu (it has
+/// `items`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MenuItem {
+    pub label: String,
+    pub id: Option<String>,
+    pub items: Vec<MenuItem>,
 }
 
 /// A plugin's request to the host's sound engine.

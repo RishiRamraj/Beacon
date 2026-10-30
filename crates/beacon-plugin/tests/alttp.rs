@@ -7477,3 +7477,51 @@ fn alttp_a_route_is_replanned_only_once_link_has_left_it() {
         "on or near the route is on it; five tiles off is not"
     );
 }
+
+#[test]
+fn alttp_m_opens_tobys_points_of_interest_menu() {
+    // Toby's M menu: the objective, markers, and exploration lists, each nearest first by
+    // walking distance and labelled "Name - Direction - Distance". A chest seven tiles east
+    // of Link on open floor shows under Unopened; choosing it guides there with the carrot.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut ram = dungeon_frame((32, 40), (10, 10), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E005D, 0x00); // awake
+        // A 2x2 chest east of his feet (row 42), as the game draws them.
+        for (tx, ty) in [(46u32, 40u32), (47, 40), (46, 41), (47, 41)] {
+            set(0x7F2000 + ty * 64 + tx, 0x58);
+        }
+    }
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+    plugin.command("poi", &ram);
+    let menu = plugin.take_menu().expect("M opens the menu");
+    assert_eq!(menu.label, "Navigate");
+    let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(labels.contains(&"Quest objective") && labels.contains(&"Markers"), "{labels:?}");
+    let exploration = menu
+        .items
+        .iter()
+        .find(|i| i.label == "Exploration")
+        .expect("the exploration lists");
+    let names: Vec<&str> = exploration.items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["Unexplored", "Unopened", "Keys", "Pickups", "Exits and stairs", "This room"]
+    );
+    let unopened = &exploration.items[1];
+    assert_eq!(unopened.items[0].label, "Stop navigation", "each list starts with stop");
+    let chest = unopened
+        .items
+        .iter()
+        .find(|i| i.label.starts_with("Chest - "))
+        .unwrap_or_else(|| panic!("the chest is listed: {:?}", unopened.items));
+    assert!(chest.label.contains("East"), "it is east of him: {}", chest.label);
+
+    // Choosing it guides there.
+    plugin.menu_chosen(chest.id.as_deref().unwrap(), &ram);
+    plugin.on_frame(&ram, 2);
+    assert!(path_beacon(&mut plugin).is_some(), "the carrot leads to the chest");
+}

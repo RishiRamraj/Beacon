@@ -109,6 +109,8 @@ pub struct Session {
     sound_bank: SoundBank,
     /// The plugin's recorded sounds that are currently playing.
     voices: VoiceMixer,
+    /// The plugin's own menu, flattened, while it is the menu on show.
+    plugin_menu: Vec<menu::PluginNode>,
     /// Whether to log frames whose plugin work is slow (`BEACON_STATS`).
     slow_frame_log: bool,
     last_spoken: Option<String>,
@@ -210,6 +212,7 @@ impl Session {
             sound_bank: SoundBank::open(&sounds_dir, rate),
             voices: VoiceMixer::default(),
             slow_frame_log: std::env::var_os("BEACON_STATS").is_some(),
+            plugin_menu: Vec::new(),
             last_spoken: None,
             speech_log: VecDeque::new(),
             frames: 0,
@@ -572,6 +575,9 @@ impl Session {
     /// Starts, moves and stops the sounds the plugin asked for since the last drain. They
     /// are heard from the next frame's audio, a sixtieth of a second on.
     fn drain_sounds(&mut self) {
+        if let Some(tree) = self.plugin.take_menu() {
+            self.open_plugin_menu(tree);
+        }
         for cmd in self.plugin.take_sounds() {
             self.voices.apply(cmd, &mut self.sound_bank);
         }
@@ -734,6 +740,7 @@ impl Session {
                 .iter()
                 .map(|c| (c.id.clone(), c.label.clone()))
                 .collect(),
+            plugin_nodes: self.plugin_menu.clone(),
             roms: match self.rom_path.as_ref().and_then(|p| p.parent()) {
                 Some(dir) => rom::files_in(dir),
                 None => std::env::current_dir()
@@ -758,6 +765,22 @@ impl Session {
         self.menu = Some(open);
         self.say_now(menu::HELP);
         self.say_now(first);
+    }
+
+    /// Opens a menu of the plugin's own, as it asked: frozen like Beacon's menu, read the same
+    /// way, and with its choices handed back to the plugin.
+    fn open_plugin_menu(&mut self, tree: beacon_plugin::MenuItem) {
+        if self.menu.is_none() {
+            self.paused_before_menu = self.paused;
+        }
+        self.paused = true;
+        self.timing_disturbed = true;
+        self.held_buttons = 0;
+        self.plugin_menu = menu::flatten(&tree);
+        let open = Menu::open_plugin(&self.menu_context());
+        let said = open.arrival();
+        self.menu = Some(open);
+        self.say_now(said);
     }
 
     /// Whether the menu is open.
@@ -901,6 +924,16 @@ impl Session {
                 }
             },
             Act::Command(name) => self.run_command(&name),
+            Act::Plugin(id) => {
+                let intents = match ram_of(&self.emu) {
+                    Some(ram) => self.plugin.menu_chosen(&id, ram),
+                    None => Vec::new(),
+                };
+                for intent in intents {
+                    self.say_now(intent.text);
+                }
+                self.drain_sounds();
+            }
         }
     }
 

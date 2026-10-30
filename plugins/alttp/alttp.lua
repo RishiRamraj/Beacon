@@ -5776,6 +5776,307 @@ end
 -- from the collision map; elsewhere it is just the position/sprite overlay.
 -- Integer math throughout (// is floor division) so coordinates stay whole for
 -- the canvas.
+-- ===========================================================================
+-- Points of interest: Toby's M menu.
+--
+-- One menu holds every destination, as in Toby: the quest objective (Beacon's own, which
+-- Toby has no counterpart for), the player's ten markers, and Toby's exploration lists —
+-- unexplored ground, things not yet opened, keys, pickups, exits and stairs, and what is in
+-- this room. Each list starts with "Stop navigation", is nearest first BY WALKING DISTANCE,
+-- holds only places that can actually be reached, and reads each entry the way Toby does:
+-- "Chest - North-east - 6 tiles". Choosing one guides there with the carrot.
+--
+-- Reachability and distance come from one breadth-first search from Link's feet over the
+-- loaded 64x64-tile window (crossing a dungeon room's floors at its stairs, one way, as the
+-- router does), so every candidate's distance is known at once and the unexplored frontier
+-- falls out of the same search. Distances are said in Link-sized tiles, two of the 8-pixel
+-- tiles the search runs on.
+-- ===========================================================================
+POI = {
+  DEDUPE = 10,     -- 8px tiles: entries of one name closer than this are one entry
+  MAX = 12,        -- entries a list keeps, nearest first
+  FRONTIER_GAP = 16, -- 8px tiles between unexplored entries, so the list is not one place
+  FRONTIER_MIN = 6,  -- 8px tiles: unexplored ground nearer than this is where he already is
+  entries = {},    -- what the open menu's items lead to, by index
+}
+
+local function poi_cap(text)
+  return (text:gsub("^%l", string.upper))
+end
+
+-- Distances, in 8px tiles, from Link's feet to every tile he can walk to in the window,
+-- keyed level*4096 + y*64 + x (window-local), plus the window origin and his floor.
+function POI.flood(s)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local two = s.module == 0x07
+  local lv0 = two and mem.u8(LOWER_LEVEL) or 0
+  -- From the nearest tile he can stand on, as a route starts: his own may be furniture
+  -- (the bed at the start of the game) or the wall his head is in.
+  local rtx, rty = route_start(s)
+  local sx, sy = rtx - ox, rty - oy
+  local dist = {}
+  if sx < 0 or sx > 63 or sy < 0 or sy > 63 then return dist, ox, oy, lv0 end
+  local start = lv0 * 4096 + sy * 64 + sx
+  dist[start] = 0
+  local q, head = { start }, 1
+  while head <= #q do
+    local n = q[head]; head = head + 1
+    local lv, rest = n // 4096, n % 4096
+    local x, y = rest % 64, rest // 64
+    local d = dist[n] + 1
+    local function try(nx, ny, nlv)
+      if nx < 0 or nx > 63 or ny < 0 or ny > 63 then return end
+      local k = nlv * 4096 + ny * 64 + nx
+      if dist[k] == nil and tile_passable(s, ox + nx, oy + ny, two and nlv or nil) then
+        dist[k] = d; q[#q + 1] = k
+      end
+    end
+    try(x + 1, y, lv); try(x - 1, y, lv); try(x, y + 1, lv); try(x, y - 1, lv)
+    if two then
+      -- One-way stair hops, as plan_path: up from the lower floor, down from the upper.
+      local a = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8, lv)
+      if lv == 1 and STAIR_UP[a] then try(x, y, 0) end
+      if lv == 0 and STAIR_DOWN[a] then try(x, y, 1) end
+    end
+  end
+  return dist, ox, oy, lv0
+end
+
+-- The walking distance to world pixel (wx, wy) on `level`, from a flood, or nil. A target
+-- on a solid tile (a door, a sprite against a wall) counts from its nearest reached neighbour.
+function POI.dist_to(fl, wx, wy, level)
+  local dist, ox, oy = fl.dist, fl.ox, fl.oy
+  local lv = level or fl.lv
+  local tx, ty = (wx >> 3) - ox, (wy >> 3) - oy
+  local best
+  for _, o in ipairs({ { 0, 0 }, { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 }, { 0, 2 }, { 2, 0 }, { -2, 0 }, { 0, -2 } }) do
+    local x, y = tx + o[1], ty + o[2]
+    if x >= 0 and x <= 63 and y >= 0 and y <= 63 then
+      local d = dist[lv * 4096 + y * 64 + x]
+      if d ~= nil then
+        d = d + math.abs(o[1]) + math.abs(o[2])
+        if best == nil or d < best then best = d end
+      end
+    end
+  end
+  return best
+end
+
+-- Every candidate in view: { cat, name, x, y, level, face } in world pixels.
+function POI.candidates(s, fl)
+  local out = {}
+  local ox, oy, two = fl.ox, fl.oy, s.module == 0x07
+  local levels = two and { 0, 1 } or { fl.lv }
+  for _, lv in ipairs(levels) do
+    local L = two and lv or nil
+    local function at(x, y) return tile_attr_at(s, (ox + x) * 8, (oy + y) * 8, L) end
+    for y = 0, 63 do
+      for x = 0, 63 do
+        local a = at(x, y)
+        if a ~= nil and a ~= 0 then
+          local wx, wy = (ox + x) * 8 + 4, (oy + y) * 8 + 4
+          if CHEST_TILES[a] and not CHEST_TILES[at(x - 1, y) or 0] and not CHEST_TILES[at(x, y - 1) or 0] then
+            local cx, cy = chest_stand(s, ox + x, oy + y, L)
+            out[#out + 1] = { cat = "unopened", name = "Chest", x = cx, y = cy, level = lv, face = 0 }
+          elseif a >= 0xF0 and (at(x - 1, y) or 0) < 0xF0 and (at(x, y - 1) or 0) < 0xF0 then
+            out[#out + 1] = { cat = "unopened", name = "Locked door", x = wx, y = wy, level = lv }
+          elseif STAIR_UP[a] then
+            out[#out + 1] = { cat = "exits", name = "Stairs up", x = wx, y = wy, level = lv }
+          elseif STAIR_DOWN[a] then
+            out[#out + 1] = { cat = "exits", name = "Stairs down", x = wx, y = wy, level = lv }
+          elseif a == 0x8E or a == 0x8F then
+            out[#out + 1] = { cat = "exits", name = "Exit", x = wx, y = wy, level = lv }
+          elseif DOOR_TILES[a] then
+            out[#out + 1] = { cat = "exits", name = "Doorway", x = wx, y = wy, level = lv }
+          end
+        end
+      end
+    end
+  end
+  for _, sp in ipairs(sprites()) do
+    -- A sprite's position is the top-left of its 16px body; aim at the middle of it.
+    local x, y = sp.x + 8, sp.y + 8
+    if is_enemy(sp) then
+      out[#out + 1] = { cat = "room", name = poi_cap(enemy_name(sp)), x = x, y = y }
+    elseif REF.item_types[sp.kind] then
+      local name = poi_cap(sprite_name(sp.kind))
+      out[#out + 1] = { cat = name:lower():find("key") and "keys" or "pickups", name = name, x = x, y = y }
+    elseif REF.npc_types[sp.kind] then
+      out[#out + 1] = { cat = "room", name = poi_cap(sprite_name(sp.kind)), x = x, y = y }
+    end
+  end
+  -- Unexplored: reached ground Link has not been near, nearest first and spread out.
+  local frontier = {}
+  for k, d in pairs(fl.dist) do
+    local rest = k % 4096
+    local wtx, wty = ox + rest % 64, oy + rest // 64
+    if d >= POI.FRONTIER_MIN and not explored[tile_key(wtx, wty)] then
+      frontier[#frontier + 1] = { k = k, d = d, tx = wtx, ty = wty }
+    end
+  end
+  table.sort(frontier, function(a, b) return a.d < b.d end)
+  local kept = {}
+  for _, f in ipairs(frontier) do
+    local far = true
+    for _, o in ipairs(kept) do
+      if math.abs(o.tx - f.tx) + math.abs(o.ty - f.ty) < POI.FRONTIER_GAP then far = false; break end
+    end
+    if far then
+      kept[#kept + 1] = f
+      out[#out + 1] = { cat = "unexplored", name = "Unexplored", x = f.tx * 8 + 4, y = f.ty * 8 + 4,
+                        level = f.k // 4096 }
+      if #kept >= POI.MAX then break end
+    end
+  end
+  return out
+end
+
+-- The entries of one category: reachable, deduplicated, nearest first, labelled.
+function POI.list(s, fl, cands, cat)
+  local fx, fy = foot(s)
+  local rows = {}
+  for _, c in ipairs(cands) do
+    if c.cat == cat then
+      local d = POI.dist_to(fl, c.x, c.y, c.level)
+      if d ~= nil and d > 0 then
+        c.dist = d
+        rows[#rows + 1] = c
+      end
+    end
+  end
+  table.sort(rows, function(a, b) return a.dist < b.dist end)
+  local kept = {}
+  for _, r in ipairs(rows) do
+    local dup = false
+    for _, k in ipairs(kept) do
+      if k.name == r.name and math.abs(k.x - r.x) + math.abs(k.y - r.y) < POI.DEDUPE * 8 then dup = true; break end
+    end
+    if not dup then
+      kept[#kept + 1] = r
+      if #kept >= POI.MAX then break end
+    end
+  end
+  local items = { { label = "Stop navigation", id = "stop" } }
+  for _, r in ipairs(kept) do
+    local tiles = math.max(1, (r.dist + 1) // 2)
+    POI.entries[#POI.entries + 1] = r
+    items[#items + 1] = {
+      label = string.format("%s - %s - %d %s", r.name, poi_cap(direction(r.x - fx, r.y - fy)),
+        tiles, tiles == 1 and "tile" or "tiles"),
+      id = "go:" .. #POI.entries,
+    }
+  end
+  return items
+end
+
+-- The marker lists: where each is, to go to it; and slots to place or remove.
+function POI.markers(s, fl)
+  local fx, fy = foot(s)
+  local go = { { label = "Stop navigation", id = "stop" } }
+  local add, remove = {}, {}
+  for k = 1, 10 do
+    local m = markers[k]
+    if m ~= nil then
+      local label = "Marker " .. k
+      if m.area == area_id(s) then
+        local wx, wy = m.tx * 8 + 4, m.ty * 8 + 4
+        local d = POI.dist_to(fl, wx, wy, nil)
+        local where = poi_cap(direction(wx - fx, wy - fy))
+        label = d and string.format("%s - %s - %d tiles", label, where, math.max(1, (d + 1) // 2))
+          or (label .. " - " .. where .. " - unreachable")
+      else
+        label = label .. " - another area"
+      end
+      go[#go + 1] = { label = label, id = "mark:go:" .. k }
+      remove[#remove + 1] = { label = "Marker " .. k, id = "mark:del:" .. k }
+      add[#add + 1] = { label = "Marker " .. k .. ", in use", id = "mark:add:" .. k }
+    else
+      add[#add + 1] = { label = "Marker " .. k, id = "mark:add:" .. k }
+    end
+  end
+  go[#go + 1] = { label = "Add marker", items = add }
+  go[#go + 1] = { label = "Remove marker", items = remove }
+  return go
+end
+
+-- Builds and opens the menu.
+function POI.open(s)
+  POI.entries = {}
+  local d, ox, oy, lv = POI.flood(s)
+  local fl = { dist = d, ox = ox, oy = oy, lv = lv }
+  local cands = POI.candidates(s, fl)
+  local items = {}
+  if nav_active or pathfind_active or ow_route_goal ~= nil then
+    items[#items + 1] = { label = "Stop navigation", id = "stop" }
+  end
+  items[#items + 1] = { label = nav_active and "Quest objective, guiding" or "Quest objective", id = "objective" }
+  items[#items + 1] = { label = "Markers", items = POI.markers(s, fl) }
+  items[#items + 1] = { label = "Exploration", items = {
+    { label = "Unexplored", items = POI.list(s, fl, cands, "unexplored") },
+    { label = "Unopened", items = POI.list(s, fl, cands, "unopened") },
+    { label = "Keys", items = POI.list(s, fl, cands, "keys") },
+    { label = "Pickups", items = POI.list(s, fl, cands, "pickups") },
+    { label = "Exits and stairs", items = POI.list(s, fl, cands, "exits") },
+    { label = "This room", items = POI.list(s, fl, cands, "room") },
+  } }
+  menu.open({ title = "Navigate", items = items })
+end
+
+on_command("poi", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  POI.open(s)
+end)
+
+-- A choice from the menu.
+function on_menu(id)
+  local s = prev
+  if id == "stop" then
+    nav_stop()
+    say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  if id == "objective" then
+    if not nav_active then
+      nav_stop()
+      nav_active = true
+      local v = read_progress()
+      nav_sig = nav_signature(s, v)
+      nav_reaim(s, v)
+    end
+    return
+  end
+  local n = id:match("^go:(%d+)$")
+  if n then
+    local e = POI.entries[tonumber(n)]
+    if e == nil then return end
+    -- A destination chosen by hand replaces the quest guide, which would otherwise re-aim
+    -- at the objective on its next pass.
+    nav_stop()
+    pathfind_to(e.x, e.y, e.name .. ".", e.level, e.face)
+    return
+  end
+  local verb, k = id:match("^mark:(%a+):(%d+)$")
+  k = tonumber(k)
+  if verb == "add" then
+    mark_set(k)
+    say("Marker " .. k .. " placed.", { priority = "navigation", category = "on-demand" })
+  elseif verb == "del" then
+    mark_clear(k)
+    say("Marker " .. k .. " removed.", { priority = "navigation", category = "on-demand" })
+  elseif verb == "go" then
+    nav_stop()
+    mark_goto(k)
+  end
+end
+
 function on_draw(canvas)
   local w, h = canvas.width, canvas.height
   canvas:clear(0x101828)

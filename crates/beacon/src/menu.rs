@@ -57,6 +57,38 @@ pub struct Context {
     /// the navigation toggle, which is what a player is most likely to want and least likely to
     /// remember. Empty with no game, so the level reads "Empty".
     pub commands: Vec<(String, String)>,
+
+    /// The menu the plugin last asked to open, flattened: node 0 is its root. Read by the
+    /// [`Level::Plugin`] levels, which are the plugin's own lists shown in Beacon's menu.
+    pub plugin_nodes: Vec<PluginNode>,
+}
+
+/// One line of a plugin's menu, flattened into [`Context::plugin_nodes`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PluginNode {
+    pub label: String,
+    /// Chosen, it is handed back to the plugin by this id.
+    pub id: Option<String>,
+    /// Indexes of its children; a node with children is a submenu.
+    pub children: Vec<u16>,
+}
+
+/// Flattens a plugin's menu tree, root first.
+pub fn flatten(root: &beacon_plugin::MenuItem) -> Vec<PluginNode> {
+    fn walk(item: &beacon_plugin::MenuItem, out: &mut Vec<PluginNode>) -> u16 {
+        let at = out.len();
+        out.push(PluginNode {
+            label: item.label.clone(),
+            id: item.id.clone(),
+            children: Vec::new(),
+        });
+        let children: Vec<u16> = item.items.iter().map(|c| walk(c, out)).collect();
+        out[at].children = children;
+        at as u16
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
 }
 
 /// A level of the menu.
@@ -72,6 +104,8 @@ pub enum Level {
     Debug,
     Game,
     Input,
+    /// A list of the plugin's own: a node of [`Context::plugin_nodes`].
+    Plugin(u16),
 }
 
 impl Level {
@@ -88,6 +122,8 @@ impl Level {
             Level::Debug => "Debug",
             Level::Game => "Game",
             Level::Input => "Input",
+            // Named by the plugin; see [`Menu::open_plugin`] and [`Frame::title`].
+            Level::Plugin(_) => "",
         }
     }
 }
@@ -130,6 +166,8 @@ pub enum Act {
     ReloadPlugin,
     /// Run one of the plugin's commands by id.
     Command(String),
+    /// Hand a choice from the plugin's own menu back to it, by the item's id.
+    Plugin(String),
 }
 
 /// What an entry does when chosen.
@@ -259,6 +297,25 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
             .iter()
             .map(|(id, label)| Entry::act(label.clone(), Act::Command(id.clone())))
             .collect(),
+
+        Level::Plugin(node) => ctx
+            .plugin_nodes
+            .get(node as usize)
+            .map(|n| {
+                n.children
+                    .iter()
+                    .filter_map(|&c| {
+                        let child = ctx.plugin_nodes.get(c as usize)?;
+                        Some(match &child.id {
+                            Some(id) if child.children.is_empty() => {
+                                Entry::act(child.label.clone(), Act::Plugin(id.clone()))
+                            }
+                            _ => Entry::enter(&child.label, Level::Plugin(c)),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -356,9 +413,22 @@ fn expand(level: Level, ctx: &Context) -> Vec<Node> {
 
 /// One level being shown, and where the cursor is in it.
 struct Frame {
-    level: Level,
+    /// What the level is called: the level's own name, or the plugin's label for its lists.
+    title: String,
     index: usize,
     entries: Vec<Entry>,
+}
+
+/// What a level is called, from the plugin's labels for its own.
+fn title_of(level: Level, ctx: &Context) -> String {
+    match level {
+        Level::Plugin(n) => ctx
+            .plugin_nodes
+            .get(n as usize)
+            .map(|n| n.label.clone())
+            .unwrap_or_default(),
+        other => other.title().to_string(),
+    }
 }
 
 /// An open menu: the levels descended into, innermost last.
@@ -408,9 +478,21 @@ impl Menu {
     pub fn open(ctx: &Context) -> Menu {
         Menu {
             stack: vec![Frame {
-                level: Level::Root,
+                title: Level::Root.title().to_string(),
                 index: 0,
                 entries: entries(Level::Root, ctx),
+            }],
+        }
+    }
+
+    /// Opens at the root of the plugin's own menu, [`Context::plugin_nodes`].
+    pub fn open_plugin(ctx: &Context) -> Menu {
+        let level = Level::Plugin(0);
+        Menu {
+            stack: vec![Frame {
+                title: title_of(level, ctx),
+                index: 0,
+                entries: entries(level, ctx),
             }],
         }
     }
@@ -446,13 +528,13 @@ impl Menu {
     }
 
     /// The level's name followed by the selected entry, as said on changing level.
-    fn arrival(&self) -> String {
-        format!("{}. {}", self.top().level.title(), self.announce())
+    pub fn arrival(&self) -> String {
+        format!("{}. {}", self.top().title, self.announce())
     }
 
     /// The name of the level on show, for labelling the menu.
-    pub fn title(&self) -> &'static str {
-        self.top().level.title()
+    pub fn title(&self) -> &str {
+        &self.top().title
     }
 
     /// The entries on show, in order.
@@ -503,12 +585,12 @@ impl Menu {
     pub fn choose(&mut self, ctx: &Context) -> Chosen {
         let frame = self.top();
         if frame.entries.is_empty() {
-            return Chosen::Nothing(format!("{} is empty.", frame.level.title()));
+            return Chosen::Nothing(format!("{} is empty.", frame.title));
         }
         match frame.entries[frame.index].does.clone() {
             Does::Enter(level) => {
                 self.stack.push(Frame {
-                    level,
+                    title: title_of(level, ctx),
                     index: 0,
                     entries: entries(level, ctx),
                 });
@@ -757,6 +839,43 @@ mod tests {
                 said: "Video: off.".to_string()
             })
         );
+    }
+
+    #[test]
+    fn a_plugin_menu_is_read_like_any_other_and_hands_choices_back() {
+        let tree = beacon_plugin::MenuItem {
+            label: "Navigate".into(),
+            id: None,
+            items: vec![
+                beacon_plugin::MenuItem {
+                    label: "Stop navigation".into(),
+                    id: Some("stop".into()),
+                    items: vec![],
+                },
+                beacon_plugin::MenuItem {
+                    label: "Keys".into(),
+                    id: None,
+                    items: vec![beacon_plugin::MenuItem {
+                        label: "Small key - North - 4 tiles".into(),
+                        id: Some("k1".into()),
+                        items: vec![],
+                    }],
+                },
+            ],
+        };
+        let ctx = Context {
+            plugin_nodes: flatten(&tree),
+            ..Context::default()
+        };
+        let mut menu = Menu::open_plugin(&ctx);
+        assert_eq!(menu.arrival(), "Navigate. Stop navigation, 1 of 2.");
+        assert_eq!(menu.navigate(1), "Keys, 2 of 2, submenu.");
+        assert_eq!(
+            menu.choose(&ctx),
+            Chosen::Moved("Keys. Small key - North - 4 tiles, 1 of 1.".into())
+        );
+        assert_eq!(menu.choose(&ctx), Chosen::Act(Act::Plugin("k1".into())));
+        assert_eq!(menu.back(), Backed::Moved("Navigate. Keys, 2 of 2, submenu.".into()));
     }
 
     #[test]
