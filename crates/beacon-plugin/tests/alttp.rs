@@ -7,7 +7,7 @@
 //! `beacon-plugin` runtime crate's own unit tests, so that crate carries no
 //! A-Link-to-the-Past specifics.
 
-use beacon_plugin::{wram_offset, BeaconState, Intent, LuaPlugin, Plugin, Registry};
+use beacon_plugin::{wram_offset, BeaconState, Intent, LuaPlugin, Plugin, Registry, SoundCmd};
 
 #[test]
 fn alttp_scan_describes_a_nearby_sprite() {
@@ -523,8 +523,31 @@ fn dungeon_frame(link: (u16, u16), door: (u16, u16), walls: &[(u16, u16)]) -> Ve
     ram
 }
 
-fn path_beacon(plugin: &LuaPlugin) -> Option<BeaconState> {
-    plugin.beacons().into_iter().find(|b| b.id == "path")
+/// The route guide as a beacon-shaped reading: where Toby's carrot sounds from, how loud,
+/// and its "pitch" — 3.5 when Link is facing it (the fast beacon), 2.9 when not — so the
+/// tests that once read the guide tone read the carrot the same way.
+fn path_beacon(plugin: &mut LuaPlugin) -> Option<BeaconState> {
+    let ram = vec![0u8; 128 * 1024];
+    let reading = plugin
+        .eval(
+            "if carrot == nil then return 'nil' end \
+             return string.format('%f,%f,%s,%f', carrot.x, carrot.y, tostring(carrot.fast), carrot.volume)",
+            &ram,
+        )
+        .unwrap();
+    if reading == "nil" {
+        return None;
+    }
+    let f: Vec<&str> = reading.split(',').collect();
+    Some(BeaconState {
+        id: "path".to_string(),
+        dx: f[0].parse().unwrap(),
+        dy: f[1].parse().unwrap(),
+        pitch: if f[2] == "true" { 3.5 } else { 2.9 },
+        volume: f[3].parse().unwrap(),
+        tremolo: 0.0,
+        ping: true,
+    })
 }
 
 #[test]
@@ -568,7 +591,7 @@ fn alttp_in_combat_the_guide_ducks_and_only_the_enemy_sounds() {
     plugin.on_frame(&calm, 0);
     plugin.command("pathfind", &calm);
     plugin.on_frame(&calm, 1);
-    let calm_vol = path_beacon(&plugin)
+    let calm_vol = path_beacon(&mut plugin)
         .expect("the guide sounds when clear")
         .volume;
     assert!(
@@ -580,7 +603,7 @@ fn alttp_in_combat_the_guide_ducks_and_only_the_enemy_sounds() {
     // item goes silent, and the enemy sounds.
     plugin.on_frame(&with_enemy(true), 2);
     let ids: Vec<String> = plugin.beacons().iter().map(|b| b.id.clone()).collect();
-    let ducked = path_beacon(&plugin).expect("the guide keeps guiding, ducked, in combat");
+    let ducked = path_beacon(&mut plugin).expect("the guide keeps guiding, ducked, in combat");
     assert!(
         ducked.volume < calm_vol,
         "the guide ducks below its clear volume in combat: {} vs {calm_vol}",
@@ -610,7 +633,7 @@ fn alttp_pathfinder_routes_around_a_wall_to_a_door() {
     plugin.command("pathfind", &ram); // plan a route to the nearest door
     plugin.on_frame(&ram, 1); // follower places the guide beacon
 
-    let guide = path_beacon(&plugin).expect("a guide beacon toward the route");
+    let guide = path_beacon(&mut plugin).expect("a guide beacon toward the route");
     // A straight shot would point due south (dx≈0); routing around the wall
     // means the first corner is to the east.
     assert!(
@@ -631,7 +654,7 @@ fn alttp_pathfinder_clears_the_guide_on_arrival() {
     plugin.on_frame(&start, 0);
     plugin.command("pathfind", &start);
     plugin.on_frame(&start, 1);
-    let guide = path_beacon(&plugin).expect("guide beacon while en route");
+    let guide = path_beacon(&mut plugin).expect("guide beacon while en route");
     assert!(
         guide.dy > 0.0,
         "points south toward the door, dy={}",
@@ -653,7 +676,7 @@ fn alttp_pathfinder_clears_the_guide_on_arrival() {
         out.iter().map(|i| &i.text).collect::<Vec<_>>()
     );
     assert!(
-        path_beacon(&plugin).is_none(),
+        path_beacon(&mut plugin).is_none(),
         "guide beacon cleared on arrival"
     );
 }
@@ -711,7 +734,7 @@ fn alttp_marker_guides_back_to_where_it_was_dropped() {
     plugin.command("guide_to_mark", &moved);
     plugin.on_frame(&moved, 2);
 
-    let guide = path_beacon(&plugin).expect("a guide beacon back to the marker");
+    let guide = path_beacon(&mut plugin).expect("a guide beacon back to the marker");
     assert!(
         guide.dx < 0.0,
         "guide points west, back toward the marker (dx={})",
@@ -737,7 +760,7 @@ fn alttp_explore_routes_toward_unwalked_ground() {
         "there is still unexplored ground to route to"
     );
     assert!(
-        path_beacon(&plugin).is_some(),
+        path_beacon(&mut plugin).is_some(),
         "explore starts guiding toward unexplored ground"
     );
 }
@@ -863,7 +886,7 @@ fn alttp_advance_inside_an_unchained_dungeon_stays_quiet() {
     );
     plugin.on_frame(&room, 2);
     assert!(
-        path_beacon(&plugin).is_none(),
+        path_beacon(&mut plugin).is_none(),
         "and it does not drive a route there"
     );
 }
@@ -6918,11 +6941,7 @@ fn alttp_a_destination_can_require_a_facing_as_well_as_a_place() {
     );
 
     // Still guiding, and the tone is NOT the high one: he is on the spot facing away.
-    let beacons = plugin.beacons();
-    let path = beacons
-        .iter()
-        .find(|b| b.id == "path")
-        .expect("the guide keeps sounding until he has turned");
+    let path = path_beacon(&mut plugin).expect("the guide keeps sounding until he has turned");
     let facing_wrong = path.pitch;
 
     // Turned to face it: the tone rises to the high one and the guide stands down.
@@ -6935,7 +6954,7 @@ fn alttp_a_destination_can_require_a_facing_as_well_as_a_place() {
         .map(|i| i.text.clone())
         .collect();
     names.extend(plugin.on_frame(&facing_it, 3).iter().map(|i| i.text.clone()));
-    let path_now = plugin.beacons().into_iter().find(|b| b.id == "path");
+    let path_now = path_beacon(&mut plugin);
     match path_now {
         // Either it has stood down, or it is sounding the high tone — both say "this is it".
         None => {}
@@ -7026,11 +7045,7 @@ fn alttp_the_guide_tone_is_high_only_toward_the_route() {
 
     let pitch_when = |plugin: &mut LuaPlugin, ram: &[u8], frame: u64| -> (f32, f32, f32) {
         plugin.on_frame(ram, frame);
-        let b = plugin
-            .beacons()
-            .into_iter()
-            .find(|b| b.id == "path")
-            .expect("the guide is sounding");
+        let b = path_beacon(plugin).expect("the guide is sounding");
         (b.pitch, b.dx, b.dy)
     };
 
@@ -7043,9 +7058,10 @@ fn alttp_the_guide_tone_is_high_only_toward_the_route() {
     let (away, _, _) = pitch_when(&mut plugin, &facing(4), 3); // west, the wrong way
     let (aside, _, _) = pitch_when(&mut plugin, &facing(0), 4); // north, across it
 
+    // Toby's carrot has two beeps, not three tones: the fast one only when facing it.
     assert!(
-        toward > aside && aside > away,
-        "high toward the route, middle across it, low away from it: \
+        toward > aside && aside == away,
+        "the fast beacon toward the route, the ordinary one otherwise: \
          east={toward} north={aside} west={away}"
     );
 }
@@ -7328,5 +7344,137 @@ fn alttp_the_game_over_menu_reads_its_three_choices() {
     assert!(
         !quiet.iter().any(|t| t.contains("Save")),
         "nothing repeated while the cursor sits: {quiet:?}"
+    );
+}
+
+#[test]
+fn alttp_the_route_is_followed_by_ear_toward_tobys_carrot() {
+    // Toby's pathfinder: one sound rides the route a leash ahead (150 Doom units, 72 px at
+    // Link's scale) and beeps every 44 tics (75 frames here) — the fast beacon while Link
+    // faces it — with Toby's sounds for a route found and a destination reached.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+
+    let at = |tx: u16, dir: u8| -> Vec<u8> {
+        let mut ram = dungeon_frame((tx, 40), (10, 10), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E002F, dir);
+        set(0x7E005D, 0x00); // awake
+        ram
+    };
+    let names = |cmds: Vec<SoundCmd>| -> Vec<String> {
+        cmds.into_iter()
+            .filter_map(|c| match c {
+                SoundCmd::Play { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let start = at(20, 6); // facing east, toward the goal
+    plugin.on_frame(&start, 0);
+    plugin.on_frame(&start, 1);
+    plugin.take_sounds();
+    // Twenty tiles (160 px) due east, on the row his feet are on (two below the top of his
+    // sprite): further than the leash.
+    plugin
+        .eval("return tostring(pathfind_to((20 + 20) * 8 + 4, 42 * 8 + 4))", &start)
+        .unwrap();
+
+    plugin.on_frame(&start, 2);
+    let first = names(plugin.take_sounds());
+    assert!(
+        first.contains(&"pathfinder/pathfound".to_string()),
+        "a new route is announced: {first:?}"
+    );
+    assert!(
+        first.contains(&"pathfinder/nodebeaconfast".to_string()),
+        "facing it, the carrot beeps the fast beacon at once: {first:?}"
+    );
+    let c = path_beacon(&mut plugin).expect("the carrot is out");
+    assert!(
+        c.dx > 70.0 && c.dx <= 72.5 && c.dy.abs() < 8.0,
+        "held on its leash, east of Link: dx={} dy={}",
+        c.dx,
+        c.dy
+    );
+
+    // Silent until the period is up, then beeps again.
+    let mut beeps = Vec::new();
+    for f in 3..(3 + 75) {
+        plugin.on_frame(&start, f);
+        let heard = names(plugin.take_sounds());
+        if heard.iter().any(|n| n.starts_with("pathfinder/nodebeacon")) {
+            beeps.push(f);
+        }
+    }
+    assert_eq!(beeps, vec![77], "one beep a period, 75 frames after the first");
+
+    // Turning away is heard at once, not at the next period: the ordinary beacon, on the
+    // very frame he turns.
+    for f in 78..90 {
+        plugin.on_frame(&start, f);
+    }
+    plugin.take_sounds();
+    let away = at(20, 4);
+    plugin.on_frame(&away, 90);
+    assert_eq!(
+        names(plugin.take_sounds()),
+        vec!["pathfinder/nodebeacon".to_string()],
+        "turning away beeps the ordinary beacon immediately"
+    );
+    // But not again and again: turning back within the minimum gap waits for it.
+    plugin.on_frame(&start, 91);
+    assert!(
+        names(plugin.take_sounds()).is_empty(),
+        "a change within 0.2 s of the last beep waits"
+    );
+    let mut heard = Vec::new();
+    for f in 92..(92 + 11) {
+        plugin.on_frame(&start, f);
+        heard.extend(names(plugin.take_sounds()));
+    }
+    assert_eq!(
+        heard,
+        vec!["pathfinder/nodebeaconfast".to_string()],
+        "then the fast beacon, once the gap is up"
+    );
+
+    // Standing on the goal: Toby's DestReached, and the carrot falls silent.
+    let there = at(40, 6);
+    plugin.on_frame(&there, 200);
+    let end = names(plugin.take_sounds());
+    assert!(
+        end.contains(&"pathfinder/destreached".to_string()),
+        "arrival is announced: {end:?}"
+    );
+    assert!(path_beacon(&mut plugin).is_none(), "and the carrot is gone");
+}
+
+#[test]
+fn alttp_a_route_is_replanned_only_once_link_has_left_it() {
+    // Re-planning a route Link is still on changes nothing, and on the overworld each plan is
+    // a search of the whole world — re-planning on a clock was a hitch every 0.75 s. So the
+    // followers ask whether he has left it: further than three tiles from the legs near the
+    // waypoint he is heading for.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let ram = vec![0u8; 128 * 1024];
+    let probe = r#"
+        -- An L: east along row 10 from tile 10 to 30, then south to row 30.
+        local path = { { 10, 10 }, { 30, 10 }, { 30, 30 } }
+        local px = function(t) return t * 8 + 4 end
+        return table.concat({
+          tostring(route_off(path, 2, px(20), px(10))),        -- on the first leg
+          tostring(route_off(path, 2, px(20), px(10) + 16)),   -- two tiles beside it
+          tostring(route_off(path, 2, px(20), px(10) + 40)),   -- five tiles away
+          tostring(route_off(path, 3, px(30) - 8, px(25))),    -- beside the second leg
+          tostring(route_off(nil, 1, 0, 0)),                   -- no route is no route
+        }, ",")
+    "#;
+    assert_eq!(
+        plugin.eval(probe, &ram).unwrap(),
+        "false,false,true,false,true",
+        "on or near the route is on it; five tiles off is not"
     );
 }

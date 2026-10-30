@@ -109,6 +109,8 @@ pub struct Session {
     sound_bank: SoundBank,
     /// The plugin's recorded sounds that are currently playing.
     voices: VoiceMixer,
+    /// Whether to log frames whose plugin work is slow (`BEACON_STATS`).
+    slow_frame_log: bool,
     last_spoken: Option<String>,
     /// Recent spoken lines, for an agent to read what a player would have heard.
     speech_log: VecDeque<String>,
@@ -207,6 +209,7 @@ impl Session {
             beacon_mixer: BeaconMixer::new(rate),
             sound_bank: SoundBank::open(&sounds_dir, rate),
             voices: VoiceMixer::default(),
+            slow_frame_log: std::env::var_os("BEACON_STATS").is_some(),
             last_spoken: None,
             speech_log: VecDeque::new(),
             frames: 0,
@@ -306,10 +309,32 @@ impl Session {
 
         // Instrumentation runs here: between frames, against real memory.
         let frame = self.frames;
+        let plugin_started = std::time::Instant::now();
         let intents = match ram_of(&self.emu) {
             Some(ram) => self.plugin.on_frame(ram, frame),
             None => Vec::new(),
         };
+        if self.slow_frame_log {
+            // A frame's plugin work over half the frame budget: the cause of a hitch. Logged
+            // with where the game was, because "choppy on the overworld" needs a place.
+            let took = plugin_started.elapsed();
+            if took >= Duration::from_millis(8) {
+                let at = ram_of(&self.emu)
+                    .map(|ram| {
+                        let b = |a: u32| beacon_plugin::wram_offset(a).map(|o| ram[o]).unwrap_or(0);
+                        format!(
+                            "module {:02x}/{:02x} area {:02x} room {:02x}{:02x}",
+                            b(0x7E0010),
+                            b(0x7E0011),
+                            b(0x7E008A),
+                            b(0x7E00A1),
+                            b(0x7E00A0)
+                        )
+                    })
+                    .unwrap_or_default();
+                eprintln!("slow frame {frame}: plugin {:.1} ms, {at}", took.as_secs_f64() * 1e3);
+            }
+        }
         self.dispatch(intents);
         self.drain_sounds();
 
@@ -532,6 +557,16 @@ impl Session {
             self.say_now(intent.text);
         }
         self.drain_sounds();
+    }
+
+    /// Samples the audio device wanted and did not get, ever.
+    pub fn audio_underruns(&self) -> u64 {
+        self.audio.underruns()
+    }
+
+    /// The largest chunk the audio device has asked for at once, in frames.
+    pub fn audio_period(&self) -> usize {
+        self.audio.largest_request()
     }
 
     /// Starts, moves and stops the sounds the plugin asked for since the last drain. They

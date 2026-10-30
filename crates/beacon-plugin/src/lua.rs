@@ -100,6 +100,7 @@ impl LuaPlugin {
         install_beacon(&lua, &beacons)?;
         let sounds: Sounds = Rc::new(RefCell::new(Vec::new()));
         install_sound(&lua, &sounds)?;
+        crate::nav::install(&lua)?;
 
         // Modules first, in declared order, each its own chunk (its own local
         // budget) sharing this Lua state's globals — so a data module's namespace is

@@ -11,6 +11,10 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 
+/// The device period to ask for, in milliseconds: well under a frame (16.7 ms), so the device
+/// drains the queue a little at a time rather than in lumps.
+const PERIOD_MS: usize = 10;
+
 /// Shared between the frame loop and the audio callback.
 struct Shared {
     /// Interleaved stereo samples awaiting playback.
@@ -19,6 +23,10 @@ struct Shared {
     /// hidden: underruns mean the machine cannot keep up, which is exactly the
     /// low-end-hardware question the design left open.
     underruns: u64,
+    /// The most samples the device has asked for at once: its real period, whatever was
+    /// requested. Reported, because a device taking large chunks is what makes emulation run
+    /// in bursts — several frames back to back, and only the last of them shown.
+    largest_request: usize,
 }
 
 pub struct Audio {
@@ -62,6 +70,7 @@ where
                 out.fill(T::EQUILIBRIUM);
                 return;
             };
+            s.largest_request = s.largest_request.max(out.len() / channels.max(1));
 
             for frame in out.chunks_mut(channels) {
                 // The emulator is stereo. Mono devices take the left channel; anything wider
@@ -124,7 +133,8 @@ impl Audio {
 
         let supported = device.default_output_config()?;
         let sample_format = supported.sample_format();
-        let config: cpal::StreamConfig = supported.into();
+        let buffer_range = supported.buffer_size().clone();
+        let mut config: cpal::StreamConfig = supported.into();
         let channels = config.channels as usize;
         let sample_rate = config.sample_rate;
 
@@ -138,23 +148,64 @@ impl Audio {
         let shared = Arc::new(Mutex::new(Shared {
             queue: std::collections::VecDeque::with_capacity(high_water * 4),
             underruns: 0,
+            largest_request: 0,
         }));
 
         // Every sample type a mix format is likely to be. Converting from the emulator's f32
         // is `FromSample`'s job, so each arm is the same code at a different type.
-        let stream = match sample_format {
+        if !matches!(
+            sample_format,
+            SampleFormat::F32
+                | SampleFormat::F64
+                | SampleFormat::I16
+                | SampleFormat::I32
+                | SampleFormat::U8
+                | SampleFormat::U16
+        ) {
+            return Err(
+                format!("audio device wants an unsupported sample format: {sample_format:?}")
+                    .into(),
+            );
+        }
+        let open = |config: cpal::StreamConfig| match sample_format {
             SampleFormat::F32 => build::<f32>(&device, config, channels, &shared),
             SampleFormat::F64 => build::<f64>(&device, config, channels, &shared),
             SampleFormat::I16 => build::<i16>(&device, config, channels, &shared),
             SampleFormat::I32 => build::<i32>(&device, config, channels, &shared),
             SampleFormat::U8 => build::<u8>(&device, config, channels, &shared),
             SampleFormat::U16 => build::<u16>(&device, config, channels, &shared),
-            other => {
-                return Err(
-                    format!("audio device wants an unsupported sample format: {other:?}").into(),
-                )
+            _ => unreachable!("checked above"),
+        };
+
+        // Ask for a short period. Left to itself the device picks its own, and on PipeWire's
+        // ALSA bridge that was large enough that each request drained several frames' worth of
+        // audio at once: emulation then ran in bursts to refill it, the window showed one
+        // frame in five, and sound arrived in lumps. A short period means one frame produced,
+        // and shown, per frame consumed. It is only a request — a device that refuses it
+        // (WASAPI shared mode serves its own period) is opened as it describes itself.
+        let wanted = (sample_rate as usize * PERIOD_MS / 1000) as u32;
+        let fixed = match buffer_range {
+            cpal::SupportedBufferSize::Range { min, max } => Some(wanted.clamp(min, max)),
+            cpal::SupportedBufferSize::Unknown => Some(wanted),
+        };
+        let stream = match fixed {
+            Some(frames) => {
+                let mut short = config.clone();
+                short.buffer_size = cpal::BufferSize::Fixed(frames);
+                match open(short) {
+                    Ok(stream) => {
+                        eprintln!("audio: asked for a {frames}-frame period");
+                        stream
+                    }
+                    Err(e) => {
+                        eprintln!("audio: a {frames}-frame period was refused ({e}); using the device's own");
+                        config.buffer_size = cpal::BufferSize::Default;
+                        open(config)?
+                    }
+                }
             }
-        }?;
+            None => open(config)?,
+        };
 
         stream.play()?;
 
@@ -211,6 +262,11 @@ impl Audio {
             return Duration::ZERO;
         }
         Duration::from_secs_f64(spare as f64 / self.samples_per_sec as f64)
+    }
+
+    /// The largest chunk, in frames, the device has asked for: its effective period.
+    pub fn largest_request(&self) -> usize {
+        self.shared.lock().map(|s| s.largest_request).unwrap_or(0)
     }
 
     pub fn underruns(&self) -> u64 {

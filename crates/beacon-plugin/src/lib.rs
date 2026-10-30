@@ -26,6 +26,7 @@ use serde::Deserialize;
 
 pub mod canvas;
 pub mod lua;
+pub mod nav;
 
 pub use beacon_output::Intent;
 pub use lua::LuaPlugin;

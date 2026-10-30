@@ -1903,71 +1903,68 @@ local function ow_parent(cell)
   return (string.byte(OW_PARENT, (cell & 0x3F) + 1) or (cell & 0x3F)) & 0x3F
 end
 
-local OW_ASTAR_CAP = 40000 -- node budget; bounds a worst-case mazey route
+local OW_ASTAR_CAP = 512 * 512 -- node budget: the whole world, now the search is in the host
 
 -- A* over 8-pixel world tiles from Link's footing toward (gx,gy). If `goal_area`
 -- (a 0..0x3F within-world area index) is given, the goal is any reachable tile in
 -- that area — so it stops at the screen boundary rather than a possibly-walled
 -- centre — and (gx,gy) is only the heuristic aim point. Returns a string-pulled
 -- list of world tiles {tx,ty}, or nil if unreachable / off the map.
+-- The overworld's walkability as host grids, one per world, built from the ROM decode the
+-- first time a route needs it: BUILD_ROWS rows a frame, so the build is never a hitch.
+-- The search itself runs in the host (nav.grid), which is what lets a route be re-planned
+-- from Link every few frames rather than kept until it has gone stale.
+OWGRID = { grid = {}, rows = {}, BUILD_ROWS = 16 }
+
+-- The finished grid for world `w`, or nil while it is still being built (each call builds a
+-- little more).
+function OWGRID.get(w)
+  local g = OWGRID.grid[w]
+  if g == nil then
+    g = nav.grid(512, 512)
+    OWGRID.grid[w], OWGRID.rows[w] = g, 0
+  end
+  local y0 = OWGRID.rows[w]
+  if y0 >= 512 then return g end
+  for ty = y0, math.min(511, y0 + OWGRID.BUILD_ROWS - 1) do
+    local row = {}
+    for tx = 0, 511 do row[tx + 1] = ow_walk(w, tx, ty) and "\1" or "\0" end
+    g:fill(0, ty, 512, 1, table.concat(row))
+  end
+  OWGRID.rows[w] = math.min(512, y0 + OWGRID.BUILD_ROWS)
+  return OWGRID.rows[w] >= 512 and g or nil
+end
+
+-- Plans an overworld route from Link to tile (gx, gy), or to anywhere on overworld area
+-- `goal_area` (all of a large area's screens). Returns the right-angle waypoints, or nil and
+-- "building" while the world's grid is still being made.
 local function ow_plan_path(s, gx, gy, goal_area)
   local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
   local fx, fy = foot(s)
   local sx, sy = ow_nearest_walk(w, fx >> 3, fy >> 3)
   if goal_area == nil then gx, gy = ow_nearest_walk(w, gx, gy) end
   if sx == nil or gx == nil then return nil end
-  local function key(x, y) return y * 512 + x end
-  local function heur(x, y) return math.abs(x - gx) + math.abs(y - gy) end
-  local goal_parent = ow_parent(goal_area or 0)
-  local function is_goal(n)
-    if goal_area == nil then return n == key(gx, gy) end
-    local nx, ny = n % 512, n // 512
-    return ow_parent((ny >> 6) * 8 + (nx >> 6)) == goal_parent
-  end
-  local g, came, closed, heap = { [key(sx, sy)] = 0 }, {}, {}, {}
-  local function push(n, f)
-    heap[#heap + 1] = { n, f }
-    local i = #heap
-    while i > 1 and heap[i >> 1][2] > heap[i][2] do heap[i], heap[i >> 1] = heap[i >> 1], heap[i]; i = i >> 1 end
-  end
-  local function pop()
-    local top = heap[1][1]
-    heap[1] = heap[#heap]; heap[#heap] = nil
-    local i, n = 1, #heap
-    while true do
-      local l, r, m = i * 2, i * 2 + 1, i
-      if l <= n and heap[l][2] < heap[m][2] then m = l end
-      if r <= n and heap[r][2] < heap[m][2] then m = r end
-      if m == i then break end
-      heap[i], heap[m] = heap[m], heap[i]; i = m
-    end
-    return top
-  end
-  push(key(sx, sy), heur(sx, sy))
-  local reached, expanded = nil, 0
-  while #heap > 0 and expanded < OW_ASTAR_CAP do
-    local n = pop()
-    if is_goal(n) then reached = n; break end
-    if not closed[n] then
-      closed[n] = true; expanded = expanded + 1
-      local nx, ny = n % 512, n // 512
-      for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
-        local cx, cy = nx + d[1], ny + d[2]
-        if ow_walk(w, cx, cy) then
-          local c = key(cx, cy); local ng = g[n] + 1
-          if g[c] == nil or ng < g[c] then g[c] = ng; came[c] = n; push(c, ng + heur(cx, cy)) end
-        end
+  local grid = OWGRID.get(w)
+  if grid == nil then return nil, "building" end
+  local goal
+  if goal_area == nil then
+    goal = { x = gx, y = gy }
+  else
+    -- Every screen of the goal's area: a large area is four, and arriving on any is arriving.
+    local parent, rects = ow_parent(goal_area), {}
+    for cell = 0, 63 do
+      if ow_parent(cell) == parent then
+        local cx, cy = cell & 7, cell >> 3
+        rects[#rects + 1] = { cx * 64, cy * 64, cx * 64 + 63, cy * 64 + 63 }
       end
     end
+    goal = { rects = rects }
   end
-  if reached == nil then return nil end
-  local rev, c = {}, reached
-  while c do rev[#rev + 1] = { c % 512, c // 512 }; c = came[c] end
-  local pts = {}
-  for i = #rev, 1, -1 do pts[#pts + 1] = rev[i] end
+  local pts = grid:astar(sx, sy, goal, OW_ASTAR_CAP)
+  if pts == nil then return nil end
   -- Pulled to right angles, like the dungeon route: the guide can only name four
   -- directions, so a leg has to be one of them.
-  return rect_pull(pts, function(tx, ty) return ow_walk(w, tx, ty) end)
+  return rect_pull(pts, function(tx, ty) return grid:walkable(tx, ty) end)
 end
 
 -- Follower state. Global so an agent can inspect/drive it over MCP.
@@ -1996,9 +1993,6 @@ pathfind_told = false        -- arrival line said once per arming, not once per 
 -- the vocabulary has to stay legible as a whole, and they are spaced by equal ratios so
 -- the step from LOW to MID sounds like the step from MID to HIGH.
 local PATH_TONE = { ahead = 3.5, side = 2.9, behind = 2.4 }
-local PATH_VOLUME = 0.38        -- still under the object beacons, so threats read over the guide
-local PATH_DUCK = 0.35          -- nav volume scale while an enemy is engaged: ducked, not silenced
-local PATH_PING_HZ = 0.5        -- sonar: a ping every 2 seconds over a soft steady tone
 local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
 local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 
@@ -2028,36 +2022,143 @@ function path_tone(direction, dx, dy)
   return PATH_TONE.side
 end
 
--- Aim the sonar path beacon from Link toward waypoint `w` (a {tile_x, tile_y}).
--- Shared by both route followers (local pathfinder and cross-screen overworld), so
--- the heading maths and tone live in one place. `duck` drops the volume while an enemy is
--- engaged, so the threat tone reads over the guide without the guide dropping out entirely.
-local function aim_path_beacon(s, w, duck)
-  local fx, fy = foot(s)
-  local dx, dy = (w[1] * 8 + 4) - fx, (w[2] * 8 + 4) - fy
-  beacon.set("path", {
-    x = dx, y = dy,
-    pitch = path_tone(s.direction, dx, dy),
-    volume = duck and PATH_VOLUME * PATH_DUCK or PATH_VOLUME,
-    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
-  })
+-- The route is followed the way Toby's pathfinder is followed: by ear, toward a "carrot".
+--
+-- One sound source rides the route a short leash ahead of Link and beeps from where it is,
+-- Toby's PathBeacon, every 1.26 seconds. Walk toward the beep and the leash pulls you round
+-- each corner. When Link is facing it the beep is PathBeaconFast instead, so "heading the
+-- right way" is a different sound rather than a judgement of stereo. Each corner passed is
+-- NodeReached; the start of a route PathFound; a failed one NoPath; arriving DestReached.
+--
+-- Toby's distances, converted at Link's scale (Doom's player radius is 16 units, Link is 16
+-- pixels across, so a pixel is two units): the 150-unit leash is 72 px, a little over four
+-- of Link's tiles; the 44-tic period (Doom runs at 35 tics a second) is 75 frames here.
+--
+-- `carrot` is where it sounds from, relative to Link's feet, while a route is being followed:
+-- {x, y, fast, volume}, or nil. Global so an agent, and the tests, can see the guide.
+carrot = nil
+CARROT = {
+  LEASH = 72,       -- px ahead of Link the carrot may ride
+  PERIOD = 75,      -- frames between beeps
+  VOLUME = 0.9,     -- Toby's carrot is never far enough away to fall off
+  DUCK = 0.35,      -- scale while an enemy is engaged: ducked so the threat reads, not silenced
+  -- Toby beeps on a fixed period, so turning to face the carrot, or a corner swinging it to
+  -- another side, is not heard until the next beep — up to 1.26 s, in which Link walks
+  -- further than the leash. Here a change beeps at once instead: facing it or not, or the
+  -- side it is on. Never more often than this, so wiggling the stick is not a machine gun.
+  MIN_GAP = 12,     -- frames, 0.2 s
+  -- How far the other axis must outgrow the current one before the carrot counts as having
+  -- moved to another side, so a diagonal route does not flicker between two of them.
+  SIDE_HYSTERESIS = 1.25,
+  timer = 0,        -- frames until the next beep; 0 beeps at once
+  since = 1000,     -- frames since the last beep
+  last_fast = nil,  -- whether the last beep was the fast one
+  side = nil,       -- the side the carrot was last on: "n", "s", "e" or "w"
+  -- Whether a journey is under way. Toby says "path found" when the player picks a
+  -- destination, not each time the route is re-planned, so the carrot going quiet for a
+  -- screen transition or a hand-off between routers is the same journey resumed. Only
+  -- arriving, "no path", or turning navigation off ends one.
+  journey = false,
+  corner = nil,     -- the corner being steered for, {tx, ty}
+  AT_CORNER = 20,   -- px from a corner that counts as being at it
+}
+
+-- Places the carrot along the offset (dx, dy) toward the point being steered for, no further
+-- than the leash, and beeps it when due.
+function CARROT.place(s, dx, dy, duck)
+  local d = math.sqrt(dx * dx + dy * dy)
+  if d > CARROT.LEASH then
+    dx, dy = dx * CARROT.LEASH / d, dy * CARROT.LEASH / d
+  end
+  -- Facing it is the same judgement the old guide tone made with its high note: Link faces
+  -- one of four ways, so "toward" is the dominant axis of the offset.
+  local fast = path_tone(s.direction, dx, dy) == PATH_TONE.ahead
+  local volume = duck and CARROT.VOLUME * CARROT.DUCK or CARROT.VOLUME
+  if not CARROT.journey then
+    CARROT.journey = true
+    sound.ui("pathfinder/pathfound")
+    CARROT.timer = 0
+  end
+  carrot = { x = dx, y = dy, fast = fast, volume = volume }
+
+  local side = CARROT.side_of(dx, dy, CARROT.side)
+  local changed = fast ~= CARROT.last_fast or side ~= CARROT.side
+  CARROT.side = side
+  CARROT.timer = CARROT.timer - 1
+  CARROT.since = CARROT.since + 1
+  if CARROT.timer <= 0 or (changed and CARROT.since >= CARROT.MIN_GAP) then
+    CARROT.timer = CARROT.PERIOD
+    CARROT.since = 0
+    CARROT.last_fast = fast
+    sound.play(fast and "pathfinder/nodebeaconfast" or "pathfinder/nodebeacon",
+      { x = dx, y = dy, volume = volume })
+  end
 end
 
--- Aim the guide at the way Link must FACE, rather than at somewhere to walk.
---
--- Standing on the spot, the same three tones mean turn-this-way instead of go-this-way:
--- the offset is a whole tile on one axis and nothing on the other, so the dominant axis
--- is the required facing exactly, whatever Link's position within his own tile.
+-- The side of Link the offset (dx, dy) is on, by its dominant axis, keeping `was` until the
+-- other axis is clearly the larger.
+function CARROT.side_of(dx, dy, was)
+  local ax, ay = math.abs(dx), math.abs(dy)
+  local horizontal = (was == "e" or was == "w")
+  if was ~= nil then
+    if horizontal and ay <= ax * CARROT.SIDE_HYSTERESIS then horizontal = true
+    elseif not horizontal and ax <= ay * CARROT.SIDE_HYSTERESIS then horizontal = false
+    else horizontal = not horizontal end
+  else
+    horizontal = ax > ay
+  end
+  if horizontal then return dx > 0 and "e" or "w" end
+  return dy > 0 and "s" or "n"
+end
+
+-- Silences the carrot for now. The journey goes on: the next route placed resumes it.
+-- The next beep comes at once, so the player hears where the guide has gone.
+function CARROT.clear()
+  carrot = nil
+  CARROT.timer = 0
+  CARROT.last_fast, CARROT.side = nil, nil
+  CARROT.corner = nil
+end
+
+-- Ends the journey: the next route is a new one, announced with "path found".
+function CARROT.finish()
+  CARROT.clear()
+  CARROT.journey = false
+end
+
+-- Notes the corner being steered for, sounding NodeReached when the guide has moved on from
+-- one Link is standing at. Judged by place, not by the route's numbering, because routes are
+-- re-planned from Link and renumbered every few frames.
+function CARROT.node(path, wp, x, y)
+  local w = path[wp]
+  local was = CARROT.corner
+  CARROT.corner = w and { w[1], w[2] } or nil
+  if was ~= nil and wp <= #path and (w[1] ~= was[1] or w[2] ~= was[2])
+      and math.abs(was[1] * 8 + 4 - x) + math.abs(was[2] * 8 + 4 - y) <= CARROT.AT_CORNER then
+    sound.ui("pathfinder/nodereached")
+  end
+end
+
+-- Arrived: Toby's DestReached, and the carrot falls silent.
+function CARROT.arrive()
+  sound.ui("pathfinder/destreached")
+  CARROT.finish()
+end
+
+-- Aim the carrot from Link toward waypoint `w` (a {tile_x, tile_y}). Shared by both route
+-- followers (local pathfinder and cross-screen overworld). `duck` drops the volume while an
+-- enemy is engaged, so the threat reads over the guide without the guide dropping out.
+local function aim_path_beacon(s, w, duck)
+  local fx, fy = foot(s)
+  CARROT.place(s, (w[1] * 8 + 4) - fx, (w[2] * 8 + 4) - fy, duck)
+end
+
+-- Aim the carrot at the way Link must FACE, rather than at somewhere to walk: a tile away in
+-- that direction, so it beeps from that side, and fast once he has turned to it.
 local function aim_face_beacon(s, dir, duck)
   local d = DIRS[dir]
-  if d == nil then beacon.clear("path"); return end
-  local dx, dy = d.dx * 16, d.dy * 16
-  beacon.set("path", {
-    x = dx, y = dy,
-    pitch = path_tone(s.direction, dx, dy),
-    volume = duck and PATH_VOLUME * PATH_DUCK or PATH_VOLUME,
-    tremolo = PATH_PING_HZ, ping = true,
-  })
+  if d == nil then CARROT.clear(); return end
+  CARROT.place(s, d.dx * 16, d.dy * 16, duck)
 end
 
 local function area_id(s)
@@ -2122,7 +2223,8 @@ function pathfind_to(wx, wy, arrival, level, face)
   end
   pathfind_goal = nil
   pathfind_active = false
-  beacon.clear("path")
+  CARROT.finish()
+  sound.ui("pathfinder/nopath")
   say("No path there.", { priority = "navigation", category = "on-demand" })
   return false
 end
@@ -2134,7 +2236,35 @@ function pathfind_stop()
   pathfind_arrival = nil
   pathfind_face = nil
   pathfind_told = false
-  beacon.clear("path")
+  CARROT.clear()
+end
+
+-- Route upkeep. In a room, a route is re-planned when Link has left it. On the overworld,
+-- where the search is the host's, it is re-planned from him every few frames.
+ROUTE = {
+  OFF = 24,      -- px from the route that counts as having left it (three tiles)
+  CHECK = 10,    -- frames between checks that he is still on it (rooms)
+  REPLAN = 10,   -- frames between overworld re-plans from Link
+  RETRY = 120,   -- frames before trying again after "no route"
+}
+
+-- Whether the point (x, y) is further than ROUTE.OFF from every leg of `path` near waypoint
+-- `wp`: the leg into it, and the legs either side. Waypoints are tiles; x, y are pixels.
+function route_off(path, wp, x, y)
+  if path == nil or #path == 0 then return true end
+  local best = math.huge
+  local lo, hi = math.max(1, wp - 2), math.min(#path, wp + 1)
+  for k = lo, hi do
+    local ax, ay = path[k][1] * 8 + 4, path[k][2] * 8 + 4
+    local b = path[k + 1] or path[k]
+    local bx, by = b[1] * 8 + 4, b[2] * 8 + 4
+    local vx, vy = bx - ax, by - ay
+    local len2 = vx * vx + vy * vy
+    local t = len2 > 0 and math.max(0, math.min(1, ((x - ax) * vx + (y - ay) * vy) / len2)) or 0
+    local px, py = ax + vx * t - x, ay + vy * t - y
+    best = math.min(best, px * px + py * py)
+  end
+  return best > ROUTE.OFF * ROUTE.OFF
 end
 
 -- Where to start following a freshly planned route.
@@ -2202,10 +2332,14 @@ end
 -- Advance the follower one frame and place or clear the guide beacon.
 local function pathfind_update(s)
   if not pathfind_active then return end
-  if not in_play(s) then beacon.clear("path"); return end
+  if not in_play(s) then CARROT.clear(); return end
 
   pathfind_replan_in = pathfind_replan_in - 1
-  if pathfind_area ~= area_id(s) or pathfind_replan_in <= 0 then
+  local due = pathfind_replan_in <= 0
+  if due then pathfind_replan_in = ROUTE.CHECK end
+  local here_x, here_y = foot(s)
+  if pathfind_area ~= area_id(s)
+      or (due and route_off(pathfind_path, pathfind_wp, here_x, here_y)) then
     if not pathfind_replan(s) then
       -- Can't re-plan (e.g. Link stepped into a new room the chain hands off): stop
       -- quietly and let the guide re-aim next frame, rather than announcing a loss.
@@ -2217,6 +2351,7 @@ local function pathfind_update(s)
   local path = pathfind_path
   local fx, fy = foot(s)
   pathfind_wp = route_advance(path, pathfind_wp, fx, fy)
+  CARROT.node(path, pathfind_wp, fx, fy)
   if pathfind_wp > #path then
     -- On the spot. If the errand also needs him pointed a particular way, that is the
     -- rest of arriving: say what to do and which way once, then keep the guide sounding
@@ -2236,6 +2371,7 @@ local function pathfind_update(s)
     if pathfind_arrival and not pathfind_told then
       say(pathfind_arrival, { priority = "navigation", category = "on-demand" })
     end
+    CARROT.arrive()
     pathfind_stop()
     return
   end
@@ -2668,6 +2804,7 @@ local ow_replan_in = 0
 local function ow_route_stop()
   ow_route_goal = nil
   ow_route_path = nil
+  ow_replan_in = 0
 end
 
 -- Begin a cross-screen route to a world pixel destination.
@@ -2694,21 +2831,32 @@ end
 local function ow_route_update(s)
   if ow_route_goal == nil or pathfind_active then return end
   if s.module ~= 0x09 or not in_play(s) then
-    beacon.clear("path"); return
+    CARROT.clear(); return
   end
+  local fx, fy = foot(s)
+  -- Re-planned from where Link is, every ROUTE.REPLAN frames: the search is the host's and
+  -- costs about a millisecond, so the route is never one he has already left behind.
   ow_replan_in = ow_replan_in - 1
   if ow_route_path == nil or ow_replan_in <= 0 then
+    ow_replan_in = ROUTE.REPLAN
     -- ow_route_goal holds tile coordinates, which ow_plan_path expects directly.
-    ow_route_path = ow_plan_path(s, ow_route_goal[1], ow_route_goal[2], ow_route_goal.area)
-    ow_route_wp = ow_route_path and route_start_wp(ow_route_path) or 1
-    ow_replan_in = REPLAN_INTERVAL
+    local path, why = ow_plan_path(s, ow_route_goal[1], ow_route_goal[2], ow_route_goal.area)
+    if path ~= nil then
+      ow_route_path = path
+      ow_route_wp = route_start_wp(path)
+    elseif why == "building" then
+      ow_replan_in = 0 -- the grid is being made; try again next frame
+    else
+      ow_route_path = nil
+      ow_replan_in = ROUTE.RETRY -- no route: a failed search is the expensive kind
+    end
   end
   local path = ow_route_path
-  if path == nil then beacon.clear("path"); return end
-  local fx, fy = foot(s)
+  if path == nil then CARROT.clear(); return end
   ow_route_wp = route_advance(path, ow_route_wp, fx, fy)
+  CARROT.node(path, ow_route_wp, fx, fy)
   if ow_route_wp > #path then
-    ow_route_stop(); beacon.clear("path"); return
+    ow_route_stop(); CARROT.arrive(); return
   end
   -- duck the guide in a fight
   aim_path_beacon(s, route_aim(path, ow_route_wp, fx, fy), combat_engaged)
@@ -5278,6 +5426,7 @@ local function nav_stop()
   room_route_stop()
   ow_route_stop()
   pathfind_stop()
+  CARROT.finish()
 end
 
 -- Per-frame while the assist is on: re-aim when the module or objective changes.
@@ -5758,13 +5907,21 @@ function on_draw(canvas)
     -- The active guidance route: the same corners the audio beacon leads through,
     -- drawn as a magenta line with a dot at each corner and the current target
     -- brightened — so the guide is legible on the map too.
+    --
+    -- From Link, not from where the route was planned: a route is kept for as long as he is
+    -- on it, so its first corners are behind him, and drawing them showed a route that did
+    -- not follow him.
     if pathfind_active and pathfind_path then
-      for i = 1, #pathfind_path - 1 do
-        local ax, ay = plot(pathfind_path[i][1] * 8 + 4, pathfind_path[i][2] * 8 + 4)
-        local bx, by = plot(pathfind_path[i + 1][1] * 8 + 4, pathfind_path[i + 1][2] * 8 + 4)
+      local wp = math.min(pathfind_wp, #pathfind_path)
+      local lx, ly = foot(s)
+      local ax, ay = plot(lx, ly)
+      for i = wp, #pathfind_path do
+        local bx, by = plot(pathfind_path[i][1] * 8 + 4, pathfind_path[i][2] * 8 + 4)
         canvas:line(ax, ay, bx, by, 0xFF60D0)
+        ax, ay = bx, by
       end
-      for i, wt in ipairs(pathfind_path) do
+      for i = wp, #pathfind_path do
+        local wt = pathfind_path[i]
         local px, py = plot(wt[1] * 8 + 4, wt[2] * 8 + 4)
         canvas:rect(px - 1, py - 1, 3, 3, (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
       end
@@ -5857,7 +6014,7 @@ function on_draw(canvas)
       if pathfind_active and pathfind_path then
         local labels = {}
         for i, wt in ipairs(pathfind_path) do
-          if inwin(wt[1] * 8 + 4, wt[2] * 8 + 4) then
+          if i >= pathfind_wp and inwin(wt[1] * 8 + 4, wt[2] * 8 + 4) then
             local px, py = plot(wt[1] * 8 + 4, wt[2] * 8 + 4)
             labels[#labels + 1] = { px, py, text = tostring(i),
               color = (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0,
@@ -5882,11 +6039,14 @@ function on_draw(canvas)
         return plot(tx * 8 + 4, ty * 8 + 4)
       end
       -- The active route to the immediate target, string-pulled, in pink.
+      -- From Link onward, as in a dungeon: the corners already passed are not drawn.
       if ow_route_path then
-        for i = 1, #ow_route_path - 1 do
-          local ax, ay = oplot(ow_route_path[i][1], ow_route_path[i][2])
-          local cx2, cy2 = oplot(ow_route_path[i + 1][1], ow_route_path[i + 1][2])
+        local lx, ly = foot(s)
+        local ax, ay = plot(lx, ly)
+        for i = math.min(ow_route_wp, #ow_route_path), #ow_route_path do
+          local cx2, cy2 = oplot(ow_route_path[i][1], ow_route_path[i][2])
           canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+          ax, ay = cx2, cy2
         end
       end
       if nav_chain then
