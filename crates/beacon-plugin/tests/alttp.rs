@@ -7724,3 +7724,25 @@ fn alttp_enemies_are_handled_tobys_way() {
     assert_eq!(plugin.take_input(), Some((1 << 8, 2)), "hold right for two frames");
     assert!(said.iter().any(|t| t.contains("Soldier") && t.contains("east")), "{said:?}");
 }
+
+#[test]
+fn alttp_tobys_compass_and_turns() {
+    // Q says the facing; E and R turn a quarter left and right, F faces north, X turns round:
+    // each by pressing the new direction for a frame.
+    let r = Registry::builtin();
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut ram = dungeon_frame((20, 20), (0, 0), &[]);
+    ram[wram_offset(0x7E005D).unwrap()] = 0;
+    ram[wram_offset(0x7E002F).unwrap()] = 0; // north
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    let said = |p: &mut LuaPlugin, cmd: &str| -> String {
+        p.command(cmd, &ram).into_iter().map(|i| i.text).collect::<Vec<_>>().join(" ")
+    };
+    assert_eq!(said(&mut p, "compass"), "Facing north.");
+    assert_eq!(said(&mut p, "turn_right"), "Facing east.");
+    assert_eq!(p.take_input(), Some((1 << 8, 1)), "right, for a frame");
+    assert_eq!(said(&mut p, "turn_left"), "Facing west.");
+    assert_eq!(said(&mut p, "quickturn"), "Facing south.");
+    assert_eq!(p.take_input(), Some((1 << 10, 1)), "down, for a frame");
+}

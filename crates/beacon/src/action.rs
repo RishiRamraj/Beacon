@@ -236,7 +236,10 @@ mod tests {
         apply_defaults(&mut keymap);
         let mut keys = keymap.keys_for("menu");
         keys.sort();
-        assert_eq!(keys, vec!["Pad:Mode".to_string(), "Tab".to_string()]);
+        assert_eq!(
+            keys,
+            vec!["Escape".to_string(), "Pad:Mode".to_string(), "Tab".to_string()]
+        );
     }
 
     #[test]

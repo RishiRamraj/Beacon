@@ -27,23 +27,28 @@ const STICK_DEADZONE: f32 = 0.5;
 
 /// Maps a physical key to a SNES button.
 ///
-/// The layout is the retro-emulator convention, which players arriving from
-/// other emulators will already know. This mapping is fixed: game controls are
-/// not rebindable in this version, and keeping them fixed is what lets action
-/// keys be rebindable safely.
+/// The layout follows the Toby Accessibility Mod for Doom, which Beacon's navigation is
+/// modelled on, so a player who knows Toby knows where things are: WASD or the arrows move
+/// (Toby's modern and classic Doom controls), Space uses (SNES A: talk, lift, open), Control
+/// fires (B: the sword), Enter uses the inventory item (Y), and the item and weapon menu keys
+/// are the SNES menus (Period, Start; Comma, X: the world map). Toby's inventory scroll keys,
+/// O and P, are the shoulders. That leaves Toby's own accessibility keys — Q, E, R, F, X, Z,
+/// V, M and the rest — free for Beacon's equivalents. This mapping is fixed: game controls are
+/// not rebindable in this version, and keeping them fixed is what lets action keys be
+/// rebindable safely.
 fn key_to_button(key: KeyCode) -> Option<u16> {
     Some(match key {
-        KeyCode::ArrowUp => button::UP,
-        KeyCode::ArrowDown => button::DOWN,
-        KeyCode::ArrowLeft => button::LEFT,
-        KeyCode::ArrowRight => button::RIGHT,
-        KeyCode::KeyX => button::A,
-        KeyCode::KeyZ => button::B,
-        KeyCode::KeyS => button::X,
-        KeyCode::KeyA => button::Y,
-        KeyCode::KeyQ => button::L,
-        KeyCode::KeyW => button::R,
-        KeyCode::Enter => button::START,
+        KeyCode::ArrowUp | KeyCode::KeyW => button::UP,
+        KeyCode::ArrowDown | KeyCode::KeyS => button::DOWN,
+        KeyCode::ArrowLeft | KeyCode::KeyA => button::LEFT,
+        KeyCode::ArrowRight | KeyCode::KeyD => button::RIGHT,
+        KeyCode::Space => button::A,
+        KeyCode::ControlLeft | KeyCode::ControlRight => button::B,
+        KeyCode::Enter => button::Y,
+        KeyCode::Period => button::START,
+        KeyCode::Comma => button::X,
+        KeyCode::KeyO => button::L,
+        KeyCode::KeyP => button::R,
         KeyCode::ShiftRight => button::SELECT,
         _ => return None,
     })
@@ -107,6 +112,7 @@ key_table! {
     Backspace => "Backspace", Delete => "Delete", Insert => "Insert",
     Home => "Home", End => "End", PageUp => "PageUp", PageDown => "PageDown",
     ShiftLeft => "ShiftLeft", ShiftRight => "ShiftRight",
+    ControlLeft => "ControlLeft", ControlRight => "ControlRight",
     Minus => "Minus", Equal => "Equal",
     BracketLeft => "BracketLeft", BracketRight => "BracketRight",
     Backslash => "Backslash", Semicolon => "Semicolon", Quote => "Quote",
@@ -365,7 +371,7 @@ mod tests {
         input.on_key(KeyCode::ArrowLeft, true);
         assert_eq!(input.buttons(), button::LEFT);
 
-        input.on_key(KeyCode::KeyX, true);
+        input.on_key(KeyCode::Space, true);
         assert_eq!(input.buttons(), button::LEFT | button::A);
 
         input.on_key(KeyCode::ArrowLeft, false);

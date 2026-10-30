@@ -6595,6 +6595,76 @@ function POI.tick(s)
   pathfind_to(p.x, p.y, p.arrival, p.level, p.face)
 end
 
+-- ── Toby's compass, turns and stat checks ───────────────────────────────────
+-- Q says the way Link faces; F faces north; E and R turn left and right (a quarter turn: Link
+-- faces four ways where Doom turns freely); X turns him round. Turning is done by pressing the
+-- direction for a frame, which is how the game itself turns him. B, N, K and I are Toby's ammo,
+-- armour, key and item checks, read straight from the save data.
+TURN = { ORDER = { 0, 6, 2, 4 } } -- north, east, south, west: clockwise
+function TURN.say(text) say(text, { priority = "navigation", category = "on-demand" }) end
+
+function TURN.to(dir)
+  local s = prev
+  if s == nil or not in_play(s) then TURN.say("Not in play."); return end
+  local name = ({ [0] = "up", [2] = "down", [4] = "left", [6] = "right" })[dir]
+  input.hold(name, 1)
+  TURN.say("Facing " .. ((DIRS[dir] or {}).word or "north") .. ".")
+end
+
+function TURN.by(steps)
+  local s = prev
+  if s == nil or not in_play(s) then TURN.say("Not in play."); return end
+  local at = 1
+  for i, d in ipairs(TURN.ORDER) do if d == s.direction then at = i end end
+  TURN.to(TURN.ORDER[(at - 1 + steps) % 4 + 1])
+end
+
+on_command("compass", function()
+  local s = prev
+  if s == nil or not in_play(s) then TURN.say("Not in play."); return end
+  TURN.say("Facing " .. ((DIRS[s.direction] or {}).word or "north") .. ".")
+end)
+on_command("face_north", function() TURN.to(0) end)
+on_command("turn_left", function() TURN.by(-1) end)
+on_command("turn_right", function() TURN.by(1) end)
+on_command("quickturn", function()
+  sound.ui("misc/quickturn")
+  TURN.by(2)
+end)
+
+on_command("ammo", function()
+  local s = prev
+  if s == nil or s.max_health == 0 then TURN.say("No game state yet."); return end
+  local magic = mem.u8(0x7EF36E)
+  local m = magic >= 0x80 and "full" or (magic >= 0x40 and "over half" or (magic > 0 and "low" or "empty"))
+  TURN.say(string.format("%d rupees, %d bombs, %d arrows. Magic %s.",
+    s.rupees, mem.u8(0x7EF343), mem.u8(0x7EF377), m))
+end)
+
+on_command("armor", function()
+  local s = prev
+  if s == nil or s.max_health == 0 then TURN.say("No game state yet."); return end
+  local swords = { [0] = "No sword", "Fighter's sword", "Master sword", "Tempered sword", "Golden sword" }
+  local shields = { [0] = "no shield", "fighter's shield", "fire shield", "mirror shield" }
+  local mails = { [0] = "green mail", "blue mail", "red mail" }
+  local sw, sh, ma = mem.u8(0x7EF359), mem.u8(0x7EF35A), mem.u8(0x7EF35B)
+  TURN.say(string.format("%s, %s, %s.", swords[sw] or "A sword", shields[sh] or "a shield", mails[ma] or "mail"))
+end)
+
+on_command("keys", function()
+  local s = prev
+  if s == nil or not in_play(s) then TURN.say("Not in play."); return end
+  local k = mem.u8(0x7EF36F)
+  if s.module ~= 0x07 or k == 0xFF then TURN.say("No keys here."); return end
+  TURN.say(k == 1 and "1 small key." or string.format("%d small keys.", k))
+end)
+
+on_command("item", function()
+  local slot = mem.u8(PAUSE.ITEM)
+  local name = slot ~= 0 and PAUSE.name(slot) or nil
+  TURN.say(name and (name .. ".") or "No item.")
+end)
+
 on_command("proximity", function()
   WORLD.wind = not WORLD.wind
   say(WORLD.wind and "Proximity sound on." or "Proximity sound off.",

@@ -56,26 +56,35 @@ you have already configured. If it is not running, Beacon says so and plays on.
 
 ### Controls
 
-Game controls are fixed; everything else is an **action** and every action is
-rebindable, from the keyboard or a controller.
+The keys follow the [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod)
+for Doom wherever Toby has the same thing, so a player who knows Toby knows where things are.
+Game controls are fixed; everything else is an **action** and every action is rebindable, from
+the keyboard or a controller.
 
-| Game (fixed) | | Actions (default keys, rebindable) | |
+| Game (fixed) | | Toby's keys (rebindable) | |
 |---|---|---|---|
-| arrows | d-pad | c / e / h | scan / where am I / status |
-| z x a s | B A Y X | t / g | save state / load state |
-| q w | L R | n / b | next / previous save slot |
-| enter | start | p / f | pause / frame advance |
-| right shift | select | v / r | cycle verbosity / repeat last |
-| | | m | show/hide the plugin map |
-| | | k | open input configuration |
-| | | esc | quit |
+| WASD / arrows | d-pad | m | points-of-interest menu |
+| space | A (use, talk, lift) | v | scan the area |
+| ctrl | B (sword) | z | snap to the nearest enemy |
+| enter | Y (item) | q / f | say facing / face north |
+| . | start (item menu) | e / r / x | turn left / right / round |
+| , | X (world map) | h / b / n / k / i | health / ammo / armour / keys / item |
+| o / p | L / R | u / delete | coordinates / where am I |
+| right shift | select | ; / ' | quest progress / wall proximity sound |
+| | | f6 / f9 | save / load state |
+| | | esc | Beacon's menu |
+
+Beacon's own: `l` guide to the next quest step, `y` stop guiding, `t` read the text box, `-`
+sweep the room, `` ` `` show/hide the map, `=` cycle verbosity, `/` repeat last, `j` mute,
+`f7` / `f8` previous / next save slot, `f4` pause, `f10` frame advance, `f12` input
+configuration, `f11` quit.
 
 A gamepad works too, and both are live at once; the left stick doubles as a
 d-pad. Actions are reachable from the pad's spare buttons — by default the left
 stick button opens the input configuration, so a controller-only player can
 rebind everything without a keyboard.
 
-**Rebinding.** Press the input-configuration key (`k`, or the left stick button).
+**Rebinding.** Press the input-configuration key (`f12`, or the left stick button).
 The game pauses; use up/down to choose an action — each is spoken with its current
 binding — then press the key or button to assign it, delete to clear, escape to
 finish. Everything is announced, so it works without sight, and changes are saved

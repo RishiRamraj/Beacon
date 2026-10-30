@@ -222,7 +222,7 @@ pub struct CommandDecl {
 pub const STANDARD_COMMANDS: [&str; 3] = ["scan", "where", "status"];
 
 /// The most custom commands a plugin may declare, beyond the standard three.
-pub const MAX_CUSTOM_COMMANDS: usize = 10;
+pub const MAX_CUSTOM_COMMANDS: usize = 24;
 
 /// A plugin that does nothing, used when no plugin matches the ROM.
 ///

@@ -274,30 +274,33 @@ impl Keymap {
 impl Default for Keymap {
     /// The out-of-the-box bindings.
     ///
-    /// Chosen from the letter keys that are neither SNES buttons nor claimed by
-    /// screen readers (function keys and the number row are avoided). Every one
-    /// is rebindable; these are only a starting point. Plugin custom commands
-    /// are unbound by default, since only the plugin knows what they are.
+    /// Toby's keys where Toby has the same thing (V scan, Delete where, H health, F6 / F9
+    /// quick save and load, Escape the menu), and keys clear of the SNES buttons and of Toby's
+    /// own for the rest. Every one is rebindable; these are only a starting point. A plugin's
+    /// commands suggest their own keys in its manifest.
     fn default() -> Self {
         let mut bindings = BTreeMap::new();
         let mut bind = |k: &str, a: &str| {
             bindings.insert(k.to_string(), a.to_string());
         };
-        bind("KeyC", "command:scan");
-        bind("KeyE", "command:where");
+        bind("KeyV", "command:scan");
+        bind("Delete", "command:where");
         bind("KeyH", "command:status");
-        bind("KeyV", "cycle_verbosity");
-        bind("KeyR", "repeat_last");
-        bind("Escape", "quit");
-        bind("KeyT", "save_state");
-        bind("KeyG", "load_state");
-        bind("KeyN", "next_slot");
-        bind("KeyB", "prev_slot");
-        bind("KeyP", "pause");
+        bind("Equal", "cycle_verbosity");
+        bind("Slash", "repeat_last");
+        bind("F6", "save_state");
+        bind("F9", "load_state");
+        bind("F8", "next_slot");
+        bind("F7", "prev_slot");
+        bind("F4", "pause");
         bind("KeyJ", "mute");
-        bind("KeyF", "frame_advance");
+        bind("F10", "frame_advance");
         bind("Backquote", "toggle_map");
-        bind("KeyK", "bind");
+        bind("F12", "bind");
+        // Toby has no quit key (Doom's menu has it); out of the way, so it is never hit by
+        // accident. Also File, Exit in the menu.
+        bind("F11", "quit");
+        bind("Escape", "menu");
         bind("Tab", "menu");
 
         // Gamepad defaults, on the pad's extra buttons so a controller-only
@@ -530,16 +533,18 @@ mod tests {
     #[test]
     fn keymap_defaults_are_present_and_editable() {
         let mut k = Keymap::default();
-        assert_eq!(k.action_for("Escape"), Some("quit"));
-        assert_eq!(k.action_for("KeyF"), Some("frame_advance"));
+        // Toby's: Escape opens the menu, V scans.
+        assert_eq!(k.action_for("Escape"), Some("menu"));
+        assert_eq!(k.action_for("KeyV"), Some("command:scan"));
+        assert_eq!(k.action_for("F10"), Some("frame_advance"));
 
         // A rebind replaces the key's action; several keys can share an action.
         k.bind("KeyC", "command:custom1");
         assert_eq!(k.action_for("KeyC"), Some("command:custom1"));
-        k.bind("KeyO", "command:custom1");
+        k.bind("KeyG", "command:custom1");
         let mut keys = k.keys_for("command:custom1");
         keys.sort();
-        assert_eq!(keys, vec!["KeyC".to_string(), "KeyO".to_string()]);
+        assert_eq!(keys, vec!["KeyC".to_string(), "KeyG".to_string()]);
 
         k.unbind("KeyC");
         assert_eq!(k.action_for("KeyC"), None);
@@ -549,7 +554,7 @@ mod tests {
     fn absent_keys_table_yields_default_bindings() {
         // A settings file with no [keys] must still be fully bound.
         let s: Settings = toml::from_str("[speech]\nrate = 20\n").unwrap();
-        assert_eq!(s.keymap.action_for("Escape"), Some("quit"));
+        assert_eq!(s.keymap.action_for("Escape"), Some("menu"));
     }
 
     #[test]

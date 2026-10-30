@@ -98,6 +98,8 @@ pub fn render(name: &str, rate: u32) -> Option<Vec<f32>> {
         // --- Targeting.
         "weapons/lock" => s.square(1200.0, 0.025, 0.4),
 
+        "misc/quickturn" => s.chirp(300.0, 900.0, 0.12, 0.5),
+
         // --- Hits and kills. Beacon's own: Toby's hit markers are commercial games' sounds,
         // which it cannot use, so these are only ever synthesized.
         "beacon/hit" => mix(&s.click(0.02, 0.7, 5000.0), &s.square(880.0, 0.04, 0.35)),

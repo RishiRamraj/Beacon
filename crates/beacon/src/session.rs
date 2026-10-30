@@ -1411,10 +1411,11 @@ mod tests {
 
     #[test]
     fn game_inputs_are_recognised_by_name_across_devices() {
-        assert!(is_game_input_name("KeyX")); // SNES A
+        assert!(is_game_input_name("Space")); // SNES A
         assert!(is_game_input_name("ArrowUp"));
         assert!(is_game_input_name("Pad:South"));
-        assert!(!is_game_input_name("KeyD"));
+        assert!(is_game_input_name("KeyD")); // Toby's strafe right: moves
+        assert!(!is_game_input_name("KeyG"));
         assert!(!is_game_input_name("Pad:C"));
         assert!(!is_game_input_name("F5"));
     }
