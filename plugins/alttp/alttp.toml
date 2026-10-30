@@ -92,3 +92,8 @@ key   = "KeyL"                       # "L" for the lead/guide; rebindable
 id    = "poi"
 label = "Navigate to a point of interest"
 key   = "KeyM"                       # "M", as in Toby; the map is on backquote
+
+[[command]]
+id    = "proximity"
+label = "Toggle the wall proximity sound"
+key   = "Quote"                      # "'", Toby's own key for it

@@ -429,15 +429,10 @@ end
 -- the calmer classes sit at unity.
 local BEACON_KINDS = {
   enemy = { pitch = 1.0, range = 224, tremolo = 2.0, gain = 1.6 }, -- 120 BPM: danger
-  item  = { pitch = 2.0, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: a pickup
   npc   = { pitch = 1.5, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: safe to approach
   minor = { pitch = 0.5, range = 24,  tremolo = 0.0, gain = 1.0 }, -- steady, incidental
 }
 
--- A treasure chest is a fixed landmark, not a loose pickup you chase down, so it
--- sounds the item tone at a lower volume — present but not competing with the guide
--- and the pickups. Same pitch/pulse as an item so it still reads as "a good thing".
-local CHEST_BEACON = { pitch = 2.0, range = 224, tremolo = 1.0, gain = 0.5 }
 
 -- NPC types the guide leads Link to as a quest objective rather than ambient people
 -- to pass by. The navigation guide already homes on them, so also sounding the "safe
@@ -1505,17 +1500,6 @@ do
   HAZARD.PIT[0x20] = true
   for a = 0xB0, 0xBD do HAZARD.PIT[a] = true end
 end
--- A sharp, quick notification rather than a sustained hum: `ping` makes each cycle an
--- attack-decay strike instead of a swell, and BLIP frames at this tremolo is about one
--- strike, so facing a pit produces a single crisp blip. Being brief also separates it
--- from the enemy-weapon tone it used to sit next to in pitch — a one-shot and a
--- continuous drone cannot be confused however close their frequencies are.
--- Pitched above everything else in the vocabulary. The object tones run 0.7 to 2.0 and
--- the guide's sonar sits at 3.0-3.4; putting the hazard at 4.0 leaves it nothing to be
--- confused with, and high-and-sharp reads as a notification demanding attention where
--- low-and-slow reads as a thing sitting in the room.
-HAZARD.TONE = { pitch = 4.0, tremolo = 8.0, volume = 0.8 }
-HAZARD.BLIP = 8 -- frames it sounds for, about a sixth of a second
 
 -- The nearest pit within REACH tiles in the direction Link faces, as world pixels, or
 -- nil. Looking only at the tile immediately ahead gave about one frame of warning at
@@ -1543,32 +1527,32 @@ function HAZARD.pit_ahead(s)
   return nil
 end
 
+-- Where the drop-off tick is sounding from, relative to Link, or nil. Global so the tests and
+-- an agent can see it.
+hazard_at = nil
+HAZARD.EVERY = 9 -- frames between ticks: Toby's 5 tics
+
 function HAZARD.clear()
   HAZARD.facing = false
   HAZARD.ticks = 0
-  beacon.clear("hazard")
+  hazard_at = nil
 end
 
 function HAZARD.update(s)
   if s == nil or s.module ~= 0x07 then HAZARD.clear(); return end
   local ax, ay = HAZARD.pit_ahead(s)
   if ax == nil then HAZARD.clear(); return end
-  -- Fires on turning ONTO the pit, not for as long as he faces it: a warning about a
-  -- step he is about to take has said its piece once he has heard it, and holding the
-  -- tone would bury the enemy and guide tones under it while he edges along a ledge.
-  -- Facing away re-arms it, so every fresh approach gets its own blip.
+  -- Toby's drop-off detector: a rapid tick from the edge, for as long as one is ahead. The
+  -- first comes at once on turning toward it; the rest every EVERY frames.
+  hazard_at = { x = ax - s.x, y = ay - s.y }
   if not HAZARD.facing then
     HAZARD.facing = true
-    HAZARD.ticks = HAZARD.BLIP
+    HAZARD.ticks = 0
   end
-  if HAZARD.ticks > 0 then
-    HAZARD.ticks = HAZARD.ticks - 1
-    -- Positioned on the pit itself, so the blip pans toward it and its distance is
-    -- audible in the stereo offset rather than having to be described.
-    beacon.set("hazard", { x = ax - s.x, y = ay - s.y, pitch = HAZARD.TONE.pitch,
-      tremolo = HAZARD.TONE.tremolo, ping = true, volume = HAZARD.TONE.volume })
-  else
-    beacon.clear("hazard")
+  HAZARD.ticks = HAZARD.ticks - 1
+  if HAZARD.ticks <= 0 then
+    HAZARD.ticks = HAZARD.EVERY
+    sound.play("dropoff/beacon", { x = hazard_at.x, y = hazard_at.y, volume = 0.9 })
   end
 end
 
@@ -1914,11 +1898,13 @@ local OW_ASTAR_CAP = 512 * 512 -- node budget: the whole world, now the search i
 -- first time a route needs it: BUILD_ROWS rows a frame, so the build is never a hitch.
 -- The search itself runs in the host (nav.grid), which is what lets a route be re-planned
 -- from Link every few frames rather than kept until it has gone stale.
-OWGRID = { grid = {}, rows = {}, BUILD_ROWS = 16 }
+OWGRID = { grid = {}, rows = {}, failed = {}, BUILD_ROWS = 16 }
 
 -- The finished grid for world `w`, or nil while it is still being built (each call builds a
 -- little more).
 function OWGRID.get(w)
+  -- No ROM, no overworld to decode (the tests run without one).
+  if (rom.size or 0) == 0 or OWGRID.failed[w] then return nil end
   local g = OWGRID.grid[w]
   if g == nil then
     g = nav.grid(512, 512)
@@ -1926,10 +1912,19 @@ function OWGRID.get(w)
   end
   local y0 = OWGRID.rows[w]
   if y0 >= 512 then return g end
-  for ty = y0, math.min(511, y0 + OWGRID.BUILD_ROWS - 1) do
-    local row = {}
-    for tx = 0, 511 do row[tx + 1] = ow_walk(w, tx, ty) and "\1" or "\0" end
-    g:fill(0, ty, 512, 1, table.concat(row))
+  -- A ROM that does not decode as this plugin expects (a hack, a bad dump) must not take the
+  -- frame down with it: give up on the grid, and the router falls back to having none.
+  local ok, err = pcall(function()
+    for ty = y0, math.min(511, y0 + OWGRID.BUILD_ROWS - 1) do
+      local row = {}
+      for tx = 0, 511 do row[tx + 1] = ow_walk(w, tx, ty) and "\1" or "\0" end
+      g:fill(0, ty, 512, 1, table.concat(row))
+    end
+  end)
+  if not ok then
+    log("warn", "overworld grid: " .. tostring(err))
+    OWGRID.failed[w] = true
+    return nil
   end
   OWGRID.rows[w] = math.min(512, y0 + OWGRID.BUILD_ROWS)
   return OWGRID.rows[w] >= 512 and g or nil
@@ -3045,6 +3040,204 @@ function PUSH.tone(s)
   end
 end
 
+-- ── World cues, Toby's way ──────────────────────────────────────────────────
+-- Things in the world make their own sounds, from where they are, as Toby's beacons do — its
+-- own recordings, from the player's Toby install, or Beacon's stand-ins. Kept sparse by the
+-- same three means Toby uses: short falloffs, a range inside which a sound plays at all, and
+-- line of sight. Toby's distances are converted at Link's scale (a pixel is two Doom units).
+--   pickups   the item's category sound every 40 tics (69 frames), when in view
+--   chests    the same, with the armour sound, so a chest is told from a loose pickup
+--   markers   each its own Toby marker sound every 36 tics, in view, falling off 48-320 px
+--   exits     a continuous loop at the nearest exit, 32-72 px (Toby: 64-144 units)
+--   stairs    Toby's teleporter loop at the nearest stairs, 32-72 px
+--   locked    the locked-door loop at the nearest locked door, 48-104 px (96-208 units)
+--   doorways  one door sound on coming within 32 px, again a second later while there
+--   spikes    Toby's radiation clicks every 10 tics toward the nearest spike floor
+--   wind      optional, off by default as in Toby: the wall proximity "wind", four ways
+-- Fixed things come from the record of the current place (SEEN), refreshed every second, so
+-- nothing here scans the room per frame.
+WORLD = {
+  PICKUP_EVERY = 69, PICKUP_FIRST = 17, PICKUP_FAR = 600,
+  MARKER_EVERY = 62, MARKER_NEAR = 48, MARKER_FAR = 320,
+  EXIT_NEAR = 32, EXIT_FAR = 72,
+  LOCKED_NEAR = 48, LOCKED_FAR = 104,
+  DOOR_REACH = 32, DOOR_EVERY = 60, DOOR_NEAR = 24, DOOR_FAR = 80,
+  SPIKE_EVERY = 17, SPIKE_NEAR = 32, SPIKE_FAR = 128, SPIKE_SCAN = 16,
+  SPIKE_TILE = 0x0D,
+  WIND_REACH = 150,
+  wind = false,      -- the proximity "wind", toggled by the proximity command
+  timers = {},       -- per-source frames until its next sound
+  live = {},
+  LOOPS = { "exit", "stairs", "locked", "wind_n", "wind_s", "wind_e", "wind_w" },
+}
+
+-- 1 within `near`, 0 beyond `far`, linear between: GZDoom's `$rolloff linear`.
+function WORLD.linear(d, near, far)
+  if d <= near then return 1 elseif d >= far then return 0 end
+  return 1 - (d - near) / (far - near)
+end
+
+-- Whether source `id` sounds this frame: first after `first` frames, then every `period`.
+function WORLD.due(id, period, first)
+  WORLD.live[id] = true
+  local t = WORLD.timers[id]
+  if t == nil then t = first end
+  t = t - 1
+  if t <= 0 then WORLD.timers[id] = period; return true end
+  WORLD.timers[id] = t
+  return false
+end
+
+-- Toby's universal pickup sound for an item, by what it is.
+function WORLD.pickup_sound(name)
+  local n = name:lower()
+  if n:find("key") then return "toby/universalbeacons/key" end
+  if n:find("heart") or n:find("fairy") then return "toby/universalbeacons/health" end
+  if n:find("rupee") or n:find("bomb") or n:find("arrow") or n:find("magic") then
+    return "toby/universalbeacons/ammo"
+  end
+  return "toby/universalbeacons/weapon"
+end
+
+function WORLD.silence()
+  for _, id in ipairs(WORLD.LOOPS) do sound.stop(id) end
+  WORLD.timers, WORLD.live = {}, {}
+end
+
+-- The nearest of the current place's remembered things called `name`, from Link's centre,
+-- as (dx, dy, dist) or nil.
+function WORLD.nearest_thing(things, name, cx, cy)
+  local best
+  for _, t in ipairs(things) do
+    if t.name == name then
+      local dx, dy = t.x - cx, t.y - cy
+      local d = math.abs(dx) + math.abs(dy)
+      if best == nil or d < best[3] then best = { dx, dy, d } end
+    end
+  end
+  if best then return best[1], best[2], best[3] end
+end
+
+function WORLD.update(s, list, hushed)
+  -- What is on this place, before reading it. Cheap except on arrival and once a second.
+  SEEN.tick(s)
+  WORLD.live = {}
+  local cx, cy = s.x + 8, s.y + 8
+  local function seen(dx, dy) return not sight_blocked(s, s.x, s.y, s.x + dx, s.y + dy) end
+
+  -- Loose pickups.
+  for _, sp in ipairs(list) do
+    if not is_enemy(sp) and REF.item_types[sp.kind] and on_screen(sp.dx, sp.dy) then
+      if WORLD.due("pickup" .. sp.slot, WORLD.PICKUP_EVERY, WORLD.PICKUP_FIRST)
+          and not hushed and seen(sp.dx, sp.dy) then
+        sound.play(WORLD.pickup_sound(sprite_name(sp.kind)),
+          { x = sp.dx, y = sp.dy, volume = math.max(0.3, 1 - sp.dist / WORLD.PICKUP_FAR) })
+      end
+    end
+  end
+
+  local place = SEEN.places[SEEN.key_of(s)]
+  local things = place and place.things or {}
+
+  -- Chests, by the chest itself: a little above the spot Link opens it from.
+  for i, t in ipairs(things) do
+    if t.name == "Chest" then
+      local dx, dy = t.x - cx, t.y - 12 - cy
+      if on_screen(dx, dy) and WORLD.due("chest" .. t.x .. "," .. t.y, WORLD.PICKUP_EVERY, WORLD.PICKUP_FIRST)
+          and not hushed and seen(dx, dy) then
+        sound.play("toby/universalbeacons/armor",
+          { x = dx, y = dy, volume = math.max(0.3, 1 - (math.abs(dx) + math.abs(dy)) / WORLD.PICKUP_FAR) })
+      end
+    end
+  end
+
+  -- Exits, stairs and locked doors: a loop at the nearest, in range.
+  local function loop(id, name, sname, near, far)
+    local dx, dy, d = WORLD.nearest_thing(things, name, cx, cy)
+    if hushed or d == nil or d >= far then sound.stop(id); return end
+    sound.loop(id, sname, { x = dx, y = dy, volume = WORLD.linear(d, near, far) })
+  end
+  loop("exit", "Exit", "amb/exit1", WORLD.EXIT_NEAR, WORLD.EXIT_FAR)
+  local sx, sy, sd = WORLD.nearest_thing(things, "Stairs up", cx, cy)
+  local tx, ty, td = WORLD.nearest_thing(things, "Stairs down", cx, cy)
+  if td ~= nil and (sd == nil or td < sd) then sx, sy, sd = tx, ty, td end
+  if hushed or sd == nil or sd >= WORLD.EXIT_FAR then sound.stop("stairs")
+  else sound.loop("stairs", "amb/exit2", { x = sx, y = sy, volume = WORLD.linear(sd, WORLD.EXIT_NEAR, WORLD.EXIT_FAR) }) end
+  loop("locked", "Locked door", "amb/rdoor", WORLD.LOCKED_NEAR, WORLD.LOCKED_FAR)
+
+  -- Doorways: a door sound on coming near one, then a second apart while still there.
+  local dx, dy, d = WORLD.nearest_thing(things, "Doorway", cx, cy)
+  if d ~= nil and d < WORLD.DOOR_REACH then
+    if WORLD.due("door", WORLD.DOOR_EVERY, 0) and not hushed then
+      sound.play("amb/door2", { x = dx, y = dy, volume = WORLD.linear(d, WORLD.DOOR_NEAR, WORLD.DOOR_FAR) })
+    end
+  end
+
+  -- The player's markers, each its own sound, while in this area and in view.
+  for k = 1, 10 do
+    local m = markers[k]
+    if m ~= nil and m.area == area_id(s) then
+      local mdx, mdy = m.tx * 8 + 4 - cx, m.ty * 8 + 4 - cy
+      local md = math.abs(mdx) + math.abs(mdy)
+      if md < WORLD.MARKER_FAR and WORLD.due("marker" .. k, WORLD.MARKER_EVERY, 0)
+          and not hushed and seen(mdx, mdy) then
+        sound.play("marker/beacon" .. k,
+          { x = mdx, y = mdy, volume = WORLD.linear(md, WORLD.MARKER_NEAR, WORLD.MARKER_FAR) })
+      end
+    end
+  end
+
+  -- Spike floors: clicks toward the nearest, silent while standing on one.
+  if WORLD.due("spikes", WORLD.SPIKE_EVERY, 0) and not hushed then
+    local fx, fy = foot(s)
+    if tile_attr_at(s, fx, fy) ~= WORLD.SPIKE_TILE then
+      local best
+      local R = WORLD.SPIKE_SCAN
+      for oy = -R, R do
+        for ox = -R, R do
+          local px, py = fx + ox * 8, fy + oy * 8
+          if tile_attr_at(s, px, py) == WORLD.SPIKE_TILE then
+            local dd = math.abs(ox) + math.abs(oy)
+            if best == nil or dd < best[3] then best = { px - cx, py - cy, dd } end
+          end
+        end
+      end
+      if best then
+        local pd = math.abs(best[1]) + math.abs(best[2])
+        if pd < WORLD.SPIKE_FAR then
+          sound.play("toby/hurtfloordetector/rad",
+            { x = best[1], y = best[2], volume = WORLD.linear(pd, WORLD.SPIKE_NEAR, WORLD.SPIKE_FAR) })
+        end
+      end
+    end
+  end
+
+  -- The proximity "wind": in each direction, at the first wall, pitched by its distance.
+  if WORLD.wind and not hushed then
+    local fx, fy = foot(s)
+    for _, w in ipairs({ { "wind_n", 0, -1 }, { "wind_s", 0, 1 }, { "wind_e", 1, 0 }, { "wind_w", -1, 0 } }) do
+      local hit
+      for step = 1, WORLD.WIND_REACH // 8 do
+        local px, py = fx + w[2] * step * 8, fy + w[3] * step * 8
+        if not tile_passable(s, px >> 3, py >> 3) then hit = step * 8; break end
+      end
+      if hit then
+        sound.loop(w[1], "toby/proximitydetector/wind", { x = w[2] * hit, y = w[3] * hit,
+          pitch = 1 + 3 * hit / WORLD.WIND_REACH, volume = 0.15 + 0.6 * (1 - hit / WORLD.WIND_REACH) })
+      else
+        sound.stop(w[1])
+      end
+    end
+  else
+    for _, id in ipairs({ "wind_n", "wind_s", "wind_e", "wind_w" }) do sound.stop(id) end
+  end
+
+  -- Forget the timers of sources gone from view, so each comes back with its first sound.
+  for id in pairs(WORLD.timers) do
+    if not WORLD.live[id] then WORLD.timers[id] = nil end
+  end
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -3202,17 +3395,8 @@ function on_frame(frame)
       end
     end
 
-    -- Treasure chests are tiles, not sprites, but they are just another beacon
-    -- source: sound the nearest unopened chest with the item tone through the same
-    -- body. An opened chest changes tile-type and no longer matches, so the tone
-    -- drops on its own the moment it is looted; hushed in combat like the pickups.
-    local chest = nearest_chest_tile(now)
-    if chest then
-      local dx, dy = chest[1] - now.x, chest[2] - now.y
-      sound_beacon(now, "chest", dx, dy, math.abs(dx) + math.abs(dy), CHEST_BEACON, combat_engaged)
-    else
-      beacon.clear("chest")
-    end
+    -- Pickups, chests, exits, stairs, doors, markers, spikes: Toby's sounds from the world.
+    WORLD.update(now, list, combat_engaged)
 
     -- The enemy-weapon tone, on the nearest swinging weapon (the flail ball today).
     -- Never hushed — it is the acute threat, and its own arc is what has to be dodged.
@@ -3231,9 +3415,9 @@ function on_frame(frame)
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
       beacon.clear(name)
     end
-    beacon.clear("chest")
     beacon.clear("weapon")
     beacon.clear("push")
+    WORLD.silence()
   end
 
   -- Remember where Link has been, for the explore command.
@@ -3250,8 +3434,7 @@ function on_frame(frame)
   STUCK.update(now) -- pressing into a wall, which FACE has no name for
   HAZARD.update(now) -- a pit in front of Link, guide or no guide
   room_route_update(now)
-  SEEN.tick(now) -- what is on this room or screen, for the menu's lists
-  POI.tick(now)  -- a remembered target, once Link is in its room
+  POI.tick(now)  -- (the place itself is recorded by WORLD.update, in the beacon pass)  -- a remembered target, once Link is in its room
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
   ow_route_update(now)
@@ -4933,6 +5116,27 @@ STUCK.AGAIN = 120
 STUCK.SHOVING = 120
 -- $00F0 is joypad1H_last, the directions actually HELD; $00F4 next to it is only the ones
 -- newly pressed, which is what the menus want and the opposite of what this does.
+-- Toby's wall bump: walking into something sounds where Link meets it, a moment after the
+-- push starts and again while it goes on. Against a locked door with no key it is Toby's
+-- "denied" instead, once — the door is the thing in the way, and it wants a key.
+STUCK.BUMP_AFTER = 4   -- frames of pressing without moving before the first bump
+STUCK.BUMP_EVERY = 20
+function STUCK.bump(s, dpad)
+  local f = STUCK.frames
+  if f < STUCK.BUMP_AFTER or (f - STUCK.BUMP_AFTER) % STUCK.BUMP_EVERY ~= 0 then return end
+  -- The H byte's direction bits: 8 up, 4 down, 2 left, 1 right.
+  local dx = ((dpad & 1) ~= 0 and 1 or 0) - ((dpad & 2) ~= 0 and 1 or 0)
+  local dy = ((dpad & 4) ~= 0 and 1 or 0) - ((dpad & 8) ~= 0 and 1 or 0)
+  local fx, fy = foot(s)
+  local ax, ay = fx + dx * 8, fy + dy * 8
+  local attr = tile_attr_at(s, ax, ay)
+  if s.module == 0x07 and attr ~= nil and attr >= 0xF0 and mem.u8(0x7EF36F) == 0 then
+    if f == STUCK.BUMP_AFTER then sound.ui("door/deniedred") end
+    return
+  end
+  sound.play("misc/wallhit", { x = dx * 8, y = dy * 8, volume = 0.8 })
+end
+
 STUCK.HELD = 0x7E00F0
 STUCK.DPAD = 0x0F -- kJoypadH_AnyDir: the four direction bits of the H byte
 
@@ -4966,6 +5170,7 @@ function STUCK.update(s)
   end
 
   STUCK.frames = STUCK.frames + 1
+  STUCK.bump(s, dpad)
   local wait = STUCK.shoving(s) and STUCK.SHOVING or STUCK.FRAMES
   local due = (STUCK.said == nil and STUCK.frames >= wait)
     or (STUCK.said ~= nil and STUCK.frames - STUCK.said >= STUCK.AGAIN)
@@ -6237,6 +6442,12 @@ function POI.tick(s)
   room_route_stop()
   pathfind_to(p.x, p.y, p.arrival, p.level, p.face)
 end
+
+on_command("proximity", function()
+  WORLD.wind = not WORLD.wind
+  say(WORLD.wind and "Proximity sound on." or "Proximity sound off.",
+      { priority = "navigation", category = "on-demand" })
+end)
 
 on_command("poi", function()
   local s = prev

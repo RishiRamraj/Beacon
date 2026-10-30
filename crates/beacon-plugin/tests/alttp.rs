@@ -322,20 +322,20 @@ fn frame_with_sprite(kind: u8, dx: u16) -> Vec<u8> {
 
 #[test]
 fn alttp_an_item_gets_its_own_tone_and_carries_across_the_screen() {
+    // Toby's universal pickup beacon: the item's category sound, from the item, every 40
+    // tics while it is in view. A heart is health.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
     // A Heart (type 216) 90 pixels east — an item, not an enemy.
     let ram = frame_with_sprite(216, 90);
-    plugin.on_frame(&ram, 0);
-    plugin.on_frame(&ram, 1);
-
-    let b = plugin.beacons();
-    let item = b.iter().find(|b| b.id == "item").expect("an item beacon");
-    assert_eq!(item.pitch, 2.0, "items sound at their own pitch");
-    assert!(item.dx > 0.0, "panned east toward the item");
+    let heard = sounds_over(&mut plugin, &ram, 0, 160);
+    let hearts: Vec<&(String, f32, f32)> =
+        heard.iter().filter(|(n, _, _)| n == "toby/universalbeacons/health").collect();
+    assert!(hearts.len() >= 2, "the health sound, repeating: {heard:?}");
+    assert!(hearts[0].1 > 0.0, "from the east, where the item is");
     assert!(
-        !b.iter().any(|b| b.id == "enemy"),
+        !plugin.beacons().iter().any(|b| b.id == "enemy"),
         "an item is not an enemy tone"
     );
 }
@@ -451,29 +451,21 @@ fn alttp_an_unopened_chest_sounds_like_an_item_until_it_is_opened() {
         ram
     };
 
-    // Unopened: a "chest" beacon, panned east, at the item pitch, audible.
-    plugin.on_frame(&frame(false), 0);
-    plugin.on_frame(&frame(false), 1);
-    let b = plugin.beacons();
-    let chest = b
+    // Unopened: Toby's pickup beacon with the armour sound, from the east.
+    let heard = sounds_over(&mut plugin, &frame(false), 0, 30);
+    let chest = heard
         .iter()
-        .find(|b| b.id == "chest")
-        .expect("a beacon on the unopened chest");
-    assert!(chest.dx > 0.0, "panned east toward the chest");
-    assert!(
-        chest.volume > 0.0 && chest.volume <= 1.0,
-        "audible volume, got {}",
-        chest.volume
-    );
-    assert_eq!(chest.pitch, 2.0, "sounds at the item pitch");
+        .find(|(n, _, _)| n == "toby/universalbeacons/armor")
+        .unwrap_or_else(|| panic!("the chest sounds: {heard:?}"));
+    assert!(chest.1 > 0.0, "from the east, toward the chest");
 
-    // Opened: the tile-type changed, so the chest no longer matches and its
-    // beacon goes quiet.
-    plugin.on_frame(&frame(true), 2);
-    plugin.on_frame(&frame(true), 3);
+    // Opened: the tile changes, the place is looked at again within a second, and the chest
+    // falls silent.
+    sounds_over(&mut plugin, &frame(true), 30, 70);
+    let after = sounds_over(&mut plugin, &frame(true), 100, 140);
     assert!(
-        !plugin.beacons().iter().any(|b| b.id == "chest"),
-        "no chest beacon once it is opened"
+        !after.iter().any(|(n, _, _)| n == "toby/universalbeacons/armor"),
+        "no chest sound once it is opened: {after:?}"
     );
 }
 
@@ -526,6 +518,44 @@ fn dungeon_frame(link: (u16, u16), door: (u16, u16), walls: &[(u16, u16)]) -> Ve
 /// The route guide as a beacon-shaped reading: where Toby's carrot sounds from, how loud,
 /// and its "pitch" — 3.5 when Link is facing it (the fast beacon), 2.9 when not — so the
 /// tests that once read the guide tone read the carrot the same way.
+/// The names of the sounds the plugin played since the last call, with their offsets.
+fn played(plugin: &mut LuaPlugin) -> Vec<(String, f32, f32)> {
+    plugin
+        .take_sounds()
+        .into_iter()
+        .filter_map(|c| match c {
+            SoundCmd::Play { name, dx, dy, .. } => Some((name, dx, dy)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Runs `frames` frames of `ram` from `start`, returning every sound played meanwhile.
+fn sounds_over(plugin: &mut LuaPlugin, ram: &[u8], start: u64, frames: u64) -> Vec<(String, f32, f32)> {
+    let mut out = Vec::new();
+    for f in start..start + frames {
+        plugin.on_frame(ram, f);
+        out.extend(played(plugin));
+    }
+    out
+}
+
+/// Where Toby's drop-off tick is sounding from, relative to Link, if it is.
+fn hazard(plugin: &mut LuaPlugin) -> Option<(f32, f32)> {
+    let ram = vec![0u8; 128 * 1024];
+    let r = plugin
+        .eval(
+            "if hazard_at == nil then return 'nil' end return string.format('%f,%f', hazard_at.x, hazard_at.y)",
+            &ram,
+        )
+        .unwrap();
+    if r == "nil" {
+        return None;
+    }
+    let mut it = r.split(',').map(|v| v.parse::<f32>().unwrap());
+    Some((it.next().unwrap(), it.next().unwrap()))
+}
+
 fn path_beacon(plugin: &mut LuaPlugin) -> Option<BeaconState> {
     let ram = vec![0u8; 128 * 1024];
     let reading = plugin
@@ -594,14 +624,15 @@ fn alttp_in_combat_the_guide_ducks_and_only_the_enemy_sounds() {
     let calm_vol = path_beacon(&mut plugin)
         .expect("the guide sounds when clear")
         .volume;
+    let clear = sounds_over(&mut plugin, &calm, 100, 30);
     assert!(
-        plugin.beacons().iter().any(|b| b.id == "item"),
-        "the item sounds when clear"
+        clear.iter().any(|(n, _, _)| n.starts_with("toby/universalbeacons/")),
+        "the item sounds when clear: {clear:?}"
     );
 
     // Enemy steps into striking range: the guide ducks (still present, quieter), the
     // item goes silent, and the enemy sounds.
-    plugin.on_frame(&with_enemy(true), 2);
+    let fight = sounds_over(&mut plugin, &with_enemy(true), 200, 140);
     let ids: Vec<String> = plugin.beacons().iter().map(|b| b.id.clone()).collect();
     let ducked = path_beacon(&mut plugin).expect("the guide keeps guiding, ducked, in combat");
     assert!(
@@ -610,8 +641,8 @@ fn alttp_in_combat_the_guide_ducks_and_only_the_enemy_sounds() {
         ducked.volume
     );
     assert!(
-        !ids.contains(&"item".to_string()),
-        "item hushes in combat: {ids:?}"
+        !fight.iter().any(|(n, _, _)| n.starts_with("toby/universalbeacons/")),
+        "the item hushes in combat: {fight:?}"
     );
     assert!(
         ids.contains(&"enemy".to_string()),
@@ -2963,53 +2994,27 @@ fn facing_frame(link: (u16, u16), dir: u8, tiles: &[(u16, u16, u8)]) -> Vec<u8> 
 }
 
 #[test]
-fn alttp_facing_a_pit_blips_once_and_says_nothing() {
-    // A sharp quick notification, not a word and not a drone: it fires on turning onto
-    // the pit, pans to say which way the edge is, and stops, so it does not bury the
-    // enemy and guide tones while Link edges along a ledge.
+fn alttp_facing_a_pit_ticks_tobys_drop_off_and_says_nothing() {
+    // Toby's drop-off detector: a rapid tick from the edge for as long as one is ahead, not
+    // a word, and positioned on the pit so its direction is heard rather than described.
     let r = Registry::builtin();
     let pit_at = faced_tile((20, 20), 2);
     let ram = facing_frame((20, 20), 2, &[(pit_at.0, pit_at.1, 0x20)]);
     let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     p.on_frame(&ram, 0);
     let out = p.on_frame(&ram, 1);
-
     assert!(
         !out.iter().any(|i| i.text.to_lowercase().contains("pit")),
         "nothing is spoken: {:?}",
         out.iter().map(|i| &i.text).collect::<Vec<_>>()
     );
-    let b = p.beacons();
-    let hazard = b
-        .iter()
-        .find(|b| b.id == "hazard")
-        .expect("a hazard tone sounds");
-    assert!(
-        hazard.ping,
-        "a sharp attack-decay strike, not a swell: {hazard:?}"
-    );
-    assert!(hazard.tremolo >= 6.0, "and a quick one: {hazard:?}");
-    // Above every object tone (0.7 to 2.0) and above the guide's sonar (2.4 to 3.5), so
-    // there is nothing in the vocabulary it can be mistaken for.
-    assert!(
-        hazard.pitch > 3.5,
-        "pitched clear of everything else: {hazard:?}"
-    );
-    assert!(
-        hazard.dy > 0.0,
-        "panned south, where the pit is: {hazard:?}"
-    );
-
-    // And it stops on its own while Link is still facing the pit — the property a
-    // sustained tone could not have, and the reason it does not bury the other tones
-    // while he edges along a ledge.
-    for f in 2..12 {
-        p.on_frame(&ram, f);
-    }
-    assert!(
-        !p.beacons().iter().any(|b| b.id == "hazard"),
-        "the blip is brief: it does not hold while he keeps facing it"
-    );
+    let (_, dy) = hazard(&mut p).expect("the drop-off sounds");
+    assert!(dy > 0.0, "from the south, where the pit is");
+    let ticks = sounds_over(&mut p, &ram, 2, 40)
+        .into_iter()
+        .filter(|(n, _, _)| n == "dropoff/beacon")
+        .count();
+    assert!(ticks >= 4, "it keeps ticking while he faces it: {ticks} in 40 frames");
 }
 
 #[test]
@@ -3023,18 +3028,18 @@ fn alttp_turning_away_from_a_pit_stops_the_tone_and_facing_back_starts_it() {
     p.on_frame(&pit, 0);
     p.on_frame(&pit, 1);
     assert!(
-        p.beacons().iter().any(|b| b.id == "hazard"),
+        hazard(&mut p).is_some(),
         "facing it: sounding"
     );
 
     p.on_frame(&away, 2);
     assert!(
-        !p.beacons().iter().any(|b| b.id == "hazard"),
+        !hazard(&mut p).is_some(),
         "facing open ground, the tone stops"
     );
     p.on_frame(&pit, 3);
     assert!(
-        p.beacons().iter().any(|b| b.id == "hazard"),
+        hazard(&mut p).is_some(),
         "turning back onto it sounds again: it is about the step he is about to take"
     );
 }
@@ -3054,7 +3059,7 @@ fn alttp_the_pit_tone_covers_the_dungeon_hole_variants_but_not_the_overworld() {
         let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
         p.on_frame(&ram, 0);
         p.on_frame(&ram, 1);
-        p.beacons().iter().any(|b| b.id == "hazard")
+        hazard(&mut p).is_some()
     };
 
     for attr in [0x20u8, 0xB0, 0xBD] {
@@ -3823,7 +3828,7 @@ fn alttp_a_pit_is_flagged_from_several_tiles_off_but_not_through_a_wall() {
         let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
         p.on_frame(&ram, 0);
         p.on_frame(&ram, 1);
-        p.beacons().iter().any(|b| b.id == "hazard")
+        hazard(&mut p).is_some()
     };
 
     assert!(sounds(1, None), "a pit one tile ahead sounds");
@@ -3848,11 +3853,7 @@ fn alttp_the_blip_pans_further_the_further_off_the_pit_is() {
         let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
         p.on_frame(&ram, 0);
         p.on_frame(&ram, 1);
-        p.beacons()
-            .iter()
-            .find(|b| b.id == "hazard")
-            .expect("sounding")
-            .dx
+        hazard(&mut p).expect("sounding").0
     };
     assert!(offset(4) > offset(1), "further pit, wider offset");
 }
@@ -7574,4 +7575,82 @@ fn alttp_the_menu_remembers_what_was_seen_in_other_rooms() {
     plugin.menu_chosen(chest.id.as_deref().unwrap(), &b);
     let routed = plugin.eval("return tostring(route_room)", &b).unwrap();
     assert_eq!(routed, format!("{}", 0x72), "routing to the chest's room");
+}
+
+#[test]
+fn alttp_the_world_makes_tobys_sounds() {
+    let r = Registry::builtin();
+    let loops = |p: &mut LuaPlugin| -> Vec<(String, String)> {
+        p.take_sounds()
+            .into_iter()
+            .filter_map(|c| match c {
+                SoundCmd::Loop { id, name, .. } => Some((id, name)),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // An exit three tiles east: Toby's exit loop, from the nearest exit, in range.
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut ram = dungeon_frame((20, 20), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E005D, 0x00);
+        set(0x7F2000 + 21 * 64 + 24, 0x8E); // beside his feet, three tiles east
+    }
+    p.on_frame(&ram, 0);
+    p.on_frame(&ram, 1);
+    let l = loops(&mut p);
+    assert!(
+        l.iter().any(|(id, name)| id == "exit" && name == "amb/exit1"),
+        "the exit loops: {l:?}"
+    );
+
+    // Pressing east into a wall: Toby's bump, from the wall's side.
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut wall = dungeon_frame((20, 20), (0, 0), &[(22, 21), (22, 22), (22, 20)]);
+    {
+        let mut set = |addr: u32, v: u8| wall[wram_offset(addr).unwrap()] = v;
+        set(0x7E005D, 0x00);
+        set(0x7E002F, 6);
+        set(0x7E00F0, 0x01); // holding right
+    }
+    let heard = sounds_over(&mut p, &wall, 0, 12);
+    let bump = heard
+        .iter()
+        .find(|(n, _, _)| n == "misc/wallhit")
+        .unwrap_or_else(|| panic!("a bump: {heard:?}"));
+    assert!(bump.1 > 0.0, "from the east, where the wall is");
+
+    // The same push into a locked door with no key: Toby's "denied" instead.
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut door = dungeon_frame((20, 20), (0, 0), &[]);
+    {
+        let mut set = |addr: u32, v: u8| door[wram_offset(addr).unwrap()] = v;
+        set(0x7E005D, 0x00);
+        set(0x7E002F, 6);
+        set(0x7E00F0, 0x01);
+        for y in 19..24u32 {
+            set(0x7F2000 + y * 64 + 22, 0xF8);
+        }
+    }
+    let heard = sounds_over(&mut p, &door, 0, 12);
+    assert!(heard.iter().any(|(n, _, _)| n == "door/deniedred"), "denied: {heard:?}");
+    assert!(!heard.iter().any(|(n, _, _)| n == "misc/wallhit"), "and not a plain bump");
+
+    // The proximity wind: off by default, on with its command, four ways.
+    let mut p = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let column: Vec<(u16, u16)> = (16..28).map(|y| (26u16, y)).collect();
+    let mut room = dungeon_frame((20, 20), (0, 0), &column);
+    room[wram_offset(0x7E005D).unwrap()] = 0;
+    p.on_frame(&room, 0);
+    p.on_frame(&room, 1);
+    assert!(!loops(&mut p).iter().any(|(id, _)| id.starts_with("wind")), "off by default");
+    p.command("proximity", &room);
+    p.on_frame(&room, 2);
+    let l = loops(&mut p);
+    assert!(
+        l.iter().any(|(id, name)| id == "wind_e" && name == "toby/proximitydetector/wind"),
+        "the wind from the wall to the east: {l:?}"
+    );
 }
