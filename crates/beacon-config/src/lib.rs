@@ -29,6 +29,7 @@ pub struct Settings {
     pub braille: Braille,
     pub beacons: Beacons,
     pub audio: AudioSettings,
+    pub sounds: Sounds,
     pub video: Video,
     /// Key bindings. Serialized as `[keys]`; the field is `keymap` to avoid
     /// colliding with [`Settings::keys`], the list of scalar setting names.
@@ -193,6 +194,27 @@ impl Default for AudioSettings {
         // Three frames. A frame costs well under half its 16.7 ms on modest hardware, so
         // this leaves room for a slow one without a delay a player can feel.
         AudioSettings { buffer_ms: 50 }
+    }
+}
+
+/// Recorded navigation sounds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sounds {
+    /// A Toby Accessibility Mod install to take sounds from: its git checkout, or an
+    /// unpacked `.pk3`. Empty, the default, uses Beacon's synthesized stand-ins. Nothing of
+    /// Toby's ships with Beacon, so its sounds come only from the player's own copy.
+    pub dir: String,
+    /// Loudness of the recorded cues, 0 to 1, independent of the synthesized beacon tones.
+    pub volume: f32,
+}
+
+impl Default for Sounds {
+    fn default() -> Self {
+        Sounds {
+            dir: String::new(),
+            volume: 0.8,
+        }
     }
 }
 
@@ -395,6 +417,8 @@ impl Settings {
             "beacons.volume_min",
             "beacons.music_duck",
             "audio.buffer_ms",
+            "sounds.dir",
+            "sounds.volume",
         ]
     }
 
@@ -419,6 +443,8 @@ impl Settings {
             "beacons.volume_min" => self.beacons.volume_min.to_string(),
             "beacons.music_duck" => self.beacons.music_duck.to_string(),
             "audio.buffer_ms" => self.audio.buffer_ms.to_string(),
+            "sounds.dir" => self.sounds.dir.clone(),
+            "sounds.volume" => self.sounds.volume.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
         })
     }
@@ -470,6 +496,8 @@ impl Settings {
                 self.beacons.music_duck = parse::<f32>(key, value)?.clamp(0.0, 1.0)
             }
             "audio.buffer_ms" => self.audio.buffer_ms = parse::<u32>(key, value)?.clamp(20, 500),
+            "sounds.dir" => self.sounds.dir = value.to_string(),
+            "sounds.volume" => self.sounds.volume = parse::<f32>(key, value)?.clamp(0.0, 1.0),
             other => return Err(Error::UnknownKey(other.to_string())),
         }
         Ok(())

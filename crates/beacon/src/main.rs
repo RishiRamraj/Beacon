@@ -15,7 +15,10 @@ mod menu;
 mod native;
 mod rom;
 mod session;
+mod soundbank;
 mod state;
+mod synth;
+mod voices;
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -235,6 +238,8 @@ fn run_headless(
         emu.drain_audio(&mut audio);
 
         let intents = plugin.on_frame(emu.main_ram()?, n);
+        // No audio device headless: the plugin's sounds have nowhere to go.
+        let _ = plugin.take_sounds();
         if !intents.is_empty() {
             // Time from the frame counter, not the clock, so a replay of the
             // same inputs arbitrates identically.

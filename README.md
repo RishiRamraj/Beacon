@@ -183,6 +183,10 @@ music_duck = 0.5   # 0 to 1, how far game audio ducks under a beacon
 
 [audio]
 buffer_ms = 50     # 20 to 500, delay before game sound and tones are heard; raise if it crackles
+
+[sounds]
+dir = ""         # your Toby Accessibility Mod folder, for its sounds; empty = Beacon's own
+volume = 0.8       # 0 to 1, loudness of the recorded cues
 ```
 
 ## Plugins

@@ -100,6 +100,46 @@ pub trait Plugin {
     fn beacons(&self) -> Vec<BeaconState> {
         Vec::new()
     }
+
+    /// Takes the sound commands the plugin issued since the last call — recorded sounds
+    /// it asked to play, loop or stop. The host owns the sounds themselves (a bank of named
+    /// samples, with a synthesized stand-in for any it cannot find) and renders them; the
+    /// plugin only names them and says where.
+    fn take_sounds(&mut self) -> Vec<SoundCmd> {
+        Vec::new()
+    }
+}
+
+/// A plugin's request to the host's sound engine.
+///
+/// Sounds are named the way Toby's SNDINFO names them (`"pathfinder/nodebeacon"`), so the
+/// host can find them in a Toby install or fall back to a synthesized stand-in. Offsets and
+/// volume follow the [`BeaconState`] convention: `dx`/`dy` are the plugin's units, used for
+/// direction only, and the plugin sets `volume` (0 to 1) from distance itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SoundCmd {
+    /// Plays a sound once. `positional` is false for an interface sound, heard centred
+    /// rather than from a place in the world.
+    Play {
+        name: String,
+        dx: f32,
+        dy: f32,
+        volume: f32,
+        pitch: f32,
+        positional: bool,
+    },
+    /// Starts a looping sound under `id`, or updates it if already running. A different
+    /// `name` for a running id restarts it with the new sound.
+    Loop {
+        id: String,
+        name: String,
+        dx: f32,
+        dy: f32,
+        volume: f32,
+        pitch: f32,
+    },
+    /// Stops the loop under `id`. Stopping one that is not running is harmless.
+    Stop { id: String },
 }
 
 /// A positioned tone the host renders. Offsets are the plugin's units, used only

@@ -335,6 +335,34 @@ Players control it with `beacons.enabled`, the `beacons.volume_max` /
 `beacons.volume_min` loudness range, and `beacons.music_duck` (how far the game
 audio ducks under a beacon). See [ADR 0021](decisions/0021-spatial-audio-beacons.md).
 
+### `sound` — recorded cues (optional)
+
+Play a named sound once, or keep one looping, from a place relative to the player. Names
+are the Toby Accessibility Mod's SNDINFO names (`"pathfinder/nodebeacon"`,
+`"amb/exit1"`, `"dropoff/beacon"`, ...). If the player sets `sounds.dir` to their own
+Toby install, these are Toby's recordings; otherwise the host plays a synthesized
+Doom-like stand-in. A name the host has neither for is silent, not an error.
+
+- `sound.play(name, opts)` — once, from a place. `opts`: `x`/`y` (offset, as for
+  `beacon`: rightward, and north is forward), `volume` (0-1, which **you** set from
+  distance), `pitch` (playback-rate multiplier, default 1).
+- `sound.ui(name, opts)` — once, centred, for an interface event with no place
+  ("path found", "destination reached"). `opts`: `volume`, `pitch`.
+- `sound.loop(id, name, opts)` — start a continuous sound under `id`, or move it. Re-issue
+  it each frame with fresh offsets; a different `name` restarts it.
+- `sound.stop(id)` — end the loop under `id`. It fades out rather than cutting.
+
+```lua
+if exit_dist < EXIT_RANGE then
+  sound.loop("exit", "amb/exit1", { x = dx, y = dy, volume = 1 - exit_dist / EXIT_RANGE })
+else
+  sound.stop("exit")
+end
+```
+
+A sound you ask for is heard from the next frame. Players control loudness with
+`sounds.volume`; the music ducks under recorded cues as it does under beacons.
+
 ### `on_draw(canvas)` — map mode (optional)
 
 Define `on_draw` and the player can toggle a **map view** (default key `m`) showing

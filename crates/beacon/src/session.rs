@@ -28,7 +28,9 @@ use crate::beacons::BeaconMixer;
 use crate::config_modal::{Bound, ConfigModal};
 use crate::menu::{self, Act, Backed, Chosen, Menu};
 use crate::rom;
+use crate::soundbank::SoundBank;
 use crate::state::{SlotStore, SLOTS};
+use crate::voices::VoiceMixer;
 
 /// How many recent spoken lines to retain for an agent to read back. Bounded so
 /// a long GUI session does not accumulate them without limit.
@@ -103,6 +105,10 @@ pub struct Session {
     audio_scratch: Vec<f32>,
     /// Synthesises the plugin's spatial-audio beacons into the audio stream.
     beacon_mixer: BeaconMixer,
+    /// Named recorded sounds: Toby's from `sounds.dir`, or synthesized stand-ins.
+    sound_bank: SoundBank,
+    /// The plugin's recorded sounds that are currently playing.
+    voices: VoiceMixer,
     last_spoken: Option<String>,
     /// Recent spoken lines, for an agent to read what a player would have heard.
     speech_log: VecDeque<String>,
@@ -167,6 +173,8 @@ impl Session {
         settings: Settings,
         rom_id: Option<&str>,
     ) -> Self {
+        let rate = audio.sample_rate();
+        let sounds_dir = settings.sounds.dir.clone();
         let mut session = Session {
             emu,
             audio,
@@ -194,7 +202,11 @@ impl Session {
             quit: false,
             muted: false,
             audio_scratch: Vec::with_capacity(4096),
-            beacon_mixer: BeaconMixer::new(beacon_emu::AUDIO_SAMPLE_RATE),
+            // The device's rate, which the emulator is told to match: a tone synthesized at
+            // any other rate plays off-pitch by the ratio.
+            beacon_mixer: BeaconMixer::new(rate),
+            sound_bank: SoundBank::open(&sounds_dir, rate),
+            voices: VoiceMixer::default(),
             last_spoken: None,
             speech_log: VecDeque::new(),
             frames: 0,
@@ -265,6 +277,7 @@ impl Session {
                 // Silence game and beacons alike, but keep the sample count so the
                 // audio queue still paces emulation at normal speed.
                 self.audio_scratch.iter_mut().for_each(|s| *s = 0.0);
+                self.voices.clear();
             } else if self.settings.beacons.enabled {
                 // Mix the plugin's spatial-audio beacons into the game audio before
                 // it is queued. The beacons are owned here, so the mixer and the
@@ -277,6 +290,14 @@ impl Session {
                     self.settings.beacons.volume_max,
                     self.settings.beacons.music_duck,
                 );
+                // The beacons duck the music only when one is sounding; a recorded cue
+                // alone should cut through just the same.
+                if beacons.is_empty() && self.voices.active() {
+                    let duck = self.settings.beacons.music_duck;
+                    self.audio_scratch.iter_mut().for_each(|s| *s *= duck);
+                }
+                self.voices
+                    .mix(&mut self.audio_scratch, self.settings.sounds.volume);
             }
             let scratch = std::mem::take(&mut self.audio_scratch);
             self.audio.submit(&scratch);
@@ -290,6 +311,7 @@ impl Session {
             None => Vec::new(),
         };
         self.dispatch(intents);
+        self.drain_sounds();
 
         // Bring the map up on its own the moment the plugin's navigation starts, so
         // the route shows without also pressing the map key. Edge-triggered on the
@@ -508,6 +530,15 @@ impl Session {
         };
         for intent in intents {
             self.say_now(intent.text);
+        }
+        self.drain_sounds();
+    }
+
+    /// Starts, moves and stops the sounds the plugin asked for since the last drain. They
+    /// are heard from the next frame's audio, a sixtieth of a second on.
+    fn drain_sounds(&mut self) {
+        for cmd in self.plugin.take_sounds() {
+            self.voices.apply(cmd, &mut self.sound_bank);
         }
     }
 
@@ -868,6 +899,7 @@ impl Session {
         self.emu = Some(emu);
         self.apply_video();
         self.plugin = plugin;
+        self.voices.clear();
         self.reload_spec = spec;
         self.rom = bytes;
         self.slots = Some(SlotStore::new(sha1.as_deref().unwrap_or("unknown")));
@@ -1154,6 +1186,15 @@ impl Session {
         self.apply_video();
         self.audio
             .set_buffer(Duration::from_millis(self.settings.audio.buffer_ms.into()));
+        if key == "sounds.dir" {
+            // A different install is a different bank; what was playing came from the old one.
+            self.voices.clear();
+            self.sound_bank = SoundBank::open(&self.settings.sounds.dir, self.audio.sample_rate());
+            // Said, because a wrong folder otherwise sounds exactly like no folder at all.
+            if !self.settings.sounds.dir.trim().is_empty() && self.sound_bank.source().is_none() {
+                self.say_now("No Toby sounds there. Using Beacon's own.");
+            }
+        }
         self.persist_settings();
         Ok(())
     }
@@ -1190,6 +1231,7 @@ impl Session {
         let name = plugin.name().to_string();
         let from_disk = fresh.is_reloadable_from_disk();
         self.plugin = Box::new(plugin);
+        self.voices.clear();
         self.reload_spec = Some(fresh);
         // The old map belongs to the old plugin; drop it and let it redraw.
         self.map_buffer.clear();
@@ -1209,7 +1251,10 @@ impl Session {
         let Some(ram) = ram_of(&self.emu) else {
             return Err("no game loaded".to_string());
         };
-        self.plugin.eval(code, ram)
+        let result = self.plugin.eval(code, ram);
+        // A snippet may play a sound (`sound.play(...)`), which is how an agent checks one.
+        self.drain_sounds();
+        result
     }
 }
 

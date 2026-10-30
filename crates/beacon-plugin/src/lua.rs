@@ -39,7 +39,7 @@ use mlua::{Function, Lua, Table, Value};
 use std::collections::BTreeMap;
 
 use crate::canvas::{self, Canvas};
-use crate::{BeaconState, CommandDecl, Error, Manifest, Plugin, PluginSpec};
+use crate::{BeaconState, CommandDecl, Error, Manifest, Plugin, PluginSpec, SoundCmd};
 
 /// Work RAM is 128 KiB: bank $7E is the first 64 KiB, $7F the second.
 const WRAM_LEN: usize = 128 * 1024;
@@ -53,6 +53,13 @@ type Intents = Rc<RefCell<Vec<Intent>>>;
 /// The plugin's live spatial-audio beacons, keyed by id. Ordered so the host
 /// reads them deterministically.
 type Beacons = Rc<RefCell<BTreeMap<String, BeaconState>>>;
+/// Sound commands issued since the host last took them.
+type Sounds = Rc<RefCell<Vec<SoundCmd>>>;
+
+/// The most sound commands kept between drains. A host that never drains them (the
+/// headless benchmark, a test) must not grow this without bound; past the cap the oldest
+/// are dropped, which is what would have happened to them anyway.
+const MAX_QUEUED_SOUNDS: usize = 256;
 
 /// A loaded Lua plugin.
 pub struct LuaPlugin {
@@ -64,6 +71,7 @@ pub struct LuaPlugin {
     canvas: Canvas,
     has_draw: bool,
     beacons: Beacons,
+    sounds: Sounds,
 }
 
 impl LuaPlugin {
@@ -90,6 +98,8 @@ impl LuaPlugin {
         install_rom(&lua, rom)?;
         let beacons: Beacons = Rc::new(RefCell::new(BTreeMap::new()));
         install_beacon(&lua, &beacons)?;
+        let sounds: Sounds = Rc::new(RefCell::new(Vec::new()));
+        install_sound(&lua, &sounds)?;
 
         // Modules first, in declared order, each its own chunk (its own local
         // budget) sharing this Lua state's globals — so a data module's namespace is
@@ -118,6 +128,7 @@ impl LuaPlugin {
             canvas,
             has_draw,
             beacons,
+            sounds,
         })
     }
 
@@ -220,6 +231,10 @@ impl Plugin for LuaPlugin {
 
     fn beacons(&self) -> Vec<BeaconState> {
         self.beacons.borrow().values().cloned().collect()
+    }
+
+    fn take_sounds(&mut self) -> Vec<SoundCmd> {
+        std::mem::take(&mut self.sounds.borrow_mut())
     }
 
     fn eval(&mut self, code: &str, ram: &[u8]) -> Result<String, String> {
@@ -573,6 +588,98 @@ fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
     Ok(())
 }
 
+/// Installs the `sound` table: named recorded sounds, played by the host.
+///
+/// - `sound.play(name, opts)` — once, from a place: `opts` is `x`/`y` (offset, for direction),
+///   `volume` (0-1, default 1, set from distance by the plugin) and `pitch` (playback-rate
+///   multiplier, default 1).
+/// - `sound.ui(name, opts)` — once, centred: an interface sound with no place (`volume`,
+///   `pitch`).
+/// - `sound.loop(id, name, opts)` — start or update a continuous sound under `id`, with the
+///   same `opts` as `play`. Re-issue it each frame as the source moves.
+/// - `sound.stop(id)` — end the loop under `id`.
+///
+/// Names are Toby SNDINFO names (`"pathfinder/nodebeacon"`). An unknown name is silent, not
+/// an error: the host may simply not have that sound.
+fn install_sound(lua: &Lua, sounds: &Sounds) -> Result<(), Error> {
+    fn opts_of(opts: &Option<Table>) -> mlua::Result<(f32, f32, f32, f32)> {
+        let Some(o) = opts else {
+            return Ok((0.0, 0.0, 1.0, 1.0));
+        };
+        Ok((
+            o.get::<Option<f64>>("x")?.unwrap_or(0.0) as f32,
+            o.get::<Option<f64>>("y")?.unwrap_or(0.0) as f32,
+            (o.get::<Option<f64>>("volume")?.unwrap_or(1.0) as f32).clamp(0.0, 1.0),
+            (o.get::<Option<f64>>("pitch")?.unwrap_or(1.0) as f32).clamp(0.05, 8.0),
+        ))
+    }
+    fn push(queue: &Sounds, cmd: SoundCmd) {
+        let mut q = queue.borrow_mut();
+        if q.len() >= MAX_QUEUED_SOUNDS {
+            q.remove(0);
+        }
+        q.push(cmd);
+    }
+
+    let table = lua.create_table()?;
+
+    for (key, positional) in [("play", true), ("ui", false)] {
+        let q = sounds.clone();
+        table.set(
+            key,
+            lua.create_function(move |_, (name, opts): (String, Option<Table>)| {
+                let (dx, dy, volume, pitch) = opts_of(&opts)?;
+                push(
+                    &q,
+                    SoundCmd::Play {
+                        name,
+                        dx: if positional { dx } else { 0.0 },
+                        dy: if positional { dy } else { 0.0 },
+                        volume,
+                        pitch,
+                        positional,
+                    },
+                );
+                Ok(())
+            })?,
+        )?;
+    }
+
+    let q = sounds.clone();
+    table.set(
+        "loop",
+        lua.create_function(
+            move |_, (id, name, opts): (String, String, Option<Table>)| {
+                let (dx, dy, volume, pitch) = opts_of(&opts)?;
+                push(
+                    &q,
+                    SoundCmd::Loop {
+                        id,
+                        name,
+                        dx,
+                        dy,
+                        volume,
+                        pitch,
+                    },
+                );
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let q = sounds.clone();
+    table.set(
+        "stop",
+        lua.create_function(move |_, id: String| {
+            push(&q, SoundCmd::Stop { id });
+            Ok(())
+        })?,
+    )?;
+
+    lua.globals().set("sound", table)?;
+    Ok(())
+}
+
 /// Exposes the manifest's named watches to Lua as a `watch` table.
 fn install_watch(lua: &Lua, manifest: &Manifest) -> Result<(), Error> {
     let watch = lua.create_table()?;
@@ -630,7 +737,9 @@ mod tests {
         };
         let mut plugin = LuaPlugin::load(&spec, std::rc::Rc::new(Vec::new())).unwrap();
         assert_eq!(
-            plugin.eval("return tostring(seen)", &vec![0u8; WRAM_LEN]).unwrap(),
+            plugin
+                .eval("return tostring(seen)", &vec![0u8; WRAM_LEN])
+                .unwrap(),
             "42",
             "the script sees the module's REF namespace"
         );
@@ -823,6 +932,67 @@ mod tests {
         let b = p.beacons();
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].id, "goal"); // enemy cleared
+    }
+
+    #[test]
+    fn sound_calls_become_commands_for_the_host() {
+        let mut p = plugin_from(
+            r#"
+            function on_frame(frame)
+              sound.play("pathfinder/nodebeacon", { x = 16, y = -32, volume = 0.5 })
+              sound.ui("pathfinder/pathfound")
+              sound.loop("exit", "amb/exit1", { x = -8, pitch = 1.5 })
+              sound.stop("exit")
+            end
+            "#,
+        );
+        p.on_frame(&vec![0u8; WRAM_LEN], 0);
+        let cmds = p.take_sounds();
+        assert_eq!(
+            cmds,
+            vec![
+                SoundCmd::Play {
+                    name: "pathfinder/nodebeacon".into(),
+                    dx: 16.0,
+                    dy: -32.0,
+                    volume: 0.5,
+                    pitch: 1.0,
+                    positional: true
+                },
+                SoundCmd::Play {
+                    name: "pathfinder/pathfound".into(),
+                    dx: 0.0,
+                    dy: 0.0,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    positional: false
+                },
+                SoundCmd::Loop {
+                    id: "exit".into(),
+                    name: "amb/exit1".into(),
+                    dx: -8.0,
+                    dy: 0.0,
+                    volume: 1.0,
+                    pitch: 1.5
+                },
+                SoundCmd::Stop { id: "exit".into() },
+            ]
+        );
+        // Taken means gone: the next take is empty.
+        assert!(p.take_sounds().is_empty());
+    }
+
+    #[test]
+    fn an_undrained_sound_queue_stays_bounded() {
+        let mut p = plugin_from(
+            r#"
+            function on_frame(frame)
+              for i = 1, 1000 do sound.ui("x") end
+            end
+            "#,
+        );
+        p.on_frame(&vec![0u8; WRAM_LEN], 0);
+        assert_eq!(p.take_sounds().len(), MAX_QUEUED_SOUNDS);
     }
 
     #[test]
