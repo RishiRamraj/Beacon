@@ -2056,6 +2056,11 @@ CARROT = {
   -- screen transition or a hand-off between routers is the same journey resumed. Only
   -- arriving, "no path", or turning navigation off ends one.
   journey = false,
+  -- Whether the destination was chosen by the player (the M menu, a marker). Only then are
+  -- "path found" and "destination reached" said, as in Toby, where the player always chose:
+  -- the quest guide re-aims itself leg after leg, and an area goal it is already standing in
+  -- "arrives" every frame, which said "destination reached" without end.
+  chosen = false,
   corner = nil,     -- the corner being steered for, {tx, ty}
   AT_CORNER = 20,   -- px from a corner that counts as being at it
 }
@@ -2073,7 +2078,7 @@ function CARROT.place(s, dx, dy, duck)
   local volume = duck and CARROT.VOLUME * CARROT.DUCK or CARROT.VOLUME
   if not CARROT.journey then
     CARROT.journey = true
-    say("Path found.", { priority = "navigation", category = "route" })
+    if CARROT.chosen then say("Path found.", { priority = "navigation", category = "route" }) end
     CARROT.timer = 0
   end
   carrot = { x = dx, y = dy, fast = fast, volume = volume }
@@ -2121,6 +2126,7 @@ end
 function CARROT.finish()
   CARROT.clear()
   CARROT.journey = false
+  CARROT.chosen = false
 end
 
 -- Notes the corner being steered for, sounding NodeReached when the guide has moved on from
@@ -2139,7 +2145,7 @@ end
 -- Arrived: Toby's "destination reached", and the carrot falls silent. Not said when the
 -- route has its own arrival line, which says more.
 function CARROT.arrive(announced)
-  if not announced then
+  if CARROT.chosen and not announced then
     say("Destination reached.", { priority = "navigation", category = "route" })
   end
   CARROT.finish()
@@ -3891,6 +3897,9 @@ end
 -- route lock on as exploration fills the learned graph in.
 local function route_to_room(s, target_room, label)
   if target_room == nil then return false end
+  -- A label of "" says only the way to go; trim so no line starts with a space.
+  local say_raw = nav_say
+  local function nav_say(text) say_raw((text:gsub("^%s+", ""))) end
   if s.dungeon_room == target_room then
     room_route_stop()
     local it = nearest_item_sprite(s)
@@ -4590,7 +4599,7 @@ local function route_to(s, g, v)
     end
     -- Inside a dungeon with a known path to the goal room: route room-to-room.
     if s.module == 0x07 and room_path(s.dungeon_room, g.room) then
-      route_to_room(s, g.room, g.lead or g.arrival or "Continue on.")
+      route_to_room(s, g.room, g.lead or g.arrival or "")
       return
     end
     -- Overworld with a known entrance area, else head for the way out.
@@ -4628,7 +4637,8 @@ local GOALS = {
   { id = "uncle", goal = "Reach your uncle for the sword",
     hint = "Enter Hyrule Castle by the hidden passage — the bush against the wall drops you in — and reach your dying uncle for the sword and shield.",
     done = { { 0x7EF359, 1 }, { 0x7EF3C5, 2 } }, room = 0x55, find = "sprite", kind = 115,
-    chain = UNCLE_APPROACH, leave = "Leave the house.", arrival = "Find your uncle." },
+    -- No arrival line: on reaching him, he is right there, and saying so added nothing.
+    chain = UNCLE_APPROACH, leave = "Leave the house." },
   { id = "zelda", goal = "Free Princess Zelda",
     hint = "Descend through the castle to the dungeon below and free Princess Zelda from her cell.",
     -- Her follower flag clears once she is delivered, so progress >= 2 also counts.
@@ -6559,6 +6569,7 @@ function POI.go(s, e)
   -- the objective on its next pass.
   nav_stop()
   POI.pending = nil
+  CARROT.chosen = true
   local arrival = e.name .. "."
   if e.go == "here" then
     pathfind_to(e.x, e.y, arrival, e.level, e.face)
@@ -6641,6 +6652,7 @@ function on_menu(id)
       say("No marker there.", { priority = "navigation", category = "on-demand" })
     elseif m.area == area_id(s) then
       nav_stop()
+      CARROT.chosen = true
       mark_goto(k)
     elseif m.room and s.module == 0x07 then
       POI.go(s, { name = "Marker " .. k, go = "room", room = m.room, x = m.tx * 8 + 4, y = m.ty * 8 + 4 })

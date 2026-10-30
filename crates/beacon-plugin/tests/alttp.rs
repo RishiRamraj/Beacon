@@ -7379,7 +7379,10 @@ fn alttp_the_route_is_followed_by_ear_toward_tobys_carrot() {
     // Twenty tiles (160 px) due east, on the row his feet are on (two below the top of his
     // sprite): further than the leash.
     plugin
-        .eval("return tostring(pathfind_to((20 + 20) * 8 + 4, 42 * 8 + 4))", &start)
+        .eval(
+            "CARROT.chosen = true return tostring(pathfind_to((20 + 20) * 8 + 4, 42 * 8 + 4))",
+            &start,
+        )
         .unwrap();
 
     let said: Vec<String> = plugin.on_frame(&start, 2).into_iter().map(|i| i.text).collect();
@@ -7449,6 +7452,23 @@ fn alttp_the_route_is_followed_by_ear_toward_tobys_carrot() {
         "arrival is announced, in words: {end:?}"
     );
     assert!(path_beacon(&mut plugin).is_none(), "and the carrot is gone");
+
+    // A route the player did not choose — the quest guide's own legs — says neither line:
+    // it re-aims itself, and an area it already stands in arrives every frame.
+    plugin
+        .eval("return tostring(pathfind_to((20 + 20) * 8 + 4, 42 * 8 + 4))", &start)
+        .unwrap();
+    let mut said: Vec<String> = Vec::new();
+    for f in 300..310 {
+        said.extend(plugin.on_frame(&start, f).into_iter().map(|i| i.text));
+    }
+    for f in 310..320 {
+        said.extend(plugin.on_frame(&there, f).into_iter().map(|i| i.text));
+    }
+    assert!(
+        !said.iter().any(|t| t == "Path found." || t == "Destination reached."),
+        "unchosen routes are not announced: {said:?}"
+    );
 }
 
 #[test]
