@@ -57,6 +57,10 @@ WAYPOINTS = {
 
 UNCLE_APPROACH = {
   note = "The overworld approach from Link's house to the castle entrance, as the player's own authored cues, mapped live by playing. The uncle beat drives this chain once Link is in the castle overworld area, so the guide speaks these cues rather than restating the objective. Each is an `arrival` line, spoken on reaching the spot, with the guide leading there silently over the sonar path. The last waypoint is the castle-entrance bush.",
+  { tx = 274, ty = 358,
+    note = "Out of the house, along the south edge of the bush field, mapped live from where the player called it." },
+  { tx = 267, ty = 355,
+    note = "West of the step before, mapped live where the player called it." },
   { tx = 280, ty = 316, arrival = "South of the castle.", cue = true },
   { tx = 304, ty = 213, arrival = "Pick up the bush." },
   { tx = 304, ty = 212, arrival = "Enter the tunnel.", after_lift = true },

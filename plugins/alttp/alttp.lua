@@ -2028,7 +2028,9 @@ end
 -- Toby's PathBeacon, every 1.26 seconds. Walk toward the beep and the leash pulls you round
 -- each corner. When Link is facing it the beep is PathBeaconFast instead, so "heading the
 -- right way" is a different sound rather than a judgement of stereo. Each corner passed is
--- NodeReached; the start of a route PathFound; a failed one NoPath; arriving DestReached.
+-- NodeReached. Toby's spoken clips — "path found", "destination reached" — are spoken here
+-- through the speech engine instead, at the player's own rate, rather than played as slow
+-- recordings.
 --
 -- Toby's distances, converted at Link's scale (Doom's player radius is 16 units, Link is 16
 -- pixels across, so a pixel is two units): the 150-unit leash is 72 px, a little over four
@@ -2076,7 +2078,7 @@ function CARROT.place(s, dx, dy, duck)
   local volume = duck and CARROT.VOLUME * CARROT.DUCK or CARROT.VOLUME
   if not CARROT.journey then
     CARROT.journey = true
-    sound.ui("pathfinder/pathfound")
+    say("Path found.", { priority = "navigation", category = "route" })
     CARROT.timer = 0
   end
   carrot = { x = dx, y = dy, fast = fast, volume = volume }
@@ -2139,9 +2141,12 @@ function CARROT.node(path, wp, x, y)
   end
 end
 
--- Arrived: Toby's DestReached, and the carrot falls silent.
-function CARROT.arrive()
-  sound.ui("pathfinder/destreached")
+-- Arrived: Toby's "destination reached", and the carrot falls silent. Not said when the
+-- route has its own arrival line, which says more.
+function CARROT.arrive(announced)
+  if not announced then
+    say("Destination reached.", { priority = "navigation", category = "route" })
+  end
   CARROT.finish()
 end
 
@@ -2224,7 +2229,6 @@ function pathfind_to(wx, wy, arrival, level, face)
   pathfind_goal = nil
   pathfind_active = false
   CARROT.finish()
-  sound.ui("pathfinder/nopath")
   say("No path there.", { priority = "navigation", category = "on-demand" })
   return false
 end
@@ -2368,10 +2372,11 @@ local function pathfind_update(s)
       aim_face_beacon(s, pathfind_face, combat_engaged)
       return
     end
+    local announced = pathfind_arrival ~= nil
     if pathfind_arrival and not pathfind_told then
       say(pathfind_arrival, { priority = "navigation", category = "on-demand" })
     end
-    CARROT.arrive()
+    CARROT.arrive(announced)
     pathfind_stop()
     return
   end

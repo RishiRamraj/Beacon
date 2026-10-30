@@ -296,7 +296,7 @@ impl Default for Keymap {
         bind("KeyP", "pause");
         bind("KeyJ", "mute");
         bind("KeyF", "frame_advance");
-        bind("KeyM", "toggle_map");
+        bind("Backquote", "toggle_map");
         bind("KeyK", "bind");
         bind("Tab", "menu");
 

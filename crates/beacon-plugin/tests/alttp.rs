@@ -7351,7 +7351,7 @@ fn alttp_the_game_over_menu_reads_its_three_choices() {
 fn alttp_the_route_is_followed_by_ear_toward_tobys_carrot() {
     // Toby's pathfinder: one sound rides the route a leash ahead (150 Doom units, 72 px at
     // Link's scale) and beeps every 44 tics (75 frames here) — the fast beacon while Link
-    // faces it — with Toby's sounds for a route found and a destination reached.
+    // faces it — with Toby's "path found" and "destination reached" spoken.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
 
@@ -7381,11 +7381,11 @@ fn alttp_the_route_is_followed_by_ear_toward_tobys_carrot() {
         .eval("return tostring(pathfind_to((20 + 20) * 8 + 4, 42 * 8 + 4))", &start)
         .unwrap();
 
-    plugin.on_frame(&start, 2);
+    let said: Vec<String> = plugin.on_frame(&start, 2).into_iter().map(|i| i.text).collect();
     let first = names(plugin.take_sounds());
     assert!(
-        first.contains(&"pathfinder/pathfound".to_string()),
-        "a new route is announced: {first:?}"
+        said.contains(&"Path found.".to_string()),
+        "a new route is announced, in words: {said:?}"
     );
     assert!(
         first.contains(&"pathfinder/nodebeaconfast".to_string()),
@@ -7442,11 +7442,10 @@ fn alttp_the_route_is_followed_by_ear_toward_tobys_carrot() {
 
     // Standing on the goal: Toby's DestReached, and the carrot falls silent.
     let there = at(40, 6);
-    plugin.on_frame(&there, 200);
-    let end = names(plugin.take_sounds());
+    let end: Vec<String> = plugin.on_frame(&there, 200).into_iter().map(|i| i.text).collect();
     assert!(
-        end.contains(&"pathfinder/destreached".to_string()),
-        "arrival is announced: {end:?}"
+        end.contains(&"Destination reached.".to_string()),
+        "arrival is announced, in words: {end:?}"
     );
     assert!(path_beacon(&mut plugin).is_none(), "and the carrot is gone");
 }
