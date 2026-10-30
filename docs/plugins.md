@@ -363,6 +363,54 @@ end
 A sound you ask for is heard from the next frame. Players control loudness with
 `sounds.volume`; the music ducks under recorded cues as it does under beacons.
 
+### `menu` — lists of your own in Beacon's menu (optional)
+
+Show the player a menu of the plugin's own — destinations, choices — read and driven exactly
+like Beacon's menu (speech, screen reader, keys, pad), drawn over the map, with the game frozen
+while it is open.
+
+- `menu.open(tree)` — `tree` is `{ title = "...", items = { ... } }`; each item is either
+  `{ label = "...", id = "..." }`, something to choose, or `{ label = "...", items = { ... } }`,
+  a submenu. The menu opens once the current call returns.
+- `on_menu(id)` — define this global; it is called with the chosen item's `id`. It may `say`,
+  and may open another menu.
+
+```lua
+on_command("poi", function()
+  menu.open({ title = "Navigate", items = {
+    { label = "Stop navigation", id = "stop" },
+    { label = "Keys", items = { { label = "Small key - North - 4 tiles", id = "key1" } } },
+  } })
+end)
+function on_menu(id) if id == "stop" then stop_guiding() end end
+```
+
+### `nav` — grid pathfinding in the host (optional)
+
+A* over a whole map is too slow in Lua to run every few frames. `nav` does the search in the
+host over a grid the plugin fills once; the plugin still decides what is walkable and what to
+do with the path.
+
+- `local g = nav.grid(w, h)` — a grid of `w` by `h` cells, all solid.
+- `g:fill(x, y, w, h, bytes)` — set a block from a string of row-major bytes, nonzero meaning
+  walkable.
+- `g:walkable(x, y)` — whether a cell is walkable (false off the grid).
+- `g:astar(sx, sy, goal, cap)` — four-way A* from (`sx`, `sy`) to `goal`, which is
+  `{ x = gx, y = gy }` or `{ rects = { { x0, y0, x1, y1 }, ... } }` (inclusive; any cell in any
+  rectangle). Returns the path as `{ { x, y }, ... }`, start to goal, or `nil`. `cap` bounds the
+  cells expanded (default: the whole grid).
+- `g:lengths(sx, sy, targets, cap)` — walking distances to every `{ x, y }` in `targets`, in
+  one search; each entry is a number or `false` if unreachable.
+
+### `input` — acting for the player, briefly (optional)
+
+- `input.hold(buttons, frames)` — hold SNES buttons for `frames` frames (default 1, at most 60),
+  added to whatever the player is pressing. `buttons` is a name or a list of names: `up`,
+  `down`, `left`, `right`, `a`, `b`, `x`, `y`, `l`, `r`, `start`, `select`.
+
+For a command that acts on the player's behalf — turning to face a target — not for playing
+the game. Pressing a direction for a frame is how the game itself turns a character.
+
 ### `on_draw(canvas)` — map mode (optional)
 
 Define `on_draw` and the player can toggle a **map view** (default key `m`) showing

@@ -15,6 +15,11 @@ knowledge lives in plugins — a TOML manifest plus a Lua script — selected
 automatically by hashing the ROM. A Link to the Past ships built-in; other games
 are drop-in (see [Plugins](#plugins)).
 
+Navigation is modelled on the [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod)
+for Doom: the same menu of points of interest, the same sound to follow along a route, the
+same world sounds — Toby's own recordings, if you have Toby — and the same keys. See
+[Navigation](#navigation).
+
 ## What makes it different
 
 Existing approaches read a running emulator from the outside, over a socket, at
@@ -43,6 +48,17 @@ If you already cloned without submodules:
 git submodule update --init
 ```
 
+**Windows**, cross-compiled from Linux with MinGW-w64 (`g++-mingw-w64`, the win32 thread
+model):
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+`beacon.exe` needs `libstdc++-6.dll` and `libgcc_s_seh-1.dll` from the same MinGW
+(`/usr/lib/gcc/x86_64-w64-mingw32/*-win32/`) beside it, plus the speech DLLs below.
+
 ## Running
 
 Beacon ships no game data. **Bring your own ROM.**
@@ -53,6 +69,10 @@ Beacon ships no game data. **Bring your own ROM.**
 
 On Linux, speech goes through speech-dispatcher, so you get the voice and rate
 you have already configured. If it is not running, Beacon says so and plays on.
+
+On Windows, speech goes through your screen reader — NVDA, JAWS, or any other Tolk
+supports — falling back to SAPI. Keep `Tolk.dll`, `nvdaControllerClient64.dll` and
+`SAAPI64.dll` beside `beacon.exe`; the Windows download already has them.
 
 ### Controls
 
@@ -95,6 +115,36 @@ ROM so games never collide. Save and load act on the active slot; next/previous
 move between slots, announced as you go. Frame advance and pause are there for
 debugging a plugin — stepping one frame at a time to watch memory change.
 
+### Navigation
+
+Two ways to play, side by side:
+
+- **The quest guide** (`l`, or *Quest objective* in the menu) leads you through the story:
+  authored waypoints and goals, beat by beat, from the house to the castle and on.
+- **Exploration, Toby's way** (`m`). One menu holds every destination, as Toby's does:
+  the quest objective, ten markers of your own, and lists of what you have found —
+  *Unexplored*, *Unopened*, *Keys*, *Pickups*, *Exits and stairs*, *This room*. Every list
+  holds only places you can actually reach, nearest first by walking distance, and reads each
+  the way Toby does: "Chest - South-east - 13 tiles". Beacon remembers every room and screen
+  you have been on, so a chest passed two rooms back is still listed, and the rooms and
+  screens next to ones you have visited are *Unexplored*. The menu is drawn over the map.
+
+Choose a destination and Toby's **pathfinder** leads you there by ear: one sound rides the
+route a few steps ahead of you and beeps from where it is; walk toward it and it pulls you
+round each corner. Facing it, the beep changes. Corners and arrival have their own sounds.
+
+The **world makes Toby's sounds**, from where things are: pickups and chests, your markers,
+exits and stairs, doors and locked doors, spike floors, a ticking edge ahead of a pit, a bump
+where you walk into a wall, and — off by default, on with `'` — Toby's "wind" in each
+direction, pitched by how far the wall is. **Enemies** each carry a tone; a lock tick says
+one is straight ahead of you; hits and kills have their own sounds; `z` turns you to face the
+nearest, and `v` counts everything in view by name, distance and direction.
+
+**Toby's sounds.** Beacon ships none of Toby's recordings — they belong to its authors — but
+if you have the [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod),
+point `sounds.dir` at its folder (the unpacked mod, or its git checkout) and Beacon plays
+them. Without it, every cue has a synthesized stand-in in the same spirit.
+
 ### Other modes
 
 ```sh
@@ -112,6 +162,10 @@ or any other tool can subscribe:
 
 **stdout carries only the event stream.** Diagnostics and emulator logs go to
 stderr, so piping stdout into a parser is safe.
+
+Set `BEACON_STATS=1` to print frame rate, audio underruns and loop timing every two seconds,
+and to log any frame whose plugin work runs long — the first thing to look at if a game feels
+slow.
 
 ### Agent control (MCP)
 
@@ -194,7 +248,7 @@ music_duck = 0.5   # 0 to 1, how far game audio ducks under a beacon
 buffer_ms = 50     # 20 to 500, delay before game sound and tones are heard; raise if it crackles
 
 [sounds]
-dir = ""         # your Toby Accessibility Mod folder, for its sounds; empty = Beacon's own
+dir = ""           # your Toby Accessibility Mod folder, for its sounds; empty = Beacon's own
 volume = 0.8       # 0 to 1, loudness of the recorded cues
 ```
 
@@ -225,8 +279,10 @@ iterate without rebuilding.
 
 **[docs/plugins.md](docs/plugins.md) is the plugin authoring guide** — the full
 manifest format and the complete Lua host API (`mem`, `rom`, `watch`, `say`,
-`on_command`, `log`, `beacon` for spatial-audio cues, and `on_draw` for the map),
-with semantics and defaults. The reference plugin,
+`on_command`, `log`, `beacon` for spatial-audio tones, `sound` for recorded cues, `menu`
+for lists of the plugin's own in Beacon's menu, `nav` for grid pathfinding in the host,
+`input` for acting briefly on the player's behalf, and `on_draw` for the map), with
+semantics and defaults. The reference plugin,
 [`plugins/alttp/`](plugins/alttp/), is the worked example to read alongside it.
 
 ## Layout

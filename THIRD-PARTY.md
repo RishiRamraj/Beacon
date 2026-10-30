@@ -46,13 +46,23 @@ Listed here so licence compatibility is checked before adoption, not after.
 | cpal | Apache-2.0/MIT | Yes | Audio output |
 | gilrs | Apache-2.0/MIT | Yes | Controller input |
 | NVDA controller client | LGPL-2.1 | Yes | Windows screen reader output |
+| Tolk (with SAAPI64) | LGPL-3.0 | Yes | Windows screen reader output (NVDA, JAWS, others, SAPI). Loaded at run time if present beside the executable, not linked; shipped in the Windows package with its licence |
+| lewton | Apache-2.0/MIT | Yes | Decoding Ogg Vorbis sounds |
+| MinGW-w64 GCC runtime (libstdc++, libgcc_s) | GPL-3.0 with the GCC Runtime Library Exception | Yes | C++ runtime for the Windows build, shipped beside `beacon.exe` |
 
 ## Permanently excluded
 
 | Component | Reason |
 |---|---|
 | snes9x | Non-commercial-only licence. Not OSI approved and not GPL compatible, so it cannot be linked even optionally. |
-| Tolk | Abandoned upstream. Beacon talks to NVDA and JAWS directly instead. See [ADR 0007](docs/decisions/0007-speech-backends.md). |
+
+## The Toby Accessibility Mod
+
+Beacon's navigation is modelled on the Toby Accessibility Mod for Doom (Alando1, Proydoha,
+Jarewill and others), and its cues use Toby's sound names. **None of Toby's files ship with
+Beacon**: they belong to their authors, and some (the hit markers) were taken from commercial
+games. Beacon plays them only from a copy of Toby the player already has, set as `sounds.dir`;
+without one, it synthesizes stand-ins of its own.
 
 ## Game ROMs
 
