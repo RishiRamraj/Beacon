@@ -48,6 +48,8 @@ struct Stats {
 
 pub struct App {
     stats: Option<Stats>,
+    /// The menu overlay last drawn, so a change to it is redrawn.
+    menu_version: u64,
     session: Session,
     input: Input,
     /// When present, an agent is attached over the control socket; its tool calls
@@ -160,6 +162,7 @@ impl App {
         });
         App {
             stats,
+            menu_version: 0,
             session,
             input,
             control_rx,
@@ -830,6 +833,11 @@ impl App {
             // Only when the picture can have changed. A frame produces a new one; a resize
             // or a map toggle needs the old one blitted again. Redrawing on every turn of
             // the loop meant blitting and presenting far faster than the screen can show it.
+            let menu_version = self.session.menu_version();
+            if menu_version != self.menu_version {
+                self.menu_version = menu_version;
+                self.redraw_wanted = true;
+            }
             if drew || self.redraw_wanted {
                 self.redraw_wanted = false;
                 window.request_redraw();

@@ -193,6 +193,78 @@ impl Grid {
     }
 }
 
+impl Grid {
+    /// Walking distances from (`sx`, `sy`) to each target, by one breadth-first search that
+    /// stops once every target is found or `cap` tiles have been visited. `None` for a target
+    /// not reached. One search however many targets, which is what lets a menu list every
+    /// remembered place with a true distance.
+    pub fn lengths(&self, sx: usize, sy: usize, targets: &[(usize, usize)], cap: usize) -> Vec<Option<u32>> {
+        let mut out = vec![None; targets.len()];
+        if sx >= self.width || sy >= self.height || targets.is_empty() {
+            return out;
+        }
+        let n = self.width * self.height;
+        let idx = |x: usize, y: usize| y * self.width + x;
+        let mut sc = self.scratch.borrow_mut();
+        let sc = &mut *sc;
+        if sc.stamp.len() != n {
+            sc.stamp = vec![0; n];
+            sc.g = vec![0; n];
+            sc.came = vec![0; n];
+            sc.closed = vec![0; n];
+            sc.generation = 0;
+        }
+        sc.generation = sc.generation.wrapping_add(1).max(1);
+        let gen = sc.generation;
+        // Which targets sit on each cell, so a visit can settle them.
+        let mut want: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        for (i, &(x, y)) in targets.iter().enumerate() {
+            if x < self.width && y < self.height {
+                want.entry(idx(x, y)).or_default().push(i);
+            }
+        }
+        let mut left = targets.len();
+        let mut queue = std::collections::VecDeque::new();
+        let start = idx(sx, sy);
+        sc.stamp[start] = gen;
+        sc.g[start] = 0;
+        queue.push_back(start);
+        let mut visited = 0;
+        while let Some(cur) = queue.pop_front() {
+            if let Some(ts) = want.remove(&cur) {
+                for t in ts {
+                    out[t] = Some(sc.g[cur]);
+                    left -= 1;
+                }
+                if left == 0 {
+                    break;
+                }
+            }
+            visited += 1;
+            if visited > cap {
+                break;
+            }
+            let (cx, cy) = (cur % self.width, cur / self.width);
+            for (nx, ny) in [
+                (cx as i64 + 1, cy as i64),
+                (cx as i64 - 1, cy as i64),
+                (cx as i64, cy as i64 + 1),
+                (cx as i64, cy as i64 - 1),
+            ] {
+                if self.walkable(nx, ny) {
+                    let ni = idx(nx as usize, ny as usize);
+                    if sc.stamp[ni] != gen {
+                        sc.stamp[ni] = gen;
+                        sc.g[ni] = sc.g[cur] + 1;
+                        queue.push_back(ni);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 impl UserData for Grid {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut(
@@ -205,6 +277,26 @@ impl UserData for Grid {
         methods.add_method("walkable", |_, this, (x, y): (i64, i64)| {
             Ok(this.walkable(x, y))
         });
+        methods.add_method(
+            "lengths",
+            |lua, this, (sx, sy, targets, cap): (i64, i64, Table, Option<usize>)| {
+                let mut ts = Vec::new();
+                for t in targets.sequence_values::<Table>() {
+                    let t = t?;
+                    let x = t.get::<i64>(1)?;
+                    let y = t.get::<i64>(2)?;
+                    ts.push((x.max(0) as usize, y.max(0) as usize));
+                }
+                let out = lua.create_table()?;
+                if sx >= 0 && sy >= 0 {
+                    let cap = cap.unwrap_or(this.width * this.height);
+                    for (i, d) in this.lengths(sx as usize, sy as usize, &ts, cap).into_iter().enumerate() {
+                        out.raw_set(i + 1, d.map(|v| Value::Integer(v as i64)).unwrap_or(Value::Boolean(false)))?;
+                    }
+                }
+                Ok(out)
+            },
+        );
         methods.add_method(
             "astar",
             |lua, this, (sx, sy, goal, cap): (i64, i64, Table, Option<usize>)| {
@@ -318,6 +410,19 @@ mod tests {
         assert!(g.astar(2, 2, &Goal::Tile(8, 2), 1000).is_none(), "and gone again");
         let g = open(100, 100);
         assert!(g.astar(0, 0, &Goal::Tile(99, 99), 10).is_none(), "over budget");
+    }
+
+    #[test]
+    fn one_search_measures_every_target() {
+        let mut g = open(10, 10);
+        g.fill(5, 0, 1, 9, &[0u8; 9]); // a wall with a gap at the bottom
+        let d = g.lengths(2, 2, &[(4, 2), (8, 2), (2, 2)], 1000);
+        assert_eq!(d[0], Some(2));
+        assert_eq!(d[2], Some(0));
+        assert_eq!(d[1], Some(7 + 6 + 7)); // down to row 9, across, back up
+        let mut walled = open(10, 10);
+        walled.fill(5, 0, 1, 10, &[0u8; 10]);
+        assert_eq!(walled.lengths(2, 2, &[(8, 2)], 1000), vec![None]);
     }
 
     #[test]

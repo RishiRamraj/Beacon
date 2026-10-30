@@ -10,6 +10,7 @@ mod image;
 mod input;
 mod mcp;
 mod menu;
+mod menu_panel;
 // Windows and macOS have a real menu widget; Linux has none reachable from a winit window.
 #[cfg(any(windows, target_os = "macos"))]
 mod native;

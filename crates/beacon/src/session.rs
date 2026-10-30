@@ -109,6 +109,11 @@ pub struct Session {
     sound_bank: SoundBank,
     /// The plugin's recorded sounds that are currently playing.
     voices: VoiceMixer,
+    /// The map with the open menu drawn over it, recomposed whenever the menu changes.
+    menu_overlay: Vec<u32>,
+    /// Bumped each time the overlay is recomposed, so the window knows to redraw it: the game
+    /// is frozen under a menu, so no new frame would ask for one.
+    menu_version: u64,
     /// The plugin's own menu, flattened, while it is the menu on show.
     plugin_menu: Vec<menu::PluginNode>,
     /// Whether to log frames whose plugin work is slow (`BEACON_STATS`).
@@ -213,6 +218,8 @@ impl Session {
             voices: VoiceMixer::default(),
             slow_frame_log: std::env::var_os("BEACON_STATS").is_some(),
             plugin_menu: Vec::new(),
+            menu_overlay: Vec::new(),
+            menu_version: 0,
             last_spoken: None,
             speech_log: VecDeque::new(),
             frames: 0,
@@ -692,8 +699,16 @@ impl Session {
         dims
     }
 
-    /// The current map as (width, height, pixels), if it is showing and drawn.
+    /// The current map as (width, height, pixels), if it is showing and drawn. With a menu
+    /// open, the map with the menu drawn over it — shown whether or not the map was.
     pub fn map_view(&self) -> Option<(u32, u32, &[u32])> {
+        if self.menu.is_some() && !self.menu_overlay.is_empty() {
+            return Some((
+                beacon_plugin::canvas::WIDTH,
+                beacon_plugin::canvas::HEIGHT,
+                &self.menu_overlay,
+            ));
+        }
         if self.show_map && !self.map_buffer.is_empty() {
             Some((self.map_dims.0, self.map_dims.1, &self.map_buffer))
         } else {
@@ -701,9 +716,39 @@ impl Session {
         }
     }
 
-    /// Whether the map is currently shown, so the window can size for it.
+    /// Changes whenever the menu drawn over the map does.
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    /// Whether the map panel is currently shown, so the window can size for it: the map, or
+    /// the menu drawn where it would be.
     pub fn map_shown(&self) -> bool {
-        self.show_map
+        self.show_map || self.menu.is_some()
+    }
+
+    /// Redraws the open menu over the map. Called on every change to the menu, since the game
+    /// is frozen while it is up and nothing else would draw it.
+    fn compose_menu_overlay(&mut self) {
+        self.menu_version += 1;
+        let Some(open) = self.menu.as_ref() else {
+            self.menu_overlay.clear();
+            return;
+        };
+        let (w, h) = (
+            beacon_plugin::canvas::WIDTH as usize,
+            beacon_plugin::canvas::HEIGHT as usize,
+        );
+        self.menu_overlay.clear();
+        if self.map_buffer.len() == w * h {
+            self.menu_overlay.extend_from_slice(&self.map_buffer);
+        } else {
+            self.menu_overlay.resize(w * h, 0);
+        }
+        let title = open.title().to_string();
+        let items = open.shown();
+        let selected = open.selected();
+        crate::menu_panel::draw(&mut self.menu_overlay, w, h, &title, &items, selected);
     }
 
     /// The last rendered map pixels, for encoding by the MCP server.
@@ -763,6 +808,7 @@ impl Session {
         let open = Menu::open(&self.menu_context());
         let first = open.announce();
         self.menu = Some(open);
+        self.compose_menu_overlay();
         self.say_now(menu::HELP);
         self.say_now(first);
     }
@@ -780,6 +826,7 @@ impl Session {
         let open = Menu::open_plugin(&self.menu_context());
         let said = open.arrival();
         self.menu = Some(open);
+        self.compose_menu_overlay();
         self.say_now(said);
     }
 
@@ -828,6 +875,7 @@ impl Session {
             return;
         };
         let said = open.navigate(delta);
+        self.compose_menu_overlay();
         self.say_now(said);
     }
 
@@ -840,6 +888,7 @@ impl Session {
             return;
         };
         let said = open.select(index);
+        self.compose_menu_overlay();
         self.say_now(said);
     }
 
@@ -851,7 +900,10 @@ impl Session {
         };
         let chosen = open.choose(&ctx);
         match chosen {
-            Chosen::Moved(said) | Chosen::Nothing(said) => self.say_now(said),
+            Chosen::Moved(said) | Chosen::Nothing(said) => {
+                self.compose_menu_overlay();
+                self.say_now(said)
+            }
             Chosen::Act(act) => {
                 // Choosing finishes with the menu. Every act either leaves Beacon,
                 // replaces what is running, or is done the moment it is spoken, and
@@ -859,6 +911,8 @@ impl Session {
                 self.menu = None;
                 self.paused = self.paused_before_menu;
                 self.perform(act);
+                // The act may have opened another menu (a plugin answering a choice).
+                self.compose_menu_overlay();
             }
         }
     }
@@ -869,7 +923,10 @@ impl Session {
             return;
         };
         match open.back() {
-            Backed::Moved(said) => self.say_now(said),
+            Backed::Moved(said) => {
+                self.compose_menu_overlay();
+                self.say_now(said)
+            }
             Backed::Close => self.menu_close(),
         }
     }
@@ -879,6 +936,7 @@ impl Session {
         self.menu = None;
         self.held_buttons = 0;
         self.paused = self.paused_before_menu;
+        self.compose_menu_overlay();
         self.say_now("Menu closed.");
     }
 

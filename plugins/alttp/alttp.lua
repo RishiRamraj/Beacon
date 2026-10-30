@@ -2771,7 +2771,9 @@ markers = {}
 function mark_set(slot)
   local s = prev
   if s == nil or not in_play(s) then return false end
-  markers[slot] = { area = area_id(s), tx = s.x >> 3, ty = s.y >> 3 }
+  local fx, fy = foot(s)
+  markers[slot] = { area = area_id(s), tx = fx >> 3, ty = fy >> 3, module = s.module,
+                    room = s.module == 0x07 and s.dungeon_room or nil }
   return true
 end
 
@@ -3248,6 +3250,8 @@ function on_frame(frame)
   STUCK.update(now) -- pressing into a wall, which FACE has no name for
   HAZARD.update(now) -- a pit in front of Link, guide or no guide
   room_route_update(now)
+  SEEN.tick(now) -- what is on this room or screen, for the menu's lists
+  POI.tick(now)  -- a remembered target, once Link is in its room
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
   ow_route_update(now)
@@ -5797,11 +5801,117 @@ POI = {
   MAX = 12,        -- entries a list keeps, nearest first
   FRONTIER_GAP = 16, -- 8px tiles between unexplored entries, so the list is not one place
   FRONTIER_MIN = 6,  -- 8px tiles: unexplored ground nearer than this is where he already is
+  -- Unexplored ground nearby is Beacon's own; Toby's "unexplored" is the way into somewhere
+  -- not yet entered, which is the rooms and areas. So a few patches of ground, and the rest
+  -- of the list for those.
+  FRONTIER_KEEP = 4,
   entries = {},    -- what the open menu's items lead to, by index
+  pending = nil,   -- a target in another room, aimed at once Link is in it
+}
+
+-- What Link has seen, as Toby keeps it: every room and overworld screen he has been on, and
+-- what was there — chests, locked doors, stairs, exits, items lying about — as of the last
+-- look. ALttP shows a whole room or screen at once, so being on it is seeing it. The menu
+-- lists from this, so a chest passed two rooms back is still there to go back to, and the
+-- rooms and screens next to visited ones that have never been entered are what is unexplored.
+-- Kept in the plugin's state for the session; global for MCP inspection.
+SEEN = {
+  places = {},      -- place key -> { room, area, world, ox, oy, things = { ... } }
+  announced = {},   -- things already said as "point of interest added"
+  key = nil,        -- the place Link was last recorded on
+  next_scan = 0,
+  PERIOD = 60,      -- frames between re-looks at the current place (opened chests drop out)
 }
 
 local function poi_cap(text)
   return (text:gsub("^%l", string.upper))
+end
+
+-- Which place Link is on: the room, or the 512px block of the overworld.
+function SEEN.key_of(s)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  if s.module == 0x07 then return "d" .. s.dungeon_room end
+  return "o" .. (s.ow_screen & 0xFF) .. ":" .. ox .. "," .. oy
+end
+
+-- The fixed things on the current place's tiles, and the items lying on it, in world pixels.
+function POI.scan(s)
+  local out = {}
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local two = s.module == 0x07
+  local levels = two and { 0, 1 } or { two and mem.u8(LOWER_LEVEL) or 0 }
+  for _, lv in ipairs(levels) do
+    local L = two and lv or nil
+    local function at(x, y) return tile_attr_at(s, (ox + x) * 8, (oy + y) * 8, L) end
+    for y = 0, 63 do
+      for x = 0, 63 do
+        local a = at(x, y)
+        if a ~= nil and a ~= 0 then
+          local wx, wy = (ox + x) * 8 + 4, (oy + y) * 8 + 4
+          if CHEST_TILES[a] and not CHEST_TILES[at(x - 1, y) or 0] and not CHEST_TILES[at(x, y - 1) or 0] then
+            local cx, cy = chest_stand(s, ox + x, oy + y, L)
+            out[#out + 1] = { cat = "unopened", name = "Chest", x = cx, y = cy, level = lv, face = 0 }
+          elseif two and a >= 0xF0 and (at(x - 1, y) or 0) < 0xF0 and (at(x, y - 1) or 0) < 0xF0 then
+            -- 0xF0-0xFF is a locked door indoors only; outdoors the range means something else.
+            out[#out + 1] = { cat = "unopened", name = "Locked door", x = wx, y = wy, level = lv, poi = true }
+          elseif STAIR_UP[a] then
+            out[#out + 1] = { cat = "exits", name = "Stairs up", x = wx, y = wy, level = lv }
+          elseif STAIR_DOWN[a] then
+            out[#out + 1] = { cat = "exits", name = "Stairs down", x = wx, y = wy, level = lv }
+          elseif a == 0x8E or a == 0x8F then
+            out[#out + 1] = { cat = "exits", name = "Exit", x = wx, y = wy, level = lv, poi = true }
+          elseif DOOR_TILES[a] then
+            out[#out + 1] = { cat = "exits", name = "Doorway", x = wx, y = wy, level = lv }
+          end
+        end
+      end
+    end
+  end
+  for _, sp in ipairs(sprites()) do
+    if not is_enemy(sp) and REF.item_types[sp.kind] then
+      local name = poi_cap(sprite_name(sp.kind))
+      out[#out + 1] = { cat = name:lower():find("key") and "keys" or "pickups", name = name,
+                        x = sp.x + 8, y = sp.y + 8 }
+    end
+  end
+  return out
+end
+
+-- Records the place Link is on: at once on arriving, then every PERIOD frames while he stays,
+-- so what is there stays as it now is. A locked door or an exit seen for the first time is
+-- Toby's automatic marker: "Point of interest added."
+function SEEN.tick(s)
+  if not in_play(s) or (s.module ~= 0x07 and s.module ~= 0x09) then return end
+  -- On the overworld, build the world's walking grid ahead of need — a little each frame,
+  -- once — so the menu's distances to remembered places and unexplored areas are ready.
+  if s.module == 0x09 then OWGRID.get((s.ow_screen & 0x40) ~= 0 and 1 or 0) end
+  local key = SEEN.key_of(s)
+  SEEN.next_scan = SEEN.next_scan - 1
+  if key == SEEN.key and SEEN.next_scan > 0 then return end
+  SEEN.key, SEEN.next_scan = key, SEEN.PERIOD
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local things = POI.scan(s)
+  SEEN.places[key] = {
+    key = key,
+    room = s.module == 0x07 and s.dungeon_room or nil,
+    area = s.module == 0x09 and (s.ow_screen & 0xFF) or nil,
+    world = (s.ow_screen & 0x40) ~= 0 and 1 or 0,
+    ox = ox, oy = oy,
+    things = things,
+  }
+  local added = false
+  for _, t in ipairs(things) do
+    if t.poi then
+      local id = key .. ":" .. t.name .. ":" .. (t.x >> 4) .. "," .. (t.y >> 4)
+      if not SEEN.announced[id] then
+        SEEN.announced[id] = true
+        added = true
+      end
+    end
+  end
+  if added then
+    say("Point of interest added.", { priority = "ambient", category = "poi", rate_limit = "2s" })
+  end
 end
 
 -- Distances, in 8px tiles, from Link's feet to every tile he can walk to in the window,
@@ -5815,7 +5925,7 @@ function POI.flood(s)
   local rtx, rty = route_start(s)
   local sx, sy = rtx - ox, rty - oy
   local dist = {}
-  if sx < 0 or sx > 63 or sy < 0 or sy > 63 then return dist, ox, oy, lv0 end
+  if sx < 0 or sx > 63 or sy < 0 or sy > 63 then return { dist = dist, ox = ox, oy = oy, lv = lv0 } end
   local start = lv0 * 4096 + sy * 64 + sx
   dist[start] = 0
   local q, head = { start }, 1
@@ -5839,7 +5949,7 @@ function POI.flood(s)
       if lv == 0 and STAIR_DOWN[a] then try(x, y, 1) end
     end
   end
-  return dist, ox, oy, lv0
+  return { dist = dist, ox = ox, oy = oy, lv = lv0 }
 end
 
 -- The walking distance to world pixel (wx, wy) on `level`, from a flood, or nil. A target
@@ -5862,54 +5972,56 @@ function POI.dist_to(fl, wx, wy, level)
   return best
 end
 
--- Every candidate in view: { cat, name, x, y, level, face } in world pixels.
-function POI.candidates(s, fl)
+-- Overworld walking distances from Link to world tiles, in one search over the host grid; nil
+-- for each while the world's grid is still being built.
+function POI.ow_lengths(s, tiles)
+  local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
+  local grid = OWGRID.get(w)
+  if grid == nil or #tiles == 0 then return {} end
+  local fx, fy = foot(s)
+  local sx, sy = ow_nearest_walk(w, fx >> 3, fy >> 3)
+  if sx == nil then return {} end
+  local targets = {}
+  for i, t in ipairs(tiles) do
+    local tx, ty = ow_nearest_walk(w, t[1], t[2])
+    targets[i] = { tx or t[1], ty or t[2] }
+  end
+  return grid:lengths(sx, sy, targets)
+end
+
+-- A dungeon room's centre in world pixels (rooms sit on a 16-wide grid of 512px squares).
+local function poi_room_centre(r)
+  return (r & 0x0F) * 512 + 256, ((r >> 4) & 0x0F) * 512 + 256
+end
+
+-- Every destination the menu can offer, measured: { cat, name, x, y, level, face, dist,
+-- unit ("tiles" or "rooms"), go = "here" | "room" | "ow" | "area", room, area }.
+function POI.candidates(s)
+  local fl = POI.flood(s)
+  local here = SEEN.key_of(s)
   local out = {}
-  local ox, oy, two = fl.ox, fl.oy, s.module == 0x07
-  local levels = two and { 0, 1 } or { fl.lv }
-  for _, lv in ipairs(levels) do
-    local L = two and lv or nil
-    local function at(x, y) return tile_attr_at(s, (ox + x) * 8, (oy + y) * 8, L) end
-    for y = 0, 63 do
-      for x = 0, 63 do
-        local a = at(x, y)
-        if a ~= nil and a ~= 0 then
-          local wx, wy = (ox + x) * 8 + 4, (oy + y) * 8 + 4
-          if CHEST_TILES[a] and not CHEST_TILES[at(x - 1, y) or 0] and not CHEST_TILES[at(x, y - 1) or 0] then
-            local cx, cy = chest_stand(s, ox + x, oy + y, L)
-            out[#out + 1] = { cat = "unopened", name = "Chest", x = cx, y = cy, level = lv, face = 0 }
-          elseif a >= 0xF0 and (at(x - 1, y) or 0) < 0xF0 and (at(x, y - 1) or 0) < 0xF0 then
-            out[#out + 1] = { cat = "unopened", name = "Locked door", x = wx, y = wy, level = lv }
-          elseif STAIR_UP[a] then
-            out[#out + 1] = { cat = "exits", name = "Stairs up", x = wx, y = wy, level = lv }
-          elseif STAIR_DOWN[a] then
-            out[#out + 1] = { cat = "exits", name = "Stairs down", x = wx, y = wy, level = lv }
-          elseif a == 0x8E or a == 0x8F then
-            out[#out + 1] = { cat = "exits", name = "Exit", x = wx, y = wy, level = lv }
-          elseif DOOR_TILES[a] then
-            out[#out + 1] = { cat = "exits", name = "Doorway", x = wx, y = wy, level = lv }
-          end
-        end
-      end
-    end
+  local function add(c) out[#out + 1] = c end
+
+  -- On this place: everything, measured by the flood. Its things fresh, not remembered.
+  for _, c in ipairs(POI.scan(s)) do
+    local d = POI.dist_to(fl, c.x, c.y, c.level)
+    if d ~= nil and d > 0 then c.dist, c.unit, c.go = d, "tiles", "here"; add(c) end
   end
   for _, sp in ipairs(sprites()) do
-    -- A sprite's position is the top-left of its 16px body; aim at the middle of it.
     local x, y = sp.x + 8, sp.y + 8
-    if is_enemy(sp) then
-      out[#out + 1] = { cat = "room", name = poi_cap(enemy_name(sp)), x = x, y = y }
-    elseif REF.item_types[sp.kind] then
-      local name = poi_cap(sprite_name(sp.kind))
-      out[#out + 1] = { cat = name:lower():find("key") and "keys" or "pickups", name = name, x = x, y = y }
-    elseif REF.npc_types[sp.kind] then
-      out[#out + 1] = { cat = "room", name = poi_cap(sprite_name(sp.kind)), x = x, y = y }
+    local name
+    if is_enemy(sp) then name = poi_cap(enemy_name(sp))
+    elseif REF.npc_types[sp.kind] then name = poi_cap(sprite_name(sp.kind)) end
+    if name then
+      local d = POI.dist_to(fl, x, y, nil)
+      if d ~= nil and d > 0 then add({ cat = "room", name = name, x = x, y = y, dist = d, unit = "tiles", go = "here" }) end
     end
   end
-  -- Unexplored: reached ground Link has not been near, nearest first and spread out.
+  -- Unexplored ground here: reached tiles Link has not been near, nearest first, spread out.
   local frontier = {}
   for k, d in pairs(fl.dist) do
     local rest = k % 4096
-    local wtx, wty = ox + rest % 64, oy + rest // 64
+    local wtx, wty = fl.ox + rest % 64, fl.oy + rest // 64
     if d >= POI.FRONTIER_MIN and not explored[tile_key(wtx, wty)] then
       frontier[#frontier + 1] = { k = k, d = d, tx = wtx, ty = wty }
     end
@@ -5923,33 +6035,105 @@ function POI.candidates(s, fl)
     end
     if far then
       kept[#kept + 1] = f
-      out[#out + 1] = { cat = "unexplored", name = "Unexplored", x = f.tx * 8 + 4, y = f.ty * 8 + 4,
-                        level = f.k // 4096 }
-      if #kept >= POI.MAX then break end
+      add({ cat = "unexplored", name = "Unexplored ground", x = f.tx * 8 + 4, y = f.ty * 8 + 4,
+            level = f.k // 4096, dist = f.d, unit = "tiles", go = "here" })
+      if #kept >= POI.FRONTIER_KEEP then break end
+    end
+  end
+
+  -- Remembered places.
+  if s.module == 0x07 then
+    -- Other rooms of this dungeon: their things, rooms away by the room graph.
+    local visited = {}
+    for _, p in pairs(SEEN.places) do if p.room then visited[p.room] = p end end
+    for r, p in pairs(visited) do
+      if r ~= s.dungeon_room then
+        local path = room_path(s.dungeon_room, r)
+        if path then
+          for _, t in ipairs(p.things) do
+            add({ cat = t.cat, name = t.name, x = t.x, y = t.y, level = t.level, face = t.face,
+                  dist = #path, unit = "rooms", go = "room", room = r })
+          end
+        end
+      end
+    end
+    -- Unexplored rooms: next to a visited one, never entered, and on a known way.
+    local offered = {}
+    for r in pairs(visited) do
+      for nr in pairs(room_neighbors(r)) do
+        if not visited[nr] and not offered[nr] then
+          offered[nr] = true
+          local path = room_path(s.dungeon_room, nr)
+          if path then
+            local cx, cy = poi_room_centre(nr)
+            add({ cat = "unexplored", name = "Unexplored room", x = cx, y = cy, dist = #path,
+                  unit = "rooms", go = "room", room = nr })
+          end
+        end
+      end
+    end
+  elseif s.module == 0x09 then
+    local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
+    local tiles, refs = {}, {}
+    -- Things on other overworld places in this world.
+    for key, p in pairs(SEEN.places) do
+      if p.area and p.world == w and key ~= here then
+        for _, t in ipairs(p.things) do
+          tiles[#tiles + 1] = { t.x >> 3, t.y >> 3 }
+          refs[#refs + 1] = { cat = t.cat, name = t.name, x = t.x, y = t.y, go = "ow" }
+        end
+      end
+    end
+    -- Unexplored areas: screens next to a visited one, never visited.
+    local visited = {}
+    for _, p in pairs(SEEN.places) do
+      if p.area and p.world == w then visited[ow_parent(p.area & 0x3F)] = true end
+    end
+    local offered = {}
+    for parent in pairs(visited) do
+      for cell = 0, 63 do
+        if ow_parent(cell) == parent then
+          local col, row = cell & 7, cell >> 3
+          for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+            local c2, r2 = col + d[1], row + d[2]
+            if c2 >= 0 and c2 <= 7 and r2 >= 0 and r2 <= 7 then
+              local np = ow_parent(r2 * 8 + c2)
+              if not visited[np] and not offered[np] then
+                offered[np] = true
+                local cx, cy = (np & 7) * 512 + 256, (np >> 3) * 512 + 256
+                tiles[#tiles + 1] = { cx >> 3, cy >> 3 }
+                refs[#refs + 1] = { cat = "unexplored", name = "Unexplored area", x = cx, y = cy,
+                                    go = "area", area = w * 0x40 + np }
+              end
+            end
+          end
+        end
+      end
+    end
+    local lengths = POI.ow_lengths(s, tiles)
+    for i, r in ipairs(refs) do
+      local d = lengths[i]
+      if d then r.dist, r.unit = d, "tiles"; add(r) end
     end
   end
   return out
 end
 
--- The entries of one category: reachable, deduplicated, nearest first, labelled.
-function POI.list(s, fl, cands, cat)
+-- The entries of one category: deduplicated, nearest first (this place before others), labelled.
+function POI.list(s, cands, cat)
   local fx, fy = foot(s)
   local rows = {}
   for _, c in ipairs(cands) do
-    if c.cat == cat then
-      local d = POI.dist_to(fl, c.x, c.y, c.level)
-      if d ~= nil and d > 0 then
-        c.dist = d
-        rows[#rows + 1] = c
-      end
-    end
+    if c.cat == cat then rows[#rows + 1] = c end
   end
-  table.sort(rows, function(a, b) return a.dist < b.dist end)
+  local function rank(c) return (c.unit == "rooms" and 100000 or 0) + c.dist end
+  table.sort(rows, function(a, b) return rank(a) < rank(b) end)
   local kept = {}
   for _, r in ipairs(rows) do
     local dup = false
     for _, k in ipairs(kept) do
-      if k.name == r.name and math.abs(k.x - r.x) + math.abs(k.y - r.y) < POI.DEDUPE * 8 then dup = true; break end
+      if k.name == r.name and k.go == r.go and k.room == r.room
+          and math.abs(k.x - r.x) + math.abs(k.y - r.y) < POI.DEDUPE * 8 then dup = true; break end
     end
     if not dup then
       kept[#kept + 1] = r
@@ -5958,11 +6142,12 @@ function POI.list(s, fl, cands, cat)
   end
   local items = { { label = "Stop navigation", id = "stop" } }
   for _, r in ipairs(kept) do
-    local tiles = math.max(1, (r.dist + 1) // 2)
+    local n, unit = r.dist, r.unit
+    if unit == "tiles" then n = math.max(1, (n + 1) // 2) end
+    local word = unit == "rooms" and (n == 1 and "room" or "rooms") or (n == 1 and "tile" or "tiles")
     POI.entries[#POI.entries + 1] = r
     items[#items + 1] = {
-      label = string.format("%s - %s - %d %s", r.name, poi_cap(direction(r.x - fx, r.y - fy)),
-        tiles, tiles == 1 and "tile" or "tiles"),
+      label = string.format("%s - %s - %d %s", r.name, poi_cap(direction(r.x - fx, r.y - fy)), n, word),
       id = "go:" .. #POI.entries,
     }
   end
@@ -5970,7 +6155,8 @@ function POI.list(s, fl, cands, cat)
 end
 
 -- The marker lists: where each is, to go to it; and slots to place or remove.
-function POI.markers(s, fl)
+function POI.markers(s)
+  local fl = POI.flood(s)
   local fx, fy = foot(s)
   local go = { { label = "Stop navigation", id = "stop" } }
   local add, remove = {}, {}
@@ -5978,14 +6164,14 @@ function POI.markers(s, fl)
     local m = markers[k]
     if m ~= nil then
       local label = "Marker " .. k
+      local wx, wy = m.tx * 8 + 4, m.ty * 8 + 4
+      local where = poi_cap(direction(wx - fx, wy - fy))
       if m.area == area_id(s) then
-        local wx, wy = m.tx * 8 + 4, m.ty * 8 + 4
         local d = POI.dist_to(fl, wx, wy, nil)
-        local where = poi_cap(direction(wx - fx, wy - fy))
         label = d and string.format("%s - %s - %d tiles", label, where, math.max(1, (d + 1) // 2))
-          or (label .. " - " .. where .. " - unreachable")
+          or (label .. " - " .. where)
       else
-        label = label .. " - another area"
+        label = label .. " - " .. where .. " - elsewhere"
       end
       go[#go + 1] = { label = label, id = "mark:go:" .. k }
       remove[#remove + 1] = { label = "Marker " .. k, id = "mark:del:" .. k }
@@ -6002,24 +6188,54 @@ end
 -- Builds and opens the menu.
 function POI.open(s)
   POI.entries = {}
-  local d, ox, oy, lv = POI.flood(s)
-  local fl = { dist = d, ox = ox, oy = oy, lv = lv }
-  local cands = POI.candidates(s, fl)
+  SEEN.tick(s) -- what is here now, before listing it
+  local cands = POI.candidates(s)
   local items = {}
-  if nav_active or pathfind_active or ow_route_goal ~= nil then
+  if nav_active or pathfind_active or ow_route_goal ~= nil or route_room ~= nil then
     items[#items + 1] = { label = "Stop navigation", id = "stop" }
   end
   items[#items + 1] = { label = nav_active and "Quest objective, guiding" or "Quest objective", id = "objective" }
-  items[#items + 1] = { label = "Markers", items = POI.markers(s, fl) }
+  items[#items + 1] = { label = "Markers", items = POI.markers(s) }
   items[#items + 1] = { label = "Exploration", items = {
-    { label = "Unexplored", items = POI.list(s, fl, cands, "unexplored") },
-    { label = "Unopened", items = POI.list(s, fl, cands, "unopened") },
-    { label = "Keys", items = POI.list(s, fl, cands, "keys") },
-    { label = "Pickups", items = POI.list(s, fl, cands, "pickups") },
-    { label = "Exits and stairs", items = POI.list(s, fl, cands, "exits") },
-    { label = "This room", items = POI.list(s, fl, cands, "room") },
+    { label = "Unexplored", items = POI.list(s, cands, "unexplored") },
+    { label = "Unopened", items = POI.list(s, cands, "unopened") },
+    { label = "Keys", items = POI.list(s, cands, "keys") },
+    { label = "Pickups", items = POI.list(s, cands, "pickups") },
+    { label = "Exits and stairs", items = POI.list(s, cands, "exits") },
+    { label = "This room", items = POI.list(s, cands, "room") },
   } }
   menu.open({ title = "Navigate", items = items })
+end
+
+-- Sets off toward a chosen entry, by whatever route reaches it.
+function POI.go(s, e)
+  -- A destination chosen by hand replaces the quest guide, which would otherwise re-aim at
+  -- the objective on its next pass.
+  nav_stop()
+  POI.pending = nil
+  local arrival = e.name .. "."
+  if e.go == "here" then
+    pathfind_to(e.x, e.y, arrival, e.level, e.face)
+  elseif e.go == "room" then
+    -- Room by room to it, then the carrot to the thing itself once there.
+    if e.name ~= "Unexplored room" then
+      POI.pending = { room = e.room, x = e.x, y = e.y, level = e.level, face = e.face, arrival = arrival }
+    end
+    route_to_room(s, e.room, e.name .. ".")
+  elseif e.go == "ow" then
+    ow_route_to(e.x, e.y)
+  elseif e.go == "area" then
+    ow_route_to_area(e.area)
+  end
+end
+
+-- Once in the room a remembered target is in, the carrot takes over from the room route.
+function POI.tick(s)
+  local p = POI.pending
+  if p == nil or not in_play(s) or s.module ~= 0x07 or s.dungeon_room ~= p.room then return end
+  POI.pending = nil
+  room_route_stop()
+  pathfind_to(p.x, p.y, p.arrival, p.level, p.face)
 end
 
 on_command("poi", function()
@@ -6056,11 +6272,7 @@ function on_menu(id)
   local n = id:match("^go:(%d+)$")
   if n then
     local e = POI.entries[tonumber(n)]
-    if e == nil then return end
-    -- A destination chosen by hand replaces the quest guide, which would otherwise re-aim
-    -- at the objective on its next pass.
-    nav_stop()
-    pathfind_to(e.x, e.y, e.name .. ".", e.level, e.face)
+    if e ~= nil then POI.go(s, e) end
     return
   end
   local verb, k = id:match("^mark:(%a+):(%d+)$")
@@ -6072,8 +6284,20 @@ function on_menu(id)
     mark_clear(k)
     say("Marker " .. k .. " removed.", { priority = "navigation", category = "on-demand" })
   elseif verb == "go" then
-    nav_stop()
-    mark_goto(k)
+    local m = markers[k]
+    if m == nil then
+      say("No marker there.", { priority = "navigation", category = "on-demand" })
+    elseif m.area == area_id(s) then
+      nav_stop()
+      mark_goto(k)
+    elseif m.room and s.module == 0x07 then
+      POI.go(s, { name = "Marker " .. k, go = "room", room = m.room, x = m.tx * 8 + 4, y = m.ty * 8 + 4 })
+    elseif m.module == 0x09 and s.module == 0x09 then
+      POI.go(s, { name = "Marker " .. k, go = "ow", x = m.tx * 8 + 4, y = m.ty * 8 + 4 })
+    else
+      say("That marker is somewhere this guide cannot route from here.",
+          { priority = "navigation", category = "on-demand" })
+    end
   end
 end
 

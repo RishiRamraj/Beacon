@@ -7525,3 +7525,53 @@ fn alttp_m_opens_tobys_points_of_interest_menu() {
     plugin.on_frame(&ram, 2);
     assert!(path_beacon(&mut plugin).is_some(), "the carrot leads to the chest");
 }
+
+#[test]
+fn alttp_the_menu_remembers_what_was_seen_in_other_rooms() {
+    // Toby lists what the player has seen, not just what is in front of him: a chest passed in
+    // the last room is still on the Unopened list after leaving it, rooms away, and the room
+    // next door that has never been entered is Unexplored.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let in_room = |room: u16, chest: bool| -> Vec<u8> {
+        let mut ram = dungeon_frame((32, 40), (10, 10), &[]);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E005D, 0x00); // awake
+        set(0x7E00A0, (room & 0xFF) as u8);
+        set(0x7E00A1, (room >> 8) as u8);
+        if chest {
+            for (tx, ty) in [(46u32, 40u32), (47, 40), (46, 41), (47, 41)] {
+                set(0x7F2000 + ty * 64 + tx, 0x58);
+            }
+        }
+        ram
+    };
+    // Room 0x72 (the castle's map-chest room), with a chest; then next door, 0x82.
+    let a = in_room(0x72, true);
+    plugin.on_frame(&a, 0);
+    plugin.on_frame(&a, 1);
+    let b = in_room(0x82, false);
+    plugin.on_frame(&b, 2);
+    plugin.on_frame(&b, 3);
+    plugin.command("poi", &b);
+    let menu = plugin.take_menu().expect("the menu opens");
+    let exploration = menu.items.iter().find(|i| i.label == "Exploration").unwrap();
+    let unopened = exploration.items.iter().find(|i| i.label == "Unopened").unwrap();
+    let chest = unopened
+        .items
+        .iter()
+        .find(|i| i.label.starts_with("Chest - "))
+        .unwrap_or_else(|| panic!("the chest seen in 0x72 is remembered: {:?}", unopened.items));
+    assert!(chest.label.ends_with("1 room"), "one room away: {}", chest.label);
+    let unexplored = exploration.items.iter().find(|i| i.label == "Unexplored").unwrap();
+    assert!(
+        unexplored.items.iter().any(|i| i.label.starts_with("Unexplored room - ")),
+        "rooms next to visited ones are unexplored: {:?}",
+        unexplored.items
+    );
+
+    // Choosing the chest routes room by room toward 0x72.
+    plugin.menu_chosen(chest.id.as_deref().unwrap(), &b);
+    let routed = plugin.eval("return tostring(route_room)", &b).unwrap();
+    assert_eq!(routed, format!("{}", 0x72), "routing to the chest's room");
+}
