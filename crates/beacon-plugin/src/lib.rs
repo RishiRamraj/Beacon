@@ -122,6 +122,14 @@ pub trait Plugin {
     fn menu_chosen(&mut self, _id: &str, _ram: &[u8]) -> Vec<Intent> {
         Vec::new()
     }
+
+    /// Buttons the plugin asked the host to hold for the player, and for how many frames,
+    /// since the last call: the SNES button mask (bsnes order, `UP` = 1 << 11) and a count.
+    /// For a command that acts on the player's behalf — turning Link to face a target — not
+    /// for playing the game: the host adds them to the player's own buttons, briefly.
+    fn take_input(&mut self) -> Option<(u16, u32)> {
+        None
+    }
 }
 
 /// One line of a plugin's menu: something to choose (it has an `id`), or a submenu (it has

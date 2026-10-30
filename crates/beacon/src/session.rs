@@ -116,6 +116,8 @@ pub struct Session {
     menu_version: u64,
     /// The plugin's own menu, flattened, while it is the menu on show.
     plugin_menu: Vec<menu::PluginNode>,
+    /// Buttons the plugin is holding for the player (snap to target), and frames left.
+    plugin_hold: (u16, u32),
     /// Whether to log frames whose plugin work is slow (`BEACON_STATS`).
     slow_frame_log: bool,
     last_spoken: Option<String>,
@@ -218,6 +220,7 @@ impl Session {
             voices: VoiceMixer::default(),
             slow_frame_log: std::env::var_os("BEACON_STATS").is_some(),
             plugin_menu: Vec::new(),
+            plugin_hold: (0, 0),
             menu_overlay: Vec::new(),
             menu_version: 0,
             last_spoken: None,
@@ -278,7 +281,13 @@ impl Session {
         let Some(emu) = self.emu.as_mut() else {
             return;
         };
-        emu.set_buttons(0, self.held_buttons);
+        let hold = if self.plugin_hold.1 > 0 {
+            self.plugin_hold.1 -= 1;
+            self.plugin_hold.0
+        } else {
+            0
+        };
+        emu.set_buttons(0, self.held_buttons | hold);
 
         emu.run_frame();
         self.frames += 1;
@@ -582,6 +591,9 @@ impl Session {
     /// Starts, moves and stops the sounds the plugin asked for since the last drain. They
     /// are heard from the next frame's audio, a sixtieth of a second on.
     fn drain_sounds(&mut self) {
+        if let Some(hold) = self.plugin.take_input() {
+            self.plugin_hold = hold;
+        }
         if let Some(tree) = self.plugin.take_menu() {
             self.open_plugin_menu(tree);
         }

@@ -98,6 +98,11 @@ pub fn render(name: &str, rate: u32) -> Option<Vec<f32>> {
         // --- Targeting.
         "weapons/lock" => s.square(1200.0, 0.025, 0.4),
 
+        // --- Hits and kills. Beacon's own: Toby's hit markers are commercial games' sounds,
+        // which it cannot use, so these are only ever synthesized.
+        "beacon/hit" => mix(&s.click(0.02, 0.7, 5000.0), &s.square(880.0, 0.04, 0.35)),
+        "beacon/kill" => mix(&s.chirp(660.0, 140.0, 0.22, 0.5), &s.noise(0.2, 0.4, 1500.0)),
+
         _ => return None,
     };
     Some(out)
@@ -317,6 +322,8 @@ mod tests {
         "door/deniedred",
         "toby/universalbeacons/key",
         "weapons/lock",
+        "beacon/hit",
+        "beacon/kill",
     ];
 
     #[test]

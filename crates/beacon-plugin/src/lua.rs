@@ -57,6 +57,8 @@ type Beacons = Rc<RefCell<BTreeMap<String, BeaconState>>>;
 type Sounds = Rc<RefCell<Vec<SoundCmd>>>;
 /// A menu the plugin asked to have opened, until the host takes it.
 type MenuRequest = Rc<RefCell<Option<MenuItem>>>;
+/// Buttons the plugin asked to have held, and for how many frames.
+type InputRequest = Rc<RefCell<Option<(u16, u32)>>>;
 
 /// The most sound commands kept between drains. A host that never drains them (the
 /// headless benchmark, a test) must not grow this without bound; past the cap the oldest
@@ -75,6 +77,7 @@ pub struct LuaPlugin {
     beacons: Beacons,
     sounds: Sounds,
     menu: MenuRequest,
+    input: InputRequest,
 }
 
 impl LuaPlugin {
@@ -105,6 +108,8 @@ impl LuaPlugin {
         install_sound(&lua, &sounds)?;
         let menu: MenuRequest = Rc::new(RefCell::new(None));
         install_menu(&lua, &menu)?;
+        let input: InputRequest = Rc::new(RefCell::new(None));
+        install_input(&lua, &input)?;
         crate::nav::install(&lua)?;
 
         // Modules first, in declared order, each its own chunk (its own local
@@ -136,6 +141,7 @@ impl LuaPlugin {
             beacons,
             sounds,
             menu,
+            input,
         })
     }
 
@@ -246,6 +252,10 @@ impl Plugin for LuaPlugin {
 
     fn take_menu(&mut self) -> Option<MenuItem> {
         self.menu.borrow_mut().take()
+    }
+
+    fn take_input(&mut self) -> Option<(u16, u32)> {
+        self.input.borrow_mut().take()
     }
 
     fn menu_chosen(&mut self, id: &str, ram: &[u8]) -> Vec<Intent> {
@@ -732,6 +742,55 @@ fn install_menu(lua: &Lua, request: &MenuRequest) -> Result<(), Error> {
         })?,
     )?;
     lua.globals().set("menu", table)?;
+    Ok(())
+}
+
+/// Installs `input.hold(buttons, frames)`: press buttons for the player, briefly.
+///
+/// `buttons` is a name or a list of names — `up`, `down`, `left`, `right`, `a`, `b`, `x`,
+/// `y`, `l`, `r`, `start`, `select` — and `frames` how long to hold them (default 1, at most
+/// 60). For acting on the player's behalf, such as turning to face a target; the host adds
+/// them to the player's own buttons rather than replacing them.
+fn install_input(lua: &Lua, request: &InputRequest) -> Result<(), Error> {
+    fn bit(name: &str) -> Option<u16> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "b" => 1 << 15,
+            "y" => 1 << 14,
+            "select" => 1 << 13,
+            "start" => 1 << 12,
+            "up" => 1 << 11,
+            "down" => 1 << 10,
+            "left" => 1 << 9,
+            "right" => 1 << 8,
+            "a" => 1 << 7,
+            "x" => 1 << 6,
+            "l" => 1 << 5,
+            "r" => 1 << 4,
+            _ => return None,
+        })
+    }
+    let table = lua.create_table()?;
+    let r = request.clone();
+    table.set(
+        "hold",
+        lua.create_function(move |_, (buttons, frames): (Value, Option<u32>)| {
+            let mut mask = 0u16;
+            match buttons {
+                Value::String(s) => mask |= bit(&s.to_str()?).unwrap_or(0),
+                Value::Table(t) => {
+                    for name in t.sequence_values::<String>() {
+                        mask |= bit(&name?).unwrap_or(0);
+                    }
+                }
+                _ => {}
+            }
+            if mask != 0 {
+                *r.borrow_mut() = Some((mask, frames.unwrap_or(1).clamp(1, 60)));
+            }
+            Ok(())
+        })?,
+    )?;
+    lua.globals().set("input", table)?;
     Ok(())
 }
 

@@ -7654,3 +7654,53 @@ fn alttp_the_world_makes_tobys_sounds() {
         "the wind from the wall to the east: {l:?}"
     );
 }
+
+#[test]
+fn alttp_enemies_are_handled_tobys_way() {
+    // Toby's targeting: a lock tick while an enemy is straight ahead of the way Link faces,
+    // a name for a new target, a sound where a blow lands and where an enemy falls, a scan
+    // counted in distance bands, and snap-to-target turning him to face it.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // A Green Soldier (type 65) 48 px east, health 4; Link faces east.
+    let soldier = |hp: u8, facing: u8| -> Vec<u8> {
+        let mut ram = frame_with_sprite(65, 48);
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0E50, hp);
+        set(0x7E002F, facing);
+        ram
+    };
+    plugin.on_frame(&soldier(4, 6), 0);
+    let said: Vec<String> = plugin.on_frame(&soldier(4, 6), 1).into_iter().map(|i| i.text).collect();
+    let heard = played(&mut plugin);
+    assert!(
+        heard.iter().any(|(n, _, _)| n == "weapons/lock"),
+        "the lock tick, facing it: {heard:?}"
+    );
+    assert!(said.iter().any(|t| t.contains("Soldier")), "the new target named: {said:?}");
+    // Facing away: no lock.
+    let away = sounds_over(&mut plugin, &soldier(4, 4), 2, 20);
+    assert!(!away.iter().any(|(n, _, _)| n == "weapons/lock"), "no lock facing away");
+
+    // A blow lands, then it falls.
+    plugin.on_frame(&soldier(2, 6), 30);
+    assert!(played(&mut plugin).iter().any(|(n, _, _)| n == "beacon/hit"), "a hit");
+    plugin.on_frame(&soldier(0, 6), 31);
+    assert!(played(&mut plugin).iter().any(|(n, _, _)| n == "beacon/kill"), "a kill");
+
+    // Scan: counted, banded, and directed.
+    let ram = soldier(4, 6);
+    plugin.on_frame(&ram, 40);
+    let scan: Vec<String> = plugin.command("scan", &ram).into_iter().map(|i| i.text).collect();
+    assert!(
+        scan.iter().any(|t| t.contains("Soldier") && t.contains("east") && t.contains("close")),
+        "a Toby-style scan line: {scan:?}"
+    );
+
+    // Snap: facing west, the command turns him east toward it.
+    let west = soldier(4, 4);
+    plugin.on_frame(&west, 50);
+    let said: Vec<String> = plugin.command("snap", &west).into_iter().map(|i| i.text).collect();
+    assert_eq!(plugin.take_input(), Some((1 << 8, 2)), "hold right for two frames");
+    assert!(said.iter().any(|t| t.contains("Soldier") && t.contains("east")), "{said:?}");
+}

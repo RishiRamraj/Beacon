@@ -97,3 +97,8 @@ key   = "KeyM"                       # "M", as in Toby; the map is on backquote
 id    = "proximity"
 label = "Toggle the wall proximity sound"
 key   = "Quote"                      # "'", Toby's own key for it
+
+[[command]]
+id    = "snap"
+label = "Face the nearest enemy"
+key   = "Semicolon"                  # beside ', the proximity sound; Toby's Z is the SNES B here

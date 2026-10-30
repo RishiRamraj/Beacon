@@ -3040,6 +3040,124 @@ function PUSH.tone(s)
   end
 end
 
+-- ── Enemies, Toby's way ─────────────────────────────────────────────────────
+-- In Doom every monster is heard by its own sounds; ALttP's are mostly silent, so the few
+-- nearest each carry Beacon's enemy tone. On top of that, Toby's targeting:
+--   lock     Toby's lock tick, every 7 tics (12 frames), while an enemy is straight ahead of
+--            the way Link faces, within LOCK_RANGE and in sight; a new target is named
+--   hit      a sound where a blow lands (an enemy's health drops)
+--   kill     a sound where an enemy falls (its health reaches nothing)
+--   snap     a command: turn Link to face the nearest enemy in sight (Toby's snap-to-target)
+ENEMY = {
+  VOICES = 4,        -- enemies that sound at once, nearest first
+  LOCK_RANGE = 128,  -- px ahead: eight tiles, about an arrow's useful reach
+  LOCK_WIDTH = 12,   -- px either side of the line he faces
+  LOCK_EVERY = 12,   -- frames between lock ticks
+  lock_in = 0,
+  target = nil,      -- slot of the enemy locked on
+  hp = {},           -- slot -> { kind, hp } as last seen, for hits and kills
+}
+
+function ENEMY.voices(s, list)
+  local k = 1
+  for _, sp in ipairs(list) do
+    if category(sp) == "enemy" then
+      if k > 1 then
+        sound_beacon(s, "enemy" .. k, sp.dx, sp.dy, sp.dist, BEACON_KINDS.enemy, false)
+      end
+      k = k + 1
+      if k > ENEMY.VOICES then break end
+    end
+  end
+  for i = math.max(2, k), ENEMY.VOICES do beacon.clear("enemy" .. i) end
+end
+
+function ENEMY.silence()
+  for i = 2, ENEMY.VOICES do beacon.clear("enemy" .. i) end
+  ENEMY.target, ENEMY.hp = nil, {}
+end
+
+-- The enemy straight ahead of Link's facing, nearest first, or nil.
+function ENEMY.ahead(s, list)
+  local d = DIRS[s.direction]
+  if d == nil then return nil end
+  local best, best_along
+  for _, sp in ipairs(list) do
+    if is_enemy(sp) and (sp.hp or 0) > 0 then
+      local along = d.dx * sp.dx + d.dy * sp.dy
+      local across = math.abs(d.dx * sp.dy - d.dy * sp.dx)
+      if along > 0 and along <= ENEMY.LOCK_RANGE and across <= ENEMY.LOCK_WIDTH
+          and (best_along == nil or along < best_along)
+          and not sight_blocked(s, s.x, s.y, s.x + sp.dx, s.y + sp.dy) then
+        best, best_along = sp, along
+      end
+    end
+  end
+  return best
+end
+
+function ENEMY.update(s, list)
+  -- Target lock.
+  local t = ENEMY.ahead(s, list)
+  if t then
+    ENEMY.lock_in = ENEMY.lock_in - 1
+    if ENEMY.lock_in <= 0 then
+      ENEMY.lock_in = ENEMY.LOCK_EVERY
+      sound.ui("weapons/lock")
+    end
+    if ENEMY.target ~= t.slot then
+      ENEMY.target = t.slot
+      say(poi_cap_name(enemy_name(t)) .. ".", { priority = "interaction", category = "target", rate_limit = "1s" })
+    end
+  else
+    ENEMY.target, ENEMY.lock_in = nil, 0
+  end
+
+  -- Hits and kills, by each enemy's health against its last.
+  local live = {}
+  for _, sp in ipairs(list) do
+    if is_enemy(sp) then
+      live[sp.slot] = true
+      local was = ENEMY.hp[sp.slot]
+      local hp = sp.hp or 0
+      if was ~= nil and was.kind == sp.kind and hp < was.hp then
+        sound.play(hp == 0 and "beacon/kill" or "beacon/hit", { x = sp.dx, y = sp.dy, volume = 0.9 })
+      end
+      ENEMY.hp[sp.slot] = { kind = sp.kind, hp = hp }
+    end
+  end
+  for slot in pairs(ENEMY.hp) do
+    if not live[slot] then ENEMY.hp[slot] = nil end
+  end
+end
+
+-- Capitalised, for saying a name on its own.
+function poi_cap_name(text)
+  return (text:gsub("^%l", string.upper))
+end
+
+-- Toby's snap-to-target: turn Link to face the nearest enemy in sight, and say which.
+on_command("snap", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  for _, sp in ipairs(sprites()) do
+    if is_enemy(sp) and (sp.hp or 0) > 0 and on_screen(sp.dx, sp.dy)
+        and not sight_blocked(s, s.x, s.y, s.x + sp.dx, s.y + sp.dy) then
+      local dir
+      if math.abs(sp.dx) > math.abs(sp.dy) then dir = sp.dx > 0 and "right" or "left"
+      else dir = sp.dy > 0 and "down" or "up" end
+      input.hold(dir, 2)
+      say(string.format("%s, %s.", poi_cap_name(enemy_name(sp)), direction(sp.dx, sp.dy)),
+          { priority = "navigation", category = "on-demand" })
+      return
+    end
+  end
+  say("No target in sight.", { priority = "navigation", category = "on-demand" })
+end)
+
 -- ── World cues, Toby's way ──────────────────────────────────────────────────
 -- Things in the world make their own sounds, from where they are, as Toby's beacons do — its
 -- own recordings, from the player's Toby install, or Beacon's stand-ins. Kept sparse by the
@@ -3395,8 +3513,15 @@ function on_frame(frame)
       end
     end
 
+    -- Every enemy sounds, not only the nearest: in Doom each monster makes its own noise,
+    -- and ALttP's mostly make none, so the nearest few each carry the enemy tone.
+    ENEMY.voices(now, list)
+
     -- Pickups, chests, exits, stairs, doors, markers, spikes: Toby's sounds from the world.
     WORLD.update(now, list, combat_engaged)
+
+    -- Toby's target lock, and the sound of a hit landing or an enemy falling.
+    ENEMY.update(now, list)
 
     -- The enemy-weapon tone, on the nearest swinging weapon (the flail ball today).
     -- Never hushed — it is the acute threat, and its own arc is what has to be dodged.
@@ -3418,6 +3543,7 @@ function on_frame(frame)
     beacon.clear("weapon")
     beacon.clear("push")
     WORLD.silence()
+    ENEMY.silence()
   end
 
   -- Remember where Link has been, for the explore command.
@@ -3504,37 +3630,52 @@ on_command("scan", function()
     return
   end
   local list = sprites()
-  if #list == 0 then
+
+  -- Toby's area scanner: everything in view counted by name, in distance bands (close
+  -- within 200 Doom units, medium within 1000: 100 and 500 px here) and by direction, nearest
+  -- first. Enemies are named as enemies (a damageable sprite is a threat whatever the type
+  -- table would call it). The fixed things of this place — chests, locked doors, exits,
+  -- stairs — are counted too, as Toby counts doors and switches.
+  local function band(d)
+    if d < 100 then return "close" elseif d < 500 then return "medium distance" end
+    return "far"
+  end
+  local seen = {}
+  for _, sp in ipairs(list) do
+    local nm = is_enemy(sp) and enemy_name(sp) or (REF.sprite_names[sp.kind] or "object")
+    seen[#seen + 1] = { name = nm, dx = sp.dx, dy = sp.dy, dist = sp.dist }
+  end
+  local place = SEEN.places[SEEN.key_of(prev)]
+  local cx, cy = prev.x + 8, prev.y + 8
+  for _, t in ipairs(place and place.things or {}) do
+    if t.name ~= "Doorway" then
+      local dx, dy = t.x - cx, t.y - cy
+      if on_screen(dx, dy) then
+        seen[#seen + 1] = { name = t.name:lower(), dx = dx, dy = dy, dist = math.abs(dx) + math.abs(dy) }
+      end
+    end
+  end
+  if #seen == 0 then
     say("Nothing nearby.", { priority = "navigation", category = "on-demand" })
     return
   end
-
-  -- Group by name and direction; `list` is nearest-first, so a group's first
-  -- sighting is its nearest member, which fixes both the ordering and the
-  -- distance word. Enemies are named as enemies (a damageable sprite is a threat
-  -- even if the type table would call it something else); the rest by object name.
+  table.sort(seen, function(a, b) return a.dist < b.dist end)
   local groups, order = {}, {}
-  for _, sp in ipairs(list) do
-    local nm = is_enemy(sp) and enemy_name(sp) or (REF.sprite_names[sp.kind] or "object")
-    local dir = direction(sp.dx, sp.dy)
-    local key = nm .. "\0" .. dir
+  for _, o in ipairs(seen) do
+    local dir, b = direction(o.dx, o.dy), band(o.dist)
+    local key = o.name .. "\0" .. dir .. "\0" .. b
     local g = groups[key]
     if g == nil then
-      g = { name = nm, dir = dir, count = 0, dist = sp.dist }
+      g = { name = o.name, dir = dir, band = b, count = 0 }
       groups[key] = g
       order[#order + 1] = key
     end
     g.count = g.count + 1
   end
-
-  say(string.format("%d nearby.", #list), { priority = "navigation", category = "on-demand" })
-  -- Up to four groups, nearest first, so it stays a summary rather than a list.
-  for i = 1, math.min(4, #order) do
+  say(string.format("%d nearby.", #seen), { priority = "navigation", category = "on-demand" })
+  for i = 1, math.min(10, #order) do
     local g = groups[order[i]]
-    say(
-      group_phrase(g.count, g.name, g.dir, proximity(g.dist)),
-      { priority = "navigation", category = "on-demand" }
-    )
+    say(group_phrase(g.count, g.name, g.dir, g.band), { priority = "navigation", category = "on-demand" })
   end
 end)
 
