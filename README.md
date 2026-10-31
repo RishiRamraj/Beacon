@@ -76,49 +76,111 @@ supports — falling back to SAPI. Keep `Tolk.dll`, `nvdaControllerClient64.dll`
 
 ### Controls
 
-The game controls are the SNES pad as emulators lay it out on a keyboard, so the face
-buttons sit in the pad's own shape under the left hand. Beacon's own keys follow the
+Written to read well with a screen reader: no tables, every key named as a word. The same
+text ships with the Windows build as `CONTROLS.txt`.
+
+Beacon plays the game with the keyboard laid out like a Super Nintendo controller. All the
+other keys are Beacon's own, and they follow the
 [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod) for Doom
-wherever Toby has the same thing. Game controls are fixed; everything else is an **action**
-and every action is rebindable, from the keyboard or a controller.
+wherever Toby has the same thing. Every key except the game controls can be changed with F12.
 
-| Game (fixed) | | Toby's keys (rebindable) | |
-|---|---|---|---|
-| arrows | d-pad | m | points-of-interest menu |
-| z / x | B / A | v | scan the area |
-| a / s | Y / X | g | snap to the nearest enemy |
-| q / w | L / R | c / f | say facing / face north |
-| enter | Start | e / r / t | turn left / right / round |
-| right shift | Select | h / b / n / k / i | health / ammo / armour / keys / item |
-| | | u / delete | coordinates / where am I |
-| | | ; / ' | quest progress / wall proximity sound |
-| | | f6 / f9 | save / load state |
-| | | esc | Beacon's menu |
+#### Playing the game
 
-Beacon's own: `l` guide to the next quest step, `y` stop guiding, `d` read the text box, `-`
-sweep the room, `` ` `` show/hide the map, `=` cycle verbosity, `/` repeat last, `j` mute,
-`f7` / `f8` previous / next save slot, `f4` pause, `f10` frame advance, `f12` input
-configuration, `f11` quit. In a menu, the arrows move, `x` or enter chooses, `z` goes back
-and escape closes.
+- Arrow keys: move.
+- Letter X: the A button. Talk, lift, open, read.
+- Letter Z: the B button. Swing the sword.
+- Letter S: the X button. The world map.
+- Letter A: the Y button. Use the item in hand.
+- Letter Q: the L button.
+- Letter W: the R button.
+- Enter: Start. The item menu.
+- Right Shift: Select.
 
-**Controllers.** Any USB controller works, alongside the keyboard: SNES-style pads, 8BitDo,
-Xbox and PlayStation pads. Buttons go by position, so on any pad the right face button is A
-and the bottom one B, as on a SNES; the left stick doubles as the d-pad. A SNES pad's twelve
-buttons all drive the game, so Beacon's actions are on a **Select layer** — hold Select and
-press a button; a tap of Select on its own still reaches the game:
+The letters Z, X, A and S sit in the same shape as the controller's buttons: Z and X along
+the bottom row, A and S above them.
 
-| Select + | | Select + | |
-|---|---|---|---|
-| Start | Beacon's menu | up | say facing |
-| A | points-of-interest menu | down | health |
-| B | stop guiding | left | repeat last |
-| X | guide to the next quest step | right | where am I |
-| Y | scan | L / R | read the text box / snap to target |
+#### Finding your way
 
-A pad with more buttons also has the stick buttons, L2 / R2 and the guide button for actions.
-In a menu, the d-pad moves, A chooses, B goes back and Start closes. A pad Beacon does not
-recognise, or whose buttons come out wrong, can be given an SDL controller mapping in
-`input.pad_mappings` (or the `SDL_GAMECONTROLLERCONFIG` environment variable).
+- M: the navigation menu. It lists where you can go: your quest objective, your markers, and
+  places you have found, such as unexplored areas, unopened chests, keys, pickups, exits and
+  stairs, and what is in this room. Each list starts with Stop navigation. Pick a place and a
+  beeping sound leads you there. Walk toward the beep. It changes when you are facing it.
+- L: turn the quest guide on or off. It leads you to the next step of the story.
+- Y: stop guiding.
+- V: scan. Says what is around you, how far, and in which direction.
+- G: turn to face the nearest enemy.
+- Apostrophe: turn the wall sounds on or off. When on, a wind sound tells you how far the
+  walls are in each direction.
+- Backtick, the key left of 1: show or hide the map.
+
+#### Which way you are facing
+
+- C: say which way you are facing.
+- F: face north.
+- E: turn left.
+- R: turn right.
+- T: turn around.
+
+#### Checking your status
+
+- H: health.
+- B: rupees, bombs, arrows and magic.
+- N: sword, shield and armour.
+- K: keys.
+- I: the item in your hand.
+- U: exact coordinates.
+- Delete: where am I.
+- Semicolon: the current quest objective.
+- D: read the text box on screen again.
+- Slash: repeat the last thing said.
+
+#### Saving and other keys
+
+- F6: save.
+- F9: load.
+- F7 and F8: previous and next save slot.
+- Escape: Beacon's menu, for opening games, settings and quitting.
+- Equals: change how much Beacon says.
+- J: mute.
+- F4: pause.
+- F12: change key bindings.
+- F11: quit.
+- F10: advance one frame, for debugging a plugin.
+
+#### In any menu
+
+- Up and down arrows: move through the list.
+- X, Enter or right arrow: choose.
+- Z, Backspace or left arrow: go back.
+- Escape: close.
+
+#### Using a USB controller
+
+Any USB controller should work alongside the keyboard, including Super Nintendo style
+controllers. The buttons work by position, the same as on a Super Nintendo: the right button
+is A and the bottom button is B. The left stick also moves.
+
+To use Beacon's own commands, hold Select and press another button. Tapping Select on its own
+still sends Select to the game.
+
+- Select and Start: Beacon's menu.
+- Select and A: the navigation menu.
+- Select and B: stop guiding.
+- Select and X: the quest guide.
+- Select and Y: scan.
+- Select and L: read the text box.
+- Select and R: face the nearest enemy.
+- Select and up: say which way you are facing.
+- Select and down: health.
+- Select and left: repeat the last thing said.
+- Select and right: where am I.
+
+In menus on the controller, up and down move, A chooses, B goes back, and Start closes.
+
+A controller with more buttons also has its stick buttons, L2, R2 and guide button for
+Beacon's commands. A controller Beacon does not recognise, or whose buttons come out wrong,
+can be given an SDL controller mapping in the `input.pad_mappings` setting, or in the
+`SDL_GAMECONTROLLERCONFIG` environment variable.
 
 **Rebinding.** Press the input-configuration key (`f12`, or the left stick button).
 Press a Select chord there to bind it, like any key.
