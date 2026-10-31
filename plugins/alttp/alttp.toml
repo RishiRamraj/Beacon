@@ -64,7 +64,8 @@ key   = "KeyU"                       # Toby's coordinates key
 [[command]]
 id    = "read_text"
 label = "Read the current text box"
-key   = "KeyT"                       # "t" for text; rebindable
+key   = "KeyD"
+pad   = "Pad:Select+L"
 
 [[command]]
 id    = "pathfind"
@@ -74,6 +75,7 @@ label = "Guide to the nearest door"
 id    = "pathfind_stop"
 label = "Stop guiding"
 key   = "KeyY"
+pad   = "Pad:Select+B"
 
 [[command]]
 id    = "sweep"
@@ -88,12 +90,14 @@ key   = "Semicolon"                  # Toby's level-stats key: how far along the
 [[command]]
 id    = "advance"
 label = "Guide to the next quest step"
-key   = "KeyL"                       # "L" for the lead/guide; Beacon's own
+key   = "KeyL"
+pad   = "Pad:Select+X"
 
 [[command]]
 id    = "poi"
 label = "Navigate to a point of interest"
-key   = "KeyM"                       # Toby's marker and pathfinder menu
+key   = "KeyM"
+pad   = "Pad:Select+A"
 
 [[command]]
 id    = "proximity"
@@ -103,12 +107,14 @@ key   = "Quote"                      # Toby's proximity detector
 [[command]]
 id    = "snap"
 label = "Face the nearest enemy"
-key   = "KeyZ"                       # Toby's snap to target
+key   = "KeyG"
+pad   = "Pad:Select+R"
 
 [[command]]
 id    = "compass"
 label = "Say which way Link faces"
-key   = "KeyQ"                       # Toby's compass
+key   = "KeyC"
+pad   = "Pad:Select+Up"
 
 [[command]]
 id    = "face_north"
@@ -128,7 +134,7 @@ key   = "KeyR"
 [[command]]
 id    = "quickturn"
 label = "Turn around"
-key   = "KeyX"                       # Toby's quick turn
+key   = "KeyT"
 
 [[command]]
 id    = "ammo"

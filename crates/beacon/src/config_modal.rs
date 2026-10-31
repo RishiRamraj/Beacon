@@ -181,7 +181,7 @@ mod tests {
         // Down to scan, which the default keymap binds to C and, on a pad, the
         // right stick button. Both are announced, in key-name order.
         let said = modal.navigate(1, &keymap);
-        assert_eq!(said, "Scan. V, right stick button.");
+        assert_eq!(said, "Scan. V, right stick button, Select and Y.");
 
         // Wraps back to the top.
         let said = modal.navigate(1, &keymap);
@@ -197,7 +197,7 @@ mod tests {
         let view = modal.view(&keymap);
         assert_eq!(view.rows.len(), 2);
         assert!(view.rows[0].starts_with("Save state."), "{:?}", view.rows);
-        assert_eq!(view.rows[1], "Scan. V, right stick button.");
+        assert_eq!(view.rows[1], "Scan. V, right stick button, Select and Y.");
         assert_eq!(view.selected, 0);
         // The row the cursor is on is the row that is spoken: one source, not two wordings.
         assert_eq!(view.rows[view.selected], modal.announce(&keymap));
@@ -215,7 +215,7 @@ mod tests {
         let mut modal = ConfigModal::new(actions());
         assert_eq!(
             modal.select(1, &keymap).as_deref(),
-            Some("Scan. V, right stick button.")
+            Some("Scan. V, right stick button, Select and Y.")
         );
         assert_eq!(modal.view(&keymap).selected, 1);
         assert_eq!(modal.select(9, &keymap), None, "out of range does nothing");
@@ -251,10 +251,10 @@ mod tests {
         let mut keymap = Keymap::default();
         let modal = ConfigModal::new(actions());
 
-        // Space is the SNES A button (Toby's "use"); WASD, the arrows and Enter are game keys too.
-        let result = modal.bind("Space", &mut keymap);
+        // X is the SNES A button; the arrow keys and Enter are game keys too.
+        let result = modal.bind("KeyX", &mut keymap);
         assert!(matches!(result, Bound::Refused(_)));
-        assert_eq!(keymap.action_for("Space"), None);
+        assert_eq!(keymap.action_for("KeyX"), None);
     }
 
     #[test]

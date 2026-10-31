@@ -76,35 +76,52 @@ supports — falling back to SAPI. Keep `Tolk.dll`, `nvdaControllerClient64.dll`
 
 ### Controls
 
-The keys follow the [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod)
-for Doom wherever Toby has the same thing, so a player who knows Toby knows where things are.
-Game controls are fixed; everything else is an **action** and every action is rebindable, from
-the keyboard or a controller.
+The game controls are the SNES pad as emulators lay it out on a keyboard, so the face
+buttons sit in the pad's own shape under the left hand. Beacon's own keys follow the
+[Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod) for Doom
+wherever Toby has the same thing. Game controls are fixed; everything else is an **action**
+and every action is rebindable, from the keyboard or a controller.
 
 | Game (fixed) | | Toby's keys (rebindable) | |
 |---|---|---|---|
-| WASD / arrows | d-pad | m | points-of-interest menu |
-| space | A (use, talk, lift) | v | scan the area |
-| ctrl | B (sword) | z | snap to the nearest enemy |
-| enter | Y (item) | q / f | say facing / face north |
-| . | start (item menu) | e / r / x | turn left / right / round |
-| , | X (world map) | h / b / n / k / i | health / ammo / armour / keys / item |
-| o / p | L / R | u / delete | coordinates / where am I |
-| right shift | select | ; / ' | quest progress / wall proximity sound |
+| arrows | d-pad | m | points-of-interest menu |
+| z / x | B / A | v | scan the area |
+| a / s | Y / X | g | snap to the nearest enemy |
+| q / w | L / R | c / f | say facing / face north |
+| enter | Start | e / r / t | turn left / right / round |
+| right shift | Select | h / b / n / k / i | health / ammo / armour / keys / item |
+| | | u / delete | coordinates / where am I |
+| | | ; / ' | quest progress / wall proximity sound |
 | | | f6 / f9 | save / load state |
 | | | esc | Beacon's menu |
 
-Beacon's own: `l` guide to the next quest step, `y` stop guiding, `t` read the text box, `-`
+Beacon's own: `l` guide to the next quest step, `y` stop guiding, `d` read the text box, `-`
 sweep the room, `` ` `` show/hide the map, `=` cycle verbosity, `/` repeat last, `j` mute,
 `f7` / `f8` previous / next save slot, `f4` pause, `f10` frame advance, `f12` input
-configuration, `f11` quit.
+configuration, `f11` quit. In a menu, the arrows move, `x` or enter chooses, `z` goes back
+and escape closes.
 
-A gamepad works too, and both are live at once; the left stick doubles as a
-d-pad. Actions are reachable from the pad's spare buttons — by default the left
-stick button opens the input configuration, so a controller-only player can
-rebind everything without a keyboard.
+**Controllers.** Any USB controller works, alongside the keyboard: SNES-style pads, 8BitDo,
+Xbox and PlayStation pads. Buttons go by position, so on any pad the right face button is A
+and the bottom one B, as on a SNES; the left stick doubles as the d-pad. A SNES pad's twelve
+buttons all drive the game, so Beacon's actions are on a **Select layer** — hold Select and
+press a button; a tap of Select on its own still reaches the game:
+
+| Select + | | Select + | |
+|---|---|---|---|
+| Start | Beacon's menu | up | say facing |
+| A | points-of-interest menu | down | health |
+| B | stop guiding | left | repeat last |
+| X | guide to the next quest step | right | where am I |
+| Y | scan | L / R | read the text box / snap to target |
+
+A pad with more buttons also has the stick buttons, L2 / R2 and the guide button for actions.
+In a menu, the d-pad moves, A chooses, B goes back and Start closes. A pad Beacon does not
+recognise, or whose buttons come out wrong, can be given an SDL controller mapping in
+`input.pad_mappings` (or the `SDL_GAMECONTROLLERCONFIG` environment variable).
 
 **Rebinding.** Press the input-configuration key (`f12`, or the left stick button).
+Press a Select chord there to bind it, like any key.
 The game pauses; use up/down to choose an action — each is spoken with its current
 binding — then press the key or button to assign it, delete to clear, escape to
 finish. Everything is announced, so it works without sight, and changes are saved
@@ -137,7 +154,7 @@ The **world makes Toby's sounds**, from where things are: pickups and chests, yo
 exits and stairs, doors and locked doors, spike floors, a ticking edge ahead of a pit, a bump
 where you walk into a wall, and — off by default, on with `'` — Toby's "wind" in each
 direction, pitched by how far the wall is. **Enemies** each carry a tone; a lock tick says
-one is straight ahead of you; hits and kills have their own sounds; `z` turns you to face the
+one is straight ahead of you; hits and kills have their own sounds; `g` turns you to face the
 nearest, and `v` counts everything in view by name, distance and direction.
 
 **Toby's sounds.** Beacon ships none of Toby's recordings — they belong to its authors — but
@@ -250,6 +267,9 @@ buffer_ms = 50     # 20 to 500, delay before game sound and tones are heard; rai
 [sounds]
 dir = ""           # your Toby Accessibility Mod folder, for its sounds; empty = Beacon's own
 volume = 0.8       # 0 to 1, loudness of the recorded cues
+
+[input]
+pad_mappings = ""  # SDL controller mapping lines, for a pad Beacon does not recognise
 ```
 
 ## Plugins

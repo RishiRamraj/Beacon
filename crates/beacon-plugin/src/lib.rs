@@ -216,6 +216,11 @@ pub struct CommandDecl {
     /// always wins, and the key is refused if it drives the game.
     #[serde(default)]
     pub key: Option<String>,
+    /// An optional default controller button, as for `key` but for a pad, e.g.
+    /// `"Pad:Select+A"` — a Select chord, which every pad has. Applied on its own, so a
+    /// command with a key still gets its button.
+    #[serde(default)]
+    pub pad: Option<String>,
 }
 
 /// The three commands the host itself always offers, independent of any plugin.

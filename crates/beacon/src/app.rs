@@ -388,10 +388,11 @@ impl App {
             KeyCode::Escape => self.session.menu_close(),
             KeyCode::ArrowDown => self.session.menu_navigate(1),
             KeyCode::ArrowUp => self.session.menu_navigate(-1),
-            KeyCode::ArrowRight | KeyCode::Enter | KeyCode::NumpadEnter => {
+            // X and Z are the SNES A and B: choose and back, as in the game's own menus.
+            KeyCode::ArrowRight | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyX => {
                 self.session.menu_choose()
             }
-            KeyCode::ArrowLeft | KeyCode::Backspace => self.session.menu_back(),
+            KeyCode::ArrowLeft | KeyCode::Backspace | KeyCode::KeyZ => self.session.menu_back(),
             _ => self
                 .session
                 .say_now("Up and down to move, right to choose, left to go back."),
@@ -404,8 +405,10 @@ impl App {
         match name {
             "Pad:DPadDown" => self.session.menu_navigate(1),
             "Pad:DPadUp" => self.session.menu_navigate(-1),
-            "Pad:DPadRight" | "Pad:South" => self.session.menu_choose(),
-            "Pad:DPadLeft" | "Pad:East" => self.session.menu_back(),
+            // A chooses and B goes back, as in the game's own menus. By position: on a SNES (and
+            // any Nintendo-layout) pad A is the east button and B the south one.
+            "Pad:DPadRight" | "Pad:East" => self.session.menu_choose(),
+            "Pad:DPadLeft" | "Pad:South" => self.session.menu_back(),
             "Pad:Start" => self.session.menu_close(),
             _ => {}
         }

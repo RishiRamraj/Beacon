@@ -317,6 +317,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => Some(Emulator::load_at(path, rate)?),
         None => None,
     };
+    // Read before the settings move into the session: the pad mappings are a start-up matter.
+    let pad_mappings = settings.input.pad_mappings.clone();
     let mut session = session::Session::new(
         emu,
         audio,
@@ -380,7 +382,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     let mut app = app::App::new(
         session,
-        input::Input::new(),
+        input::Input::new(&pad_mappings),
         args.map_only,
         control_rx,
         event_loop.create_proxy(),

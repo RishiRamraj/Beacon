@@ -1266,15 +1266,25 @@ impl Session {
             .plugin
             .commands()
             .iter()
-            .filter_map(|c| {
-                c.key
-                    .as_ref()
-                    .map(|k| (k.clone(), format!("command:{}", c.id)))
+            .flat_map(|c| {
+                let action = format!("command:{}", c.id);
+                [c.key.clone(), c.pad.clone()]
+                    .into_iter()
+                    .flatten()
+                    .map(move |k| (k, action.clone()))
             })
             .collect();
 
+        // A keyboard key and a pad button are separate gaps: a command with a key still gets
+        // its button, so a controller-only player is not left without it.
         for (key, action) in suggestions {
-            let command_unbound = self.settings.keymap.keys_for(&action).is_empty();
+            let pad = key.starts_with("Pad:");
+            let command_unbound = !self
+                .settings
+                .keymap
+                .keys_for(&action)
+                .iter()
+                .any(|k| k.starts_with("Pad:") == pad);
             let key_free = self.settings.keymap.action_for(&key).is_none();
             if command_unbound && key_free && !crate::input::is_game_input_name(&key) {
                 self.settings.keymap.bind(&key, &action);
@@ -1411,11 +1421,13 @@ mod tests {
 
     #[test]
     fn game_inputs_are_recognised_by_name_across_devices() {
-        assert!(is_game_input_name("Space")); // SNES A
+        assert!(is_game_input_name("KeyX")); // SNES A
         assert!(is_game_input_name("ArrowUp"));
         assert!(is_game_input_name("Pad:South"));
-        assert!(is_game_input_name("KeyD")); // Toby's strafe right: moves
-        assert!(!is_game_input_name("KeyG"));
+        assert!(!is_game_input_name("KeyD"));
+        // A Select chord is an action, not a game control: that is the point of the layer.
+        assert!(!is_game_input_name("Pad:Select+A"));
+        assert!(is_game_input_name("Pad:Select"));
         assert!(!is_game_input_name("Pad:C"));
         assert!(!is_game_input_name("F5"));
     }

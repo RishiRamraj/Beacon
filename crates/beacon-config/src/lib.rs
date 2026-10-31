@@ -30,6 +30,7 @@ pub struct Settings {
     pub beacons: Beacons,
     pub audio: AudioSettings,
     pub sounds: Sounds,
+    pub input: InputSettings,
     pub video: Video,
     /// Key bindings. Serialized as `[keys]`; the field is `keymap` to avoid
     /// colliding with [`Settings::keys`], the list of scalar setting names.
@@ -197,6 +198,16 @@ impl Default for AudioSettings {
     }
 }
 
+/// Controllers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputSettings {
+    /// SDL game controller mapping lines, one per line, for a pad the built-in database does
+    /// not know or maps wrongly — the format SDL's own tools and the community database use.
+    /// Read at start-up. Empty, the default, uses the database alone.
+    pub pad_mappings: String,
+}
+
 /// Recorded navigation sounds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -302,6 +313,15 @@ impl Default for Keymap {
         bind("F11", "quit");
         bind("Escape", "menu");
         bind("Tab", "menu");
+
+        // The Select layer, which every pad has: hold Select and press a button. A SNES pad has
+        // no spare buttons, so this is how a controller-only player reaches Beacon at all. The
+        // plugin suggests its own commands' chords in its manifest.
+        bind("Pad:Select+Start", "menu");
+        bind("Pad:Select+Y", "command:scan");
+        bind("Pad:Select+Right", "command:where");
+        bind("Pad:Select+Down", "command:status");
+        bind("Pad:Select+Left", "repeat_last");
 
         // Gamepad defaults, on the pad's extra buttons so a controller-only
         // player can reach the essentials and the configuration without a
