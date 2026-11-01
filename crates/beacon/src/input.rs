@@ -111,6 +111,7 @@ key_table! {
     Escape => "Escape", Enter => "Enter", Space => "Space", Tab => "Tab",
     Backspace => "Backspace", Delete => "Delete", Insert => "Insert",
     Home => "Home", End => "End", PageUp => "PageUp", PageDown => "PageDown",
+    Pause => "Pause",
     ShiftLeft => "ShiftLeft", ShiftRight => "ShiftRight",
     ControlLeft => "ControlLeft", ControlRight => "ControlRight",
     Minus => "Minus", Equal => "Equal",

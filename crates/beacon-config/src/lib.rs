@@ -117,11 +117,17 @@ pub struct Video {
     /// happens — which is worth about an eighth of a CPU core to a player who cannot see the
     /// picture anyway. It is the largest single cost in the program.
     pub enabled: bool,
+    /// Fill the screen with the window (borderless), remembered between runs. The picture
+    /// keeps its shape, with black bars; OBS's Window Capture records it either way.
+    pub fullscreen: bool,
 }
 
 impl Default for Video {
     fn default() -> Self {
-        Video { enabled: true }
+        Video {
+            enabled: true,
+            fullscreen: false,
+        }
     }
 }
 
@@ -308,9 +314,10 @@ impl Default for Keymap {
         bind("F10", "frame_advance");
         bind("Backquote", "toggle_map");
         bind("F12", "bind");
-        // Toby has no quit key (Doom's menu has it); out of the way, so it is never hit by
-        // accident. Also File, Exit in the menu.
-        bind("F11", "quit");
+        // F11 is full screen, as everywhere else. Quit is out of the way, so it is never hit by
+        // accident, and is also File, Exit in the menu.
+        bind("F11", "toggle_fullscreen");
+        bind("Pause", "quit");
         bind("Escape", "menu");
         bind("Tab", "menu");
 
@@ -433,6 +440,7 @@ impl Settings {
             "arbiter.bucket_refill_per_sec",
             "braille.enabled",
             "video.enabled",
+            "video.fullscreen",
             "braille.verbosity",
             "beacons.enabled",
             "beacons.volume_max",
@@ -459,6 +467,7 @@ impl Settings {
             "arbiter.bucket_refill_per_sec" => self.arbiter.bucket_refill_per_sec.to_string(),
             "braille.enabled" => self.braille.enabled.to_string(),
             "video.enabled" => self.video.enabled.to_string(),
+            "video.fullscreen" => self.video.fullscreen.to_string(),
             "braille.verbosity" => self.braille.verbosity.to_string(),
             "beacons.enabled" => self.beacons.enabled.to_string(),
             "beacons.volume_max" => self.beacons.volume_max.to_string(),
@@ -506,6 +515,7 @@ impl Settings {
             }
             "braille.enabled" => self.braille.enabled = parse(key, value)?,
             "video.enabled" => self.video.enabled = parse(key, value)?,
+            "video.fullscreen" => self.video.fullscreen = parse(key, value)?,
             "braille.verbosity" => self.braille.verbosity = parse::<u8>(key, value)?.min(3),
             "beacons.enabled" => self.beacons.enabled = parse(key, value)?,
             "beacons.volume_max" => {

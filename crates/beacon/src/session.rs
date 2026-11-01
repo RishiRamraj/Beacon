@@ -532,6 +532,7 @@ impl Session {
             Action::FrameAdvance => self.frame_advance(),
             Action::Mute => self.toggle_mute(),
             Action::ToggleMap => self.toggle_map(),
+            Action::ToggleFullscreen => self.toggle_fullscreen(),
             Action::OpenInputConfig => self.open_input_config(),
             Action::OpenMenu => self.open_menu(),
             Action::Command(name) => self.run_command(&name),
@@ -678,6 +679,19 @@ impl Session {
             self.show_map = true;
             self.render_map();
         }
+    }
+
+    /// Fills the screen or returns to a window. A setting, so it is remembered; the window
+    /// layer applies it, since only it holds the window.
+    fn toggle_fullscreen(&mut self) {
+        self.settings.video.fullscreen = !self.settings.video.fullscreen;
+        self.persist_settings();
+        self.say_now(if self.settings.video.fullscreen { "Full screen." } else { "Windowed." });
+    }
+
+    /// Whether the window should fill the screen.
+    pub fn fullscreen(&self) -> bool {
+        self.settings.video.fullscreen
     }
 
     /// Shows or hides the plugin's map view.

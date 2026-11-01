@@ -63,6 +63,9 @@ pub struct App {
     map_only: bool,
     /// Tracks the map's visibility so the window is resized when it toggles.
     map_shown: bool,
+    /// Whether the window is full screen, as last applied: the session holds the setting,
+    /// and this follows it.
+    fullscreen: bool,
 
     /// Publishes Beacon's accessibility tree, so the platform's own screen reader can
     /// read the menu. `None` until the window exists.
@@ -107,6 +110,23 @@ fn window_size(map_only: bool, map_beside: bool) -> winit::dpi::LogicalSize<u32>
     } else {
         winit::dpi::LogicalSize::new(GAME_W, GAME_H)
     }
+}
+
+/// The largest rectangle of the shape `aw`:`ah` that fits in `w` x `h`, centred: (x, y, w, h).
+///
+/// So the picture keeps its proportions in any window, and full screen on a wide display gets
+/// black bars rather than a stretched game — which matters most on a stream, where everyone
+/// watching sees the stretch.
+fn fit(x: usize, y: usize, w: usize, h: usize, aw: usize, ah: usize) -> (usize, usize, usize, usize) {
+    if w == 0 || h == 0 || aw == 0 || ah == 0 {
+        return (x, y, 0, 0);
+    }
+    let (fw, fh) = if w * ah > h * aw {
+        (h * aw / ah, h)
+    } else {
+        (w, w * ah / aw)
+    };
+    (x + (w - fw) / 2, y + (h - fh) / 2, fw, fh)
 }
 
 /// Nearest-neighbour scales a source image into a rectangle of the destination.
@@ -171,6 +191,7 @@ impl App {
             context: None,
             map_only,
             map_shown: false,
+            fullscreen: false,
             access: None,
             access_proxy,
             #[cfg(any(windows, target_os = "macos"))]
@@ -463,51 +484,38 @@ impl App {
         };
         buf.fill(0); // letterbox any area a panel does not cover
 
+        // Every panel keeps its shape: the game its own, the map square. Black bars fill the rest,
+        // which is what full screen on a wide display, and a stream of it, should look like.
+        let (aw, ah) = (GAME_W as usize, GAME_H as usize);
         match (self.map_only, map) {
-            // Map only: it fills the window; no game picture.
+            // Map only: it fills the window, square; no game picture.
             (true, Some((mw, mh, mpix))) => {
                 let (mw, mh) = (mw as usize, mh as usize);
-                blit(&mut buf, win_w, 0, 0, win_w, win_h, mpix, mw, mh, mw);
+                let (x, y, w, h) = fit(0, 0, win_w, win_h, 1, 1);
+                blit(&mut buf, win_w, x, y, w, h, mpix, mw, mh, mw);
             }
-            // Game with the map in a square panel to its right.
+            // Game with the map in a square panel to its right: the game as large as the
+            // height allows, the map in what is left (never less than a third of the width).
             (false, Some((mw, mh, mpix))) => {
-                let map_side = win_h.min(win_w / 2);
+                let game_full_w = win_h * aw / ah;
+                let map_side = win_h
+                    .min(win_w.saturating_sub(game_full_w).max(win_w / 3))
+                    .min(win_w);
                 let game_w = win_w - map_side;
-                blit(
-                    &mut buf,
-                    win_w,
-                    0,
-                    0,
-                    game_w,
-                    win_h,
-                    game,
-                    gw,
-                    gh,
-                    game_stride,
-                );
+                let (x, y, w, h) = fit(0, 0, game_w, win_h, aw, ah);
+                blit(&mut buf, win_w, x, y, w, h, game, gw, gh, game_stride);
                 let map_y = (win_h - map_side) / 2;
                 let (mw, mh) = (mw as usize, mh as usize);
                 blit(
                     &mut buf, win_w, game_w, map_y, map_side, map_side, mpix, mw, mh, mw,
                 );
             }
-            // No map: the game fills the window.
+            // No map: the game fills the window, in its own shape.
             (_, None) => {
-                blit(
-                    &mut buf,
-                    win_w,
-                    0,
-                    0,
-                    win_w,
-                    win_h,
-                    game,
-                    gw,
-                    gh,
-                    game_stride,
-                );
+                let (x, y, w, h) = fit(0, 0, win_w, win_h, aw, ah);
+                blit(&mut buf, win_w, x, y, w, h, game, gw, gh, game_stride);
             }
         }
-
         let _ = buf.present();
     }
 }
@@ -826,11 +834,27 @@ impl App {
         if let Some(window) = self.window.as_ref() {
             // Grow or shrink the window when the map is toggled, so the game
             // panel keeps its size and the map appears beside it.
+            // Full screen follows the setting: borderless, so OBS's Window Capture still sees
+            // an ordinary window, and it covers the screen without changing its mode.
+            let fullscreen = self.session.fullscreen();
+            if fullscreen != self.fullscreen {
+                self.fullscreen = fullscreen;
+                window.set_fullscreen(
+                    fullscreen.then_some(winit::window::Fullscreen::Borderless(None)),
+                );
+                if !fullscreen {
+                    let _ = window.request_inner_size(window_size(self.map_only, self.map_shown));
+                }
+                self.redraw_wanted = true;
+            }
             let shown = self.session.map_shown();
             if shown != self.map_shown {
                 self.map_shown = shown;
-                // In map-only mode the window stays square regardless.
-                let _ = window.request_inner_size(window_size(self.map_only, shown));
+                // In map-only mode the window stays square regardless; full screen, the
+                // panels share the screen instead.
+                if !self.fullscreen {
+                    let _ = window.request_inner_size(window_size(self.map_only, shown));
+                }
                 self.redraw_wanted = true;
             }
             // Only when the picture can have changed. A frame produces a new one; a resize
@@ -866,6 +890,16 @@ mod tests {
         let only = window_size(true, false);
         assert_eq!((only.width, only.height), (GAME_H, GAME_H));
         assert_eq!(window_size(true, true), only);
+    }
+
+    #[test]
+    fn the_picture_keeps_its_shape_with_black_bars() {
+        // A wide screen: the game, 256 by 224, fits the height and is centred.
+        assert_eq!(fit(0, 0, 1920, 1080, 256, 224), (343, 0, 1234, 1080));
+        // A tall window: it fits the width.
+        assert_eq!(fit(0, 0, 256, 500, 256, 224), (0, 138, 256, 224));
+        // Square map in a wide panel.
+        assert_eq!(fit(0, 0, 400, 300, 1, 1), (50, 0, 300, 300));
     }
 
     #[test]

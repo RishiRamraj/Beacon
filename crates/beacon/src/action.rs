@@ -35,6 +35,8 @@ pub enum Action {
     FrameAdvance,
     /// Show or hide the plugin's map view.
     ToggleMap,
+    /// Fill the screen, or go back to a window: for playing, and for streaming with OBS.
+    ToggleFullscreen,
     /// Open the input configuration modal.
     OpenInputConfig,
     /// Open the menu.
@@ -65,6 +67,7 @@ impl Action {
             "mute" => Action::Mute,
             "frame_advance" => Action::FrameAdvance,
             "toggle_map" => Action::ToggleMap,
+            "toggle_fullscreen" => Action::ToggleFullscreen,
             "bind" => Action::OpenInputConfig,
             "menu" => Action::OpenMenu,
             _ => return None,
@@ -85,7 +88,7 @@ pub struct Bindable {
 ///
 /// Ordered by how often they are reached for, not alphabetically: a player
 /// scrolling the list hears the common ones first.
-const BUILTIN: [(&str, &str); 14] = [
+const BUILTIN: [(&str, &str); 15] = [
     ("save_state", "Save state"),
     ("load_state", "Load state"),
     ("next_slot", "Next save slot"),
@@ -94,6 +97,7 @@ const BUILTIN: [(&str, &str); 14] = [
     ("mute", "Mute or unmute"),
     ("frame_advance", "Advance one frame"),
     ("toggle_map", "Show or hide the map"),
+    ("toggle_fullscreen", "Full screen on or off"),
     ("cycle_verbosity", "Cycle verbosity"),
     ("repeat_last", "Repeat last announcement"),
     ("menu", "Open menu"),

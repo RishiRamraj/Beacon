@@ -152,7 +152,8 @@ the bottom row, A and S above them.
 - J: mute.
 - F4: pause.
 - F12: change key bindings.
-- F11: quit.
+- F11: full screen on or off.
+- Pause: quit.
 - F10: advance one frame, for debugging a plugin.
 
 #### In any menu
@@ -231,6 +232,48 @@ nearest, and `v` counts everything in view by name, distance and direction.
 if you have the [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod),
 point `sounds.dir` at its folder (the unpacked mod, or its git checkout) and Beacon plays
 them. Without it, every cue has a synthesized stand-in in the same spirit.
+
+### Streaming with OBS
+
+Beacon works as an ordinary window for [OBS Studio](https://obsproject.com/), in a window or
+full screen. These steps follow OBS's own documentation on
+[Window Capture](https://obsproject.com/kb/window-capture-sources) and
+[Application Audio Capture](https://obsproject.com/kb/application-audio-capture-guide).
+
+**The picture.**
+
+1. Start Beacon. Press F11 for full screen if you want it. Beacon remembers the choice. Full
+   screen is borderless, so OBS still sees an ordinary window, and the picture keeps its shape,
+   with black bars on a wide screen rather than a stretched game.
+2. In OBS, under Sources, add a **Window Capture** source and choose the window titled
+   `[beacon.exe]: Beacon`.
+3. On Windows, set **Capture Method** to **Windows 10 (1903 and up)**. Beacon draws its
+   picture with ordinary Windows drawing rather than DirectX, OpenGL or Vulkan, so use Window
+   Capture, not Game Capture. If the picture stays black or frozen, try the **BitBlt** method
+   instead.
+4. Leave **Window Match Priority** on its default: the title, `Beacon`, does not change.
+5. To stream the game without the map beside it, press backtick to hide the map, or crop the
+   source in OBS.
+
+On Linux, use **Window Capture (PipeWire)**, or **Screen Capture (PipeWire)** on Wayland, and
+pick the Beacon window when the desktop asks. On X11, **Window Capture (Xcomposite)** works too.
+
+**The sound.** Beacon's game audio and its navigation sounds come from Beacon itself. Speech
+comes from your screen reader, a separate program, unless Beacon is speaking through SAPI.
+
+- On Windows 10 version 2004 or later, with OBS 28 or later, add an **Application Audio
+  Capture** source and choose the Beacon window. Set its match priority to the executable
+  name, `beacon.exe`. Add a second one for your screen reader (for NVDA, `nvda.exe`) if your
+  viewers should hear the speech too, and leave it out if not. Turn off the global **Desktop
+  Audio** source in OBS's audio settings, or everything is captured twice.
+- With OBS 30.1 or later, the Window Capture source can carry Beacon's audio itself: tick
+  **Capture Audio** in its properties instead of adding a separate audio source.
+- On Linux, application audio capture needs PipeWire; add an **Application Audio Capture
+  (PipeWire)** source for Beacon, and one for `speech-dispatcher` if viewers should hear the
+  speech.
+
+Beacon's own audio settings apply to the stream as they do to you. `sounds.volume` and
+`beacons.music_duck` balance the navigation sounds against the game music.
 
 ### Other modes
 
@@ -340,6 +383,10 @@ volume = 0.8       # 0 to 1, loudness of the recorded cues
 
 [input]
 pad_mappings = ""  # SDL controller mapping lines, for a pad Beacon does not recognise
+
+[video]
+enabled = true     # draw the picture; off saves CPU for a player who cannot see it
+fullscreen = false # fill the screen (F11), borderless; remembered
 ```
 
 ## Plugins
