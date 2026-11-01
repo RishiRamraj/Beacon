@@ -308,6 +308,34 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_behind_is_heard_on_headphones() {
+        // Reported as silence: the listening test's loop from behind, on headphones, with the
+        // pitch cue that shifts it.
+        let mut bank = SoundBank::synthesized(48_000);
+        let mut m = VoiceMixer::default();
+        let mut spatial = Spatial::new(crate::spatial::Mode::Headphones, 2, 48_000);
+        m.apply(
+            SoundCmd::Loop {
+                id: "hrtf".into(),
+                name: "amb/exit1".into(),
+                dx: 0.0,
+                dy: 64.0,
+                volume: 1.0,
+                pitch: 1.0,
+            },
+            &mut bank,
+        );
+        let mut total = 0.0;
+        for _ in 0..10 {
+            let mut out = vec![0.0; 2 * 800];
+            m.mix(&mut out, 1.0, &mut spatial);
+            let (l, r) = energy(&out);
+            total += l + r;
+        }
+        assert!(total > 1.0, "a loop behind is audible on headphones: {total}");
+    }
+
+    #[test]
     fn an_unknown_sound_is_silently_ignored() {
         let mut bank = SoundBank::synthesized(48_000);
         let mut m = VoiceMixer::default();
