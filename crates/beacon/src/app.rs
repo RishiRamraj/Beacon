@@ -7,7 +7,7 @@
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::sync::mpsc::Receiver;
 
 use accesskit_winit::{Adapter, Event as AccessEvent, WindowEvent as AccessWindowEvent};
@@ -25,7 +25,31 @@ use crate::session::Session;
 /// Default window scale over the SNES's 256x224.
 const DEFAULT_SCALE: u32 = 3;
 
+/// Frame-timing diagnostics, printed every two seconds when `BEACON_STATS` is set.
+///
+/// For "the game feels slow" on a machine nobody else can reach: whether frames are being
+/// produced at the game's rate, whether the audio device is starving, and which part of the
+/// loop is slow when one is — measured in the real window, where the headless benchmark
+/// cannot see presentation or the event loop.
+struct Stats {
+    since: Instant,
+    frames: u64,
+    underruns: u64,
+    worst_run: Duration,
+    worst_present: Duration,
+    presents: u32,
+    /// Turns of the event loop, and the longest gap between one ending and the next
+    /// starting: time spent asleep or in other event handlers.
+    wakes: u32,
+    worst_gap: Duration,
+    worst_wake: Duration,
+    last_wake_end: Option<Instant>,
+}
+
 pub struct App {
+    stats: Option<Stats>,
+    /// The menu overlay last drawn, so a change to it is redrawn.
+    menu_version: u64,
     session: Session,
     input: Input,
     /// When present, an agent is attached over the control socket; its tool calls
@@ -39,6 +63,9 @@ pub struct App {
     map_only: bool,
     /// Tracks the map's visibility so the window is resized when it toggles.
     map_shown: bool,
+    /// Whether the window is full screen, as last applied: the session holds the setting,
+    /// and this follows it.
+    fullscreen: bool,
 
     /// Publishes Beacon's accessibility tree, so the platform's own screen reader can
     /// read the menu. `None` until the window exists.
@@ -85,6 +112,23 @@ fn window_size(map_only: bool, map_beside: bool) -> winit::dpi::LogicalSize<u32>
     }
 }
 
+/// The largest rectangle of the shape `aw`:`ah` that fits in `w` x `h`, centred: (x, y, w, h).
+///
+/// So the picture keeps its proportions in any window, and full screen on a wide display gets
+/// black bars rather than a stretched game — which matters most on a stream, where everyone
+/// watching sees the stretch.
+fn fit(x: usize, y: usize, w: usize, h: usize, aw: usize, ah: usize) -> (usize, usize, usize, usize) {
+    if w == 0 || h == 0 || aw == 0 || ah == 0 {
+        return (x, y, 0, 0);
+    }
+    let (fw, fh) = if w * ah > h * aw {
+        (h * aw / ah, h)
+    } else {
+        (w, w * ah / aw)
+    };
+    (x + (w - fw) / 2, y + (h - fh) / 2, fw, fh)
+}
+
 /// Nearest-neighbour scales a source image into a rectangle of the destination.
 #[allow(clippy::too_many_arguments)]
 fn blit(
@@ -124,7 +168,21 @@ impl App {
         control_rx: Option<Receiver<mcp::Request>>,
         access_proxy: EventLoopProxy<AccessEvent>,
     ) -> Self {
+        let stats = std::env::var_os("BEACON_STATS").map(|_| Stats {
+            since: Instant::now(),
+            frames: session.frame_count(),
+            underruns: session.audio_underruns(),
+            worst_run: Duration::ZERO,
+            worst_present: Duration::ZERO,
+            presents: 0,
+            wakes: 0,
+            worst_gap: Duration::ZERO,
+            worst_wake: Duration::ZERO,
+            last_wake_end: None,
+        });
         App {
+            stats,
+            menu_version: 0,
             session,
             input,
             control_rx,
@@ -133,6 +191,7 @@ impl App {
             context: None,
             map_only,
             map_shown: false,
+            fullscreen: false,
             access: None,
             access_proxy,
             #[cfg(any(windows, target_os = "macos"))]
@@ -350,10 +409,11 @@ impl App {
             KeyCode::Escape => self.session.menu_close(),
             KeyCode::ArrowDown => self.session.menu_navigate(1),
             KeyCode::ArrowUp => self.session.menu_navigate(-1),
-            KeyCode::ArrowRight | KeyCode::Enter | KeyCode::NumpadEnter => {
+            // X and Z are the SNES A and B: choose and back, as in the game's own menus.
+            KeyCode::ArrowRight | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyX => {
                 self.session.menu_choose()
             }
-            KeyCode::ArrowLeft | KeyCode::Backspace => self.session.menu_back(),
+            KeyCode::ArrowLeft | KeyCode::Backspace | KeyCode::KeyZ => self.session.menu_back(),
             _ => self
                 .session
                 .say_now("Up and down to move, right to choose, left to go back."),
@@ -366,8 +426,10 @@ impl App {
         match name {
             "Pad:DPadDown" => self.session.menu_navigate(1),
             "Pad:DPadUp" => self.session.menu_navigate(-1),
-            "Pad:DPadRight" | "Pad:South" => self.session.menu_choose(),
-            "Pad:DPadLeft" | "Pad:East" => self.session.menu_back(),
+            // A chooses and B goes back, as in the game's own menus. By position: on a SNES (and
+            // any Nintendo-layout) pad A is the east button and B the south one.
+            "Pad:DPadRight" | "Pad:East" => self.session.menu_choose(),
+            "Pad:DPadLeft" | "Pad:South" => self.session.menu_back(),
             "Pad:Start" => self.session.menu_close(),
             _ => {}
         }
@@ -375,6 +437,15 @@ impl App {
 
     /// Scales the emulator framebuffer into the window, nearest neighbour.
     fn present(&mut self) {
+        let started = Instant::now();
+        self.present_inner();
+        if let Some(st) = self.stats.as_mut() {
+            st.worst_present = st.worst_present.max(started.elapsed());
+            st.presents += 1;
+        }
+    }
+
+    fn present_inner(&mut self) {
         let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
             return;
         };
@@ -413,51 +484,38 @@ impl App {
         };
         buf.fill(0); // letterbox any area a panel does not cover
 
+        // Every panel keeps its shape: the game its own, the map square. Black bars fill the rest,
+        // which is what full screen on a wide display, and a stream of it, should look like.
+        let (aw, ah) = (GAME_W as usize, GAME_H as usize);
         match (self.map_only, map) {
-            // Map only: it fills the window; no game picture.
+            // Map only: it fills the window, square; no game picture.
             (true, Some((mw, mh, mpix))) => {
                 let (mw, mh) = (mw as usize, mh as usize);
-                blit(&mut buf, win_w, 0, 0, win_w, win_h, mpix, mw, mh, mw);
+                let (x, y, w, h) = fit(0, 0, win_w, win_h, 1, 1);
+                blit(&mut buf, win_w, x, y, w, h, mpix, mw, mh, mw);
             }
-            // Game with the map in a square panel to its right.
+            // Game with the map in a square panel to its right: the game as large as the
+            // height allows, the map in what is left (never less than a third of the width).
             (false, Some((mw, mh, mpix))) => {
-                let map_side = win_h.min(win_w / 2);
+                let game_full_w = win_h * aw / ah;
+                let map_side = win_h
+                    .min(win_w.saturating_sub(game_full_w).max(win_w / 3))
+                    .min(win_w);
                 let game_w = win_w - map_side;
-                blit(
-                    &mut buf,
-                    win_w,
-                    0,
-                    0,
-                    game_w,
-                    win_h,
-                    game,
-                    gw,
-                    gh,
-                    game_stride,
-                );
+                let (x, y, w, h) = fit(0, 0, game_w, win_h, aw, ah);
+                blit(&mut buf, win_w, x, y, w, h, game, gw, gh, game_stride);
                 let map_y = (win_h - map_side) / 2;
                 let (mw, mh) = (mw as usize, mh as usize);
                 blit(
                     &mut buf, win_w, game_w, map_y, map_side, map_side, mpix, mw, mh, mw,
                 );
             }
-            // No map: the game fills the window.
+            // No map: the game fills the window, in its own shape.
             (_, None) => {
-                blit(
-                    &mut buf,
-                    win_w,
-                    0,
-                    0,
-                    win_w,
-                    win_h,
-                    game,
-                    gw,
-                    gh,
-                    game_stride,
-                );
+                let (x, y, w, h) = fit(0, 0, win_w, win_h, aw, ah);
+                blit(&mut buf, win_w, x, y, w, h, game, gw, gh, game_stride);
             }
         }
-
         let _ = buf.present();
     }
 }
@@ -641,6 +699,23 @@ impl ApplicationHandler<AccessEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let wake_started = Instant::now();
+        if let Some(st) = self.stats.as_mut() {
+            st.wakes += 1;
+            if let Some(end) = st.last_wake_end {
+                st.worst_gap = st.worst_gap.max(wake_started.duration_since(end));
+            }
+        }
+        self.wake(event_loop);
+        if let Some(st) = self.stats.as_mut() {
+            st.worst_wake = st.worst_wake.max(wake_started.elapsed());
+            st.last_wake_end = Some(Instant::now());
+        }
+    }
+}
+
+impl App {
+    fn wake(&mut self, event_loop: &ActiveEventLoop) {
         // Run any control-socket requests first, so an attached agent stays
         // responsive even while the game is paused (this wake still fires).
         if let Some(rx) = self.control_rx.as_ref() {
@@ -709,7 +784,40 @@ impl ApplicationHandler<AccessEvent> for App {
         self.publish_access();
 
         self.session.set_held_buttons(self.input.buttons());
+        let run_started = Instant::now();
         let drew = self.session.run_frames();
+        if let Some(st) = self.stats.as_mut() {
+            st.worst_run = st.worst_run.max(run_started.elapsed());
+            let elapsed = st.since.elapsed();
+            if elapsed >= Duration::from_secs(2) {
+                let frames = self.session.frame_count();
+                let underruns = self.session.audio_underruns();
+                eprintln!(
+                    "stats: {:.1} fps, {} presents/s, {} wakes/s, {} underrun samples, worst run_frames {:.1} ms, worst wake {:.1} ms, worst gap {:.1} ms, worst present {:.1} ms, device period {} frames",
+                    (frames - st.frames) as f64 / elapsed.as_secs_f64(),
+                    (st.presents as f64 / elapsed.as_secs_f64()) as u32,
+                    (st.wakes as f64 / elapsed.as_secs_f64()) as u32,
+                    underruns - st.underruns,
+                    st.worst_run.as_secs_f64() * 1e3,
+                    st.worst_wake.as_secs_f64() * 1e3,
+                    st.worst_gap.as_secs_f64() * 1e3,
+                    st.worst_present.as_secs_f64() * 1e3,
+                    self.session.audio_period(),
+                );
+                *st = Stats {
+                    since: Instant::now(),
+                    frames,
+                    underruns,
+                    worst_run: Duration::ZERO,
+                    worst_present: Duration::ZERO,
+                    presents: 0,
+                    wakes: 0,
+                    worst_gap: Duration::ZERO,
+                    worst_wake: Duration::ZERO,
+                    last_wake_end: st.last_wake_end,
+                };
+            }
+        }
 
         // Sleep until there is something to do, rather than asking again immediately.
         //
@@ -726,16 +834,37 @@ impl ApplicationHandler<AccessEvent> for App {
         if let Some(window) = self.window.as_ref() {
             // Grow or shrink the window when the map is toggled, so the game
             // panel keeps its size and the map appears beside it.
+            // Full screen follows the setting: borderless, so OBS's Window Capture still sees
+            // an ordinary window, and it covers the screen without changing its mode.
+            let fullscreen = self.session.fullscreen();
+            if fullscreen != self.fullscreen {
+                self.fullscreen = fullscreen;
+                window.set_fullscreen(
+                    fullscreen.then_some(winit::window::Fullscreen::Borderless(None)),
+                );
+                if !fullscreen {
+                    let _ = window.request_inner_size(window_size(self.map_only, self.map_shown));
+                }
+                self.redraw_wanted = true;
+            }
             let shown = self.session.map_shown();
             if shown != self.map_shown {
                 self.map_shown = shown;
-                // In map-only mode the window stays square regardless.
-                let _ = window.request_inner_size(window_size(self.map_only, shown));
+                // In map-only mode the window stays square regardless; full screen, the
+                // panels share the screen instead.
+                if !self.fullscreen {
+                    let _ = window.request_inner_size(window_size(self.map_only, shown));
+                }
                 self.redraw_wanted = true;
             }
             // Only when the picture can have changed. A frame produces a new one; a resize
             // or a map toggle needs the old one blitted again. Redrawing on every turn of
             // the loop meant blitting and presenting far faster than the screen can show it.
+            let menu_version = self.session.menu_version();
+            if menu_version != self.menu_version {
+                self.menu_version = menu_version;
+                self.redraw_wanted = true;
+            }
             if drew || self.redraw_wanted {
                 self.redraw_wanted = false;
                 window.request_redraw();
@@ -761,6 +890,16 @@ mod tests {
         let only = window_size(true, false);
         assert_eq!((only.width, only.height), (GAME_H, GAME_H));
         assert_eq!(window_size(true, true), only);
+    }
+
+    #[test]
+    fn the_picture_keeps_its_shape_with_black_bars() {
+        // A wide screen: the game, 256 by 224, fits the height and is centred.
+        assert_eq!(fit(0, 0, 1920, 1080, 256, 224), (343, 0, 1234, 1080));
+        // A tall window: it fits the width.
+        assert_eq!(fit(0, 0, 256, 500, 256, 224), (0, 138, 256, 224));
+        // Square map in a wide panel.
+        assert_eq!(fit(0, 0, 400, 300, 1, 1), (50, 0, 300, 300));
     }
 
     #[test]

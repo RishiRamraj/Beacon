@@ -19,6 +19,11 @@ cpal = "0.18"
 gilrs = "0.11"
 accesskit = "0.25.0"
 accesskit_winit = "0.34.0"
+lewton = "0.10"
+
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 muda = "0.19.3"
+
+[dev-dependencies]
+hound = "3"

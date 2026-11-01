@@ -35,6 +35,8 @@ pub enum Action {
     FrameAdvance,
     /// Show or hide the plugin's map view.
     ToggleMap,
+    /// Fill the screen, or go back to a window: for playing, and for streaming with OBS.
+    ToggleFullscreen,
     /// Open the input configuration modal.
     OpenInputConfig,
     /// Open the menu.
@@ -65,6 +67,7 @@ impl Action {
             "mute" => Action::Mute,
             "frame_advance" => Action::FrameAdvance,
             "toggle_map" => Action::ToggleMap,
+            "toggle_fullscreen" => Action::ToggleFullscreen,
             "bind" => Action::OpenInputConfig,
             "menu" => Action::OpenMenu,
             _ => return None,
@@ -85,7 +88,7 @@ pub struct Bindable {
 ///
 /// Ordered by how often they are reached for, not alphabetically: a player
 /// scrolling the list hears the common ones first.
-const BUILTIN: [(&str, &str); 14] = [
+const BUILTIN: [(&str, &str); 15] = [
     ("save_state", "Save state"),
     ("load_state", "Load state"),
     ("next_slot", "Next save slot"),
@@ -94,6 +97,7 @@ const BUILTIN: [(&str, &str); 14] = [
     ("mute", "Mute or unmute"),
     ("frame_advance", "Advance one frame"),
     ("toggle_map", "Show or hide the map"),
+    ("toggle_fullscreen", "Full screen on or off"),
     ("cycle_verbosity", "Cycle verbosity"),
     ("repeat_last", "Repeat last announcement"),
     ("menu", "Open menu"),
@@ -169,14 +173,24 @@ pub fn apply_defaults(keymap: &mut Keymap) {
     // went made the first default reached the only one applied — and the map is ordered by
     // key name, so "Pad:Mode" comes before "Tab" and the menu arrived as a pad button with
     // no key at all.
-    let unbound: Vec<String> = defaults
+    //
+    // And per device: a keyboard key and a pad button are separate gaps, so an action the
+    // player has a key for still gets its controller default, which is what a controller-only
+    // player needs.
+    let unbound: Vec<(String, bool)> = defaults
         .iter()
-        .map(|(_, action)| action.clone())
-        .filter(|action| keymap.keys_for(action).is_empty())
+        .map(|(key, action)| (action.clone(), key.starts_with("Pad:")))
+        .filter(|(action, pad)| {
+            !keymap
+                .keys_for(action)
+                .iter()
+                .any(|k| k.starts_with("Pad:") == *pad)
+        })
         .collect();
 
     for (key, action) in defaults {
-        if unbound.contains(&action)
+        let pad = key.starts_with("Pad:");
+        if unbound.contains(&(action.clone(), pad))
             && keymap.action_for(&key).is_none()
             && !crate::input::is_game_input_name(&key)
         {
@@ -236,7 +250,15 @@ mod tests {
         apply_defaults(&mut keymap);
         let mut keys = keymap.keys_for("menu");
         keys.sort();
-        assert_eq!(keys, vec!["Pad:Mode".to_string(), "Tab".to_string()]);
+        assert_eq!(
+            keys,
+            vec![
+                "Escape".to_string(),
+                "Pad:Mode".to_string(),
+                "Pad:Select+Start".to_string(),
+                "Tab".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -257,6 +279,22 @@ mod tests {
         assert_eq!(keymap.action_for("KeyK"), Some("save_state"));
         // And the action they never had is now reachable.
         assert!(!keymap.keys_for("menu").is_empty());
+    }
+
+    #[test]
+    fn a_keyboard_binding_does_not_keep_an_action_from_its_controller_default() {
+        // A player with saved settings has scan on a key. A controller-only player still needs
+        // its Select chord, so a key and a pad button are filled as separate gaps.
+        let mut keymap = Keymap::default();
+        for key in keymap.keys_for("command:scan") {
+            keymap.unbind(&key);
+        }
+        keymap.bind("KeyC", "command:scan");
+        apply_defaults(&mut keymap);
+        let keys = keymap.keys_for("command:scan");
+        assert!(keys.contains(&"KeyC".to_string()), "the player's key stays: {keys:?}");
+        assert!(keys.contains(&"Pad:Select+Y".to_string()), "and the chord arrives: {keys:?}");
+        assert!(!keys.contains(&"KeyV".to_string()), "but the default key does not: {keys:?}");
     }
 
     #[test]
@@ -286,14 +324,15 @@ mod tests {
         let mut suggested = 0;
         for spec in registry.specs() {
             for cmd in &spec.manifest.commands {
-                let Some(key) = &cmd.key else { continue };
-                suggested += 1;
-                assert!(
-                    !crate::input::is_game_input_name(key),
-                    "{} suggests {key}, which drives the game: the suggestion can never be \
-                     applied, so the command would ship unbound",
-                    cmd.id
-                );
+                for key in [&cmd.key, &cmd.pad].into_iter().flatten() {
+                    suggested += 1;
+                    assert!(
+                        !crate::input::is_game_input_name(key),
+                        "{} suggests {key}, which drives the game: the suggestion can never be \
+                         applied, so the command would ship unbound",
+                        cmd.id
+                    );
+                }
             }
         }
         assert!(suggested > 0, "the built-in plugin suggests at least one key");

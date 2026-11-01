@@ -54,15 +54,18 @@ dungeon_id  = { addr = 0x7E040C, size = 1 }
 
 # Custom commands this plugin provides, beyond the standard scan/where/status.
 # The user binds keys to these in the input configuration; the host reads the id
-# and label straight from here. Up to ten are allowed.
+# and label straight from here. Up to 24 are allowed. Keys follow the Toby
+# Accessibility Mod wherever Toby has the same command.
 [[command]]
 id    = "coordinates"
 label = "Report exact coordinates"
+key   = "KeyU"                       # Toby's coordinates key
 
 [[command]]
 id    = "read_text"
 label = "Read the current text box"
-key   = "KeyD"                       # "d" for dialogue; rebindable
+key   = "KeyD"
+pad   = "Pad:Select+L"
 
 [[command]]
 id    = "pathfind"
@@ -71,31 +74,100 @@ label = "Guide to the nearest door"
 [[command]]
 id    = "pathfind_stop"
 label = "Stop guiding"
-
-[[command]]
-id    = "explore"
-label = "Guide to an unexplored spot"
-
-[[command]]
-id    = "mark"
-label = "Drop a waypoint marker"
-
-[[command]]
-id    = "guide_to_mark"
-label = "Guide back to the marker"
+key   = "KeyY"
+pad   = "Pad:Select+B"
 
 [[command]]
 id    = "sweep"
 label = "Sweep the room for loot, then enemies, then pots"
-key   = "KeyU"                       # rebindable. NOT "s" for sweep: s is the SNES X button,
-                                     # so that suggestion could never be applied and the
-                                     # command shipped with no key at all.
+key   = "Minus"
 
 [[command]]
 id    = "objective"
 label = "Say the current quest objective"
+key   = "Semicolon"                  # Toby's level-stats key: how far along the game is
 
 [[command]]
 id    = "advance"
 label = "Guide to the next quest step"
-key   = "KeyL"                       # "L" for the lead/guide; rebindable
+key   = "KeyL"
+pad   = "Pad:Select+X"
+
+[[command]]
+id    = "poi"
+label = "Navigate to a point of interest"
+key   = "KeyM"
+pad   = "Pad:Select+A"
+
+[[command]]
+id    = "proximity"
+label = "Toggle the wall proximity sound"
+key   = "Quote"                      # Toby's proximity detector
+
+[[command]]
+id    = "snap"
+label = "Face the nearest enemy"
+key   = "KeyG"
+pad   = "Pad:Select+R"
+
+[[command]]
+id    = "compass"
+label = "Say which way Link faces"
+key   = "KeyC"
+pad   = "Pad:Select+Up"
+
+[[command]]
+id    = "face_north"
+label = "Face north"
+key   = "KeyF"                       # Toby's "default to north"
+
+[[command]]
+id    = "turn_left"
+label = "Turn left"
+key   = "KeyE"
+
+[[command]]
+id    = "turn_right"
+label = "Turn right"
+key   = "KeyR"
+
+[[command]]
+id    = "quickturn"
+label = "Turn around"
+key   = "KeyT"
+
+[[command]]
+id    = "ammo"
+label = "Say rupees, bombs, arrows and magic"
+key   = "KeyB"                       # Toby's ammo stats
+
+[[command]]
+id    = "armor"
+label = "Say sword, shield and armour"
+key   = "KeyN"                       # Toby's armour stats
+
+[[command]]
+id    = "keys"
+label = "Say keys held"
+key   = "KeyK"                       # Toby's key checker
+
+[[command]]
+id    = "item"
+label = "Say the item in hand"
+key   = "KeyI"                       # Toby's inventory item check
+
+[[command]]
+id    = "waypoint"
+label = "Say the next waypoint"
+key   = "Period"
+pad   = "Pad:Select+Right"
+
+[[command]]
+id    = "travel"
+label = "Walk to the next waypoint"
+key   = "Comma"                      # Diablo Access's travel key, beside period
+pad   = "Pad:Select+Left"
+
+[[command]]
+id    = "guide_style"
+label = "Switch the guide between waypoints and the carrot"

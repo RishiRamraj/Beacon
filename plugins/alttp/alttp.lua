@@ -429,15 +429,10 @@ end
 -- the calmer classes sit at unity.
 local BEACON_KINDS = {
   enemy = { pitch = 1.0, range = 224, tremolo = 2.0, gain = 1.6 }, -- 120 BPM: danger
-  item  = { pitch = 2.0, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: a pickup
   npc   = { pitch = 1.5, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: safe to approach
   minor = { pitch = 0.5, range = 24,  tremolo = 0.0, gain = 1.0 }, -- steady, incidental
 }
 
--- A treasure chest is a fixed landmark, not a loose pickup you chase down, so it
--- sounds the item tone at a lower volume — present but not competing with the guide
--- and the pickups. Same pitch/pulse as an item so it still reads as "a good thing".
-local CHEST_BEACON = { pitch = 2.0, range = 224, tremolo = 1.0, gain = 0.5 }
 
 -- NPC types the guide leads Link to as a quest objective rather than ambient people
 -- to pass by. The navigation guide already homes on them, so also sounding the "safe
@@ -1505,17 +1500,6 @@ do
   HAZARD.PIT[0x20] = true
   for a = 0xB0, 0xBD do HAZARD.PIT[a] = true end
 end
--- A sharp, quick notification rather than a sustained hum: `ping` makes each cycle an
--- attack-decay strike instead of a swell, and BLIP frames at this tremolo is about one
--- strike, so facing a pit produces a single crisp blip. Being brief also separates it
--- from the enemy-weapon tone it used to sit next to in pitch — a one-shot and a
--- continuous drone cannot be confused however close their frequencies are.
--- Pitched above everything else in the vocabulary. The object tones run 0.7 to 2.0 and
--- the guide's sonar sits at 3.0-3.4; putting the hazard at 4.0 leaves it nothing to be
--- confused with, and high-and-sharp reads as a notification demanding attention where
--- low-and-slow reads as a thing sitting in the room.
-HAZARD.TONE = { pitch = 4.0, tremolo = 8.0, volume = 0.8 }
-HAZARD.BLIP = 8 -- frames it sounds for, about a sixth of a second
 
 -- The nearest pit within REACH tiles in the direction Link faces, as world pixels, or
 -- nil. Looking only at the tile immediately ahead gave about one frame of warning at
@@ -1543,32 +1527,32 @@ function HAZARD.pit_ahead(s)
   return nil
 end
 
+-- Where the drop-off tick is sounding from, relative to Link, or nil. Global so the tests and
+-- an agent can see it.
+hazard_at = nil
+HAZARD.EVERY = 9 -- frames between ticks: Toby's 5 tics
+
 function HAZARD.clear()
   HAZARD.facing = false
   HAZARD.ticks = 0
-  beacon.clear("hazard")
+  hazard_at = nil
 end
 
 function HAZARD.update(s)
   if s == nil or s.module ~= 0x07 then HAZARD.clear(); return end
   local ax, ay = HAZARD.pit_ahead(s)
   if ax == nil then HAZARD.clear(); return end
-  -- Fires on turning ONTO the pit, not for as long as he faces it: a warning about a
-  -- step he is about to take has said its piece once he has heard it, and holding the
-  -- tone would bury the enemy and guide tones under it while he edges along a ledge.
-  -- Facing away re-arms it, so every fresh approach gets its own blip.
+  -- Toby's drop-off detector: a rapid tick from the edge, for as long as one is ahead. The
+  -- first comes at once on turning toward it; the rest every EVERY frames.
+  hazard_at = { x = ax - s.x, y = ay - s.y }
   if not HAZARD.facing then
     HAZARD.facing = true
-    HAZARD.ticks = HAZARD.BLIP
+    HAZARD.ticks = 0
   end
-  if HAZARD.ticks > 0 then
-    HAZARD.ticks = HAZARD.ticks - 1
-    -- Positioned on the pit itself, so the blip pans toward it and its distance is
-    -- audible in the stereo offset rather than having to be described.
-    beacon.set("hazard", { x = ax - s.x, y = ay - s.y, pitch = HAZARD.TONE.pitch,
-      tremolo = HAZARD.TONE.tremolo, ping = true, volume = HAZARD.TONE.volume })
-  else
-    beacon.clear("hazard")
+  HAZARD.ticks = HAZARD.ticks - 1
+  if HAZARD.ticks <= 0 then
+    HAZARD.ticks = HAZARD.EVERY
+    sound.play("dropoff/beacon", { x = hazard_at.x, y = hazard_at.y, volume = 0.9 })
   end
 end
 
@@ -1903,71 +1887,79 @@ local function ow_parent(cell)
   return (string.byte(OW_PARENT, (cell & 0x3F) + 1) or (cell & 0x3F)) & 0x3F
 end
 
-local OW_ASTAR_CAP = 40000 -- node budget; bounds a worst-case mazey route
+local OW_ASTAR_CAP = 512 * 512 -- node budget: the whole world, now the search is in the host
 
 -- A* over 8-pixel world tiles from Link's footing toward (gx,gy). If `goal_area`
 -- (a 0..0x3F within-world area index) is given, the goal is any reachable tile in
 -- that area — so it stops at the screen boundary rather than a possibly-walled
 -- centre — and (gx,gy) is only the heuristic aim point. Returns a string-pulled
 -- list of world tiles {tx,ty}, or nil if unreachable / off the map.
+-- The overworld's walkability as host grids, one per world, built from the ROM decode the
+-- first time a route needs it: BUILD_ROWS rows a frame, so the build is never a hitch.
+-- The search itself runs in the host (nav.grid), which is what lets a route be re-planned
+-- from Link every few frames rather than kept until it has gone stale.
+OWGRID = { grid = {}, rows = {}, failed = {}, BUILD_ROWS = 16 }
+
+-- The finished grid for world `w`, or nil while it is still being built (each call builds a
+-- little more).
+function OWGRID.get(w)
+  -- No ROM, no overworld to decode (the tests run without one).
+  if (rom.size or 0) == 0 or OWGRID.failed[w] then return nil end
+  local g = OWGRID.grid[w]
+  if g == nil then
+    g = nav.grid(512, 512)
+    OWGRID.grid[w], OWGRID.rows[w] = g, 0
+  end
+  local y0 = OWGRID.rows[w]
+  if y0 >= 512 then return g end
+  -- A ROM that does not decode as this plugin expects (a hack, a bad dump) must not take the
+  -- frame down with it: give up on the grid, and the router falls back to having none.
+  local ok, err = pcall(function()
+    for ty = y0, math.min(511, y0 + OWGRID.BUILD_ROWS - 1) do
+      local row = {}
+      for tx = 0, 511 do row[tx + 1] = ow_walk(w, tx, ty) and "\1" or "\0" end
+      g:fill(0, ty, 512, 1, table.concat(row))
+    end
+  end)
+  if not ok then
+    log("warn", "overworld grid: " .. tostring(err))
+    OWGRID.failed[w] = true
+    return nil
+  end
+  OWGRID.rows[w] = math.min(512, y0 + OWGRID.BUILD_ROWS)
+  return OWGRID.rows[w] >= 512 and g or nil
+end
+
+-- Plans an overworld route from Link to tile (gx, gy), or to anywhere on overworld area
+-- `goal_area` (all of a large area's screens). Returns the right-angle waypoints, or nil and
+-- "building" while the world's grid is still being made.
 local function ow_plan_path(s, gx, gy, goal_area)
   local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
   local fx, fy = foot(s)
   local sx, sy = ow_nearest_walk(w, fx >> 3, fy >> 3)
   if goal_area == nil then gx, gy = ow_nearest_walk(w, gx, gy) end
   if sx == nil or gx == nil then return nil end
-  local function key(x, y) return y * 512 + x end
-  local function heur(x, y) return math.abs(x - gx) + math.abs(y - gy) end
-  local goal_parent = ow_parent(goal_area or 0)
-  local function is_goal(n)
-    if goal_area == nil then return n == key(gx, gy) end
-    local nx, ny = n % 512, n // 512
-    return ow_parent((ny >> 6) * 8 + (nx >> 6)) == goal_parent
-  end
-  local g, came, closed, heap = { [key(sx, sy)] = 0 }, {}, {}, {}
-  local function push(n, f)
-    heap[#heap + 1] = { n, f }
-    local i = #heap
-    while i > 1 and heap[i >> 1][2] > heap[i][2] do heap[i], heap[i >> 1] = heap[i >> 1], heap[i]; i = i >> 1 end
-  end
-  local function pop()
-    local top = heap[1][1]
-    heap[1] = heap[#heap]; heap[#heap] = nil
-    local i, n = 1, #heap
-    while true do
-      local l, r, m = i * 2, i * 2 + 1, i
-      if l <= n and heap[l][2] < heap[m][2] then m = l end
-      if r <= n and heap[r][2] < heap[m][2] then m = r end
-      if m == i then break end
-      heap[i], heap[m] = heap[m], heap[i]; i = m
-    end
-    return top
-  end
-  push(key(sx, sy), heur(sx, sy))
-  local reached, expanded = nil, 0
-  while #heap > 0 and expanded < OW_ASTAR_CAP do
-    local n = pop()
-    if is_goal(n) then reached = n; break end
-    if not closed[n] then
-      closed[n] = true; expanded = expanded + 1
-      local nx, ny = n % 512, n // 512
-      for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
-        local cx, cy = nx + d[1], ny + d[2]
-        if ow_walk(w, cx, cy) then
-          local c = key(cx, cy); local ng = g[n] + 1
-          if g[c] == nil or ng < g[c] then g[c] = ng; came[c] = n; push(c, ng + heur(cx, cy)) end
-        end
+  local grid = OWGRID.get(w)
+  if grid == nil then return nil, "building" end
+  local goal
+  if goal_area == nil then
+    goal = { x = gx, y = gy }
+  else
+    -- Every screen of the goal's area: a large area is four, and arriving on any is arriving.
+    local parent, rects = ow_parent(goal_area), {}
+    for cell = 0, 63 do
+      if ow_parent(cell) == parent then
+        local cx, cy = cell & 7, cell >> 3
+        rects[#rects + 1] = { cx * 64, cy * 64, cx * 64 + 63, cy * 64 + 63 }
       end
     end
+    goal = { rects = rects }
   end
-  if reached == nil then return nil end
-  local rev, c = {}, reached
-  while c do rev[#rev + 1] = { c % 512, c // 512 }; c = came[c] end
-  local pts = {}
-  for i = #rev, 1, -1 do pts[#pts + 1] = rev[i] end
+  local pts = grid:astar(sx, sy, goal, OW_ASTAR_CAP)
+  if pts == nil then return nil end
   -- Pulled to right angles, like the dungeon route: the guide can only name four
   -- directions, so a leg has to be one of them.
-  return rect_pull(pts, function(tx, ty) return ow_walk(w, tx, ty) end)
+  return rect_pull(pts, function(tx, ty) return grid:walkable(tx, ty) end)
 end
 
 -- Follower state. Global so an agent can inspect/drive it over MCP.
@@ -1996,9 +1988,6 @@ pathfind_told = false        -- arrival line said once per arming, not once per 
 -- the vocabulary has to stay legible as a whole, and they are spaced by equal ratios so
 -- the step from LOW to MID sounds like the step from MID to HIGH.
 local PATH_TONE = { ahead = 3.5, side = 2.9, behind = 2.4 }
-local PATH_VOLUME = 0.38        -- still under the object beacons, so threats read over the guide
-local PATH_DUCK = 0.35          -- nav volume scale while an enemy is engaged: ducked, not silenced
-local PATH_PING_HZ = 0.5        -- sonar: a ping every 2 seconds over a soft steady tone
 local WAYPOINT_REACHED = 12    -- px, ~1.5 tiles
 local REPLAN_INTERVAL = 45     -- frames; also self-heals straying off the route
 
@@ -2028,36 +2017,245 @@ function path_tone(direction, dx, dy)
   return PATH_TONE.side
 end
 
--- Aim the sonar path beacon from Link toward waypoint `w` (a {tile_x, tile_y}).
--- Shared by both route followers (local pathfinder and cross-screen overworld), so
--- the heading maths and tone live in one place. `duck` drops the volume while an enemy is
--- engaged, so the threat tone reads over the guide without the guide dropping out entirely.
-local function aim_path_beacon(s, w, duck)
-  local fx, fy = foot(s)
-  local dx, dy = (w[1] * 8 + 4) - fx, (w[2] * 8 + 4) - fy
-  beacon.set("path", {
-    x = dx, y = dy,
-    pitch = path_tone(s.direction, dx, dy),
-    volume = duck and PATH_VOLUME * PATH_DUCK or PATH_VOLUME,
-    tremolo = PATH_PING_HZ, ping = true, -- sonar ping over a soft steady tone
-  })
+-- The route is followed the way Toby's pathfinder is followed: by ear, toward a "carrot".
+--
+-- One sound source rides the route a short leash ahead of Link and beeps from where it is,
+-- Toby's PathBeacon, every 1.26 seconds. Walk toward the beep and the leash pulls you round
+-- each corner. When Link is facing it the beep is PathBeaconFast instead, so "heading the
+-- right way" is a different sound rather than a judgement of stereo. Each corner passed is
+-- NodeReached. Toby's spoken clips — "path found", "destination reached" — are spoken here
+-- through the speech engine instead, at the player's own rate, rather than played as slow
+-- recordings.
+--
+-- Toby's distances, converted at Link's scale (Doom's player radius is 16 units, Link is 16
+-- pixels across, so a pixel is two units): the 150-unit leash is 72 px, a little over four
+-- of Link's tiles; the 44-tic period (Doom runs at 35 tics a second) is 75 frames here.
+--
+-- `carrot` is where it sounds from, relative to Link's feet, while a route is being followed:
+-- {x, y, fast, volume}, or nil. Global so an agent, and the tests, can see the guide.
+carrot = nil
+CARROT = {
+  LEASH = 72,       -- px ahead of Link the carrot may ride
+  PERIOD = 75,      -- frames between beeps
+  VOLUME = 0.9,     -- Toby's carrot is never far enough away to fall off
+  DUCK = 0.35,      -- scale while an enemy is engaged: ducked so the threat reads, not silenced
+  -- Toby beeps on a fixed period, so turning to face the carrot, or a corner swinging it to
+  -- another side, is not heard until the next beep — up to 1.26 s, in which Link walks
+  -- further than the leash. Here a change beeps at once instead: facing it or not, or the
+  -- side it is on. Never more often than this, so wiggling the stick is not a machine gun.
+  MIN_GAP = 12,     -- frames, 0.2 s
+  -- How far the other axis must outgrow the current one before the carrot counts as having
+  -- moved to another side, so a diagonal route does not flicker between two of them.
+  SIDE_HYSTERESIS = 1.25,
+  timer = 0,        -- frames until the next beep; 0 beeps at once
+  since = 1000,     -- frames since the last beep
+  last_fast = nil,  -- whether the last beep was the fast one
+  side = nil,       -- the side the carrot was last on: "n", "s", "e" or "w"
+  -- Whether a journey is under way. Toby says "path found" when the player picks a
+  -- destination, not each time the route is re-planned, so the carrot going quiet for a
+  -- screen transition or a hand-off between routers is the same journey resumed. Only
+  -- arriving, "no path", or turning navigation off ends one.
+  journey = false,
+  -- Whether the destination was chosen by the player (the M menu, a marker). Only then are
+  -- "path found" and "destination reached" said, as in Toby, where the player always chose:
+  -- the quest guide re-aims itself leg after leg, and an area goal it is already standing in
+  -- "arrives" every frame, which said "destination reached" without end.
+  chosen = false,
+  corner = nil,     -- the corner being steered for, {tx, ty}
+  AT_CORNER = 20,   -- px from a corner that counts as being at it
+}
+
+-- Places the carrot along the offset (dx, dy) toward the point being steered for, no further
+-- than the leash, and beeps it when due.
+--
+-- `exact` places it on the point itself, with no leash, louder the nearer it is: the waypoint
+-- guide, where the sound sits on the next corner rather than riding ahead toward it.
+function CARROT.place(s, dx, dy, duck, exact)
+  local d = math.sqrt(dx * dx + dy * dy)
+  if not exact and d > CARROT.LEASH then
+    dx, dy = dx * CARROT.LEASH / d, dy * CARROT.LEASH / d
+  end
+  -- Facing it is the same judgement the old guide tone made with its high note: Link faces
+  -- one of four ways, so "toward" is the dominant axis of the offset.
+  local fast = path_tone(s.direction, dx, dy) == PATH_TONE.ahead
+  local volume = duck and CARROT.VOLUME * CARROT.DUCK or CARROT.VOLUME
+  if exact then
+    volume = volume * (0.45 + 0.55 * (1 - math.min(d, GUIDE.NEAR) / GUIDE.NEAR))
+  end
+  if not CARROT.journey then
+    CARROT.journey = true
+    if CARROT.chosen then say("Path found.", { priority = "navigation", category = "route" }) end
+    CARROT.timer = 0
+  end
+  carrot = { x = dx, y = dy, fast = fast, volume = volume }
+
+  local side = CARROT.side_of(dx, dy, CARROT.side)
+  local changed = fast ~= CARROT.last_fast or side ~= CARROT.side
+  CARROT.side = side
+  CARROT.timer = CARROT.timer - 1
+  CARROT.since = CARROT.since + 1
+  if CARROT.timer <= 0 or (changed and CARROT.since >= CARROT.MIN_GAP) then
+    CARROT.timer = CARROT.PERIOD
+    CARROT.since = 0
+    CARROT.last_fast = fast
+    sound.play(fast and "pathfinder/nodebeaconfast" or "pathfinder/nodebeacon",
+      { x = dx, y = dy, volume = volume })
+  end
 end
 
--- Aim the guide at the way Link must FACE, rather than at somewhere to walk.
---
--- Standing on the spot, the same three tones mean turn-this-way instead of go-this-way:
--- the offset is a whole tile on one axis and nothing on the other, so the dominant axis
--- is the required facing exactly, whatever Link's position within his own tile.
+-- The side of Link the offset (dx, dy) is on, by its dominant axis, keeping `was` until the
+-- other axis is clearly the larger.
+function CARROT.side_of(dx, dy, was)
+  local ax, ay = math.abs(dx), math.abs(dy)
+  local horizontal = (was == "e" or was == "w")
+  if was ~= nil then
+    if horizontal and ay <= ax * CARROT.SIDE_HYSTERESIS then horizontal = true
+    elseif not horizontal and ax <= ay * CARROT.SIDE_HYSTERESIS then horizontal = false
+    else horizontal = not horizontal end
+  else
+    horizontal = ax > ay
+  end
+  if horizontal then return dx > 0 and "e" or "w" end
+  return dy > 0 and "s" or "n"
+end
+
+-- Silences the carrot for now. The journey goes on: the next route placed resumes it.
+-- The next beep comes at once, so the player hears where the guide has gone.
+function CARROT.clear()
+  carrot = nil
+  CARROT.timer = 0
+  CARROT.last_fast, CARROT.side = nil, nil
+  CARROT.corner = nil
+  GUIDE.target = nil
+end
+
+-- Ends the journey: the next route is a new one, announced with "path found".
+function CARROT.finish()
+  CARROT.clear()
+  CARROT.journey = false
+  CARROT.chosen = false
+end
+
+-- Notes the corner being steered for, sounding NodeReached when the guide has moved on from
+-- one Link is standing at. Judged by place, not by the route's numbering, because routes are
+-- re-planned from Link and renumbered every few frames.
+function CARROT.node(path, wp, x, y)
+  local w = path[wp]
+  local was = CARROT.corner
+  CARROT.corner = w and { w[1], w[2] } or nil
+  if was ~= nil and wp <= #path and (w[1] ~= was[1] or w[2] ~= was[2])
+      and math.abs(was[1] * 8 + 4 - x) + math.abs(was[2] * 8 + 4 - y) <= CARROT.AT_CORNER then
+    sound.ui("pathfinder/nodereached")
+  end
+end
+
+-- Arrived: Toby's "destination reached", and the carrot falls silent. Not said when the
+-- route has its own arrival line, which says more.
+function CARROT.arrive(announced)
+  if CARROT.chosen and not announced then
+    say("Destination reached.", { priority = "navigation", category = "route" })
+  end
+  CARROT.finish()
+end
+
+-- Aim the carrot from Link toward waypoint `w` (a {tile_x, tile_y}). Shared by both route
+-- followers (local pathfinder and cross-screen overworld). `duck` drops the volume while an
+-- enemy is engaged, so the threat reads over the guide without the guide dropping out.
+local function aim_path_beacon(s, w, duck)
+  local fx, fy = foot(s)
+  CARROT.place(s, (w[1] * 8 + 4) - fx, (w[2] * 8 + 4) - fy, duck)
+end
+
+-- Aim the carrot at the way Link must FACE, rather than at somewhere to walk: a tile away in
+-- that direction, so it beeps from that side, and fast once he has turned to it.
 local function aim_face_beacon(s, dir, duck)
   local d = DIRS[dir]
-  if d == nil then beacon.clear("path"); return end
-  local dx, dy = d.dx * 16, d.dy * 16
-  beacon.set("path", {
-    x = dx, y = dy,
-    pitch = path_tone(s.direction, dx, dy),
-    volume = duck and PATH_VOLUME * PATH_DUCK or PATH_VOLUME,
-    tremolo = PATH_PING_HZ, ping = true,
-  })
+  if d == nil then CARROT.clear(); return end
+  CARROT.place(s, d.dx * 16, d.dy * 16, duck)
+end
+
+-- ── The waypoint guide ──────────────────────────────────────────────────────
+-- The carrot rides a leash ahead toward the next corner, and once Link nears a corner it is
+-- already pulling toward the one after — a straight line that can cut across the inside of
+-- the corner, through a wall or past the doorway the route uses. In stereo, with north always
+-- in front, a sound dead ahead and one dead behind are also the same sound. Players found both
+-- hard to follow.
+--
+-- So, by default, the route is a chain of waypoints, as World of Warcraft and Diablo Access
+-- lay one out: the beacon sits ON the next corner, doorway or stairs, never between them, and
+-- grows louder as Link nears it. Reaching one is Toby's "node reached" chime, then the next leg
+-- in words — "Door, north, 5 tiles" — which says what stereo cannot. Period says the leg again;
+-- comma walks Link there. The carrot stays, as a choice (the guide_style command, or the menu).
+GUIDE = {
+  mode = "waypoints",  -- "waypoints" or "carrot"
+  MERGE = 16,          -- px: corners this close together are one waypoint, not two chimes
+  NEAR = 160,          -- px over which a waypoint's beacon grows louder as Link closes on it
+  target = nil,        -- the waypoint being led to: { x, y, tx, ty, label }; global for tests
+}
+
+-- The waypoint for a route at index `wp`: that corner, or the one after it when the two are
+-- only a jog apart AND the straight way from Link to the later one is clear. A short corner
+-- that takes the route round the end of a wall is the one that matters most, so it is never
+-- skipped for a line through the wall.
+function GUIDE.pick(s, path, wp, fx, fy)
+  local i = wp
+  while path[i] ~= nil and path[i + 1] ~= nil do
+    local a, b = path[i], path[i + 1]
+    if (math.abs(a[1] - b[1]) + math.abs(a[2] - b[2])) * 8 > GUIDE.MERGE then break end
+    if not GUIDE.clear_line(s, fx, fy, b[1] * 8 + 4, b[2] * 8 + 4) then break end
+    i = i + 1
+  end
+  return path[i], i
+end
+
+-- Whether every tile on the straight line between two world points can be walked.
+function GUIDE.clear_line(s, x0, y0, x1, y1)
+  local n = math.max(1, (math.abs(x1 - x0) + math.abs(y1 - y0)) // 4)
+  for k = 0, n do
+    local x = x0 + (x1 - x0) * k // n
+    local y = y0 + (y1 - y0) * k // n
+    if not tile_passable(s, x >> 3, y >> 3) then return false end
+  end
+  return true
+end
+
+-- Says the leg to waypoint `t`: what it is, which way, how far.
+function GUIDE.say_leg(s, t)
+  local fx, fy = foot(s)
+  local dx, dy = t.x - fx, t.y - fy
+  local tiles = math.max(1, (math.abs(dx) + math.abs(dy) + 8) // 16)
+  say(string.format("%s, %s, %d %s.", t.label, direction(dx, dy), tiles, tiles == 1 and "tile" or "tiles"),
+    { priority = "navigation", category = "waypoint" })
+end
+
+-- Notes the follower's progress; the carrot counts its corners here, the waypoint guide in aim.
+function GUIDE.node(path, wp, x, y)
+  if GUIDE.mode == "carrot" then CARROT.node(path, wp, x, y) end
+end
+
+-- Leads toward the route `path` at waypoint `wp`, in whichever style is chosen.
+function GUIDE.aim(s, path, wp, fx, fy, duck)
+  local w, i = GUIDE.pick(s, path, wp, fx, fy)
+  if w == nil then return end
+  local t = { x = w[1] * 8 + 4, y = w[2] * 8 + 4, tx = w[1], ty = w[2] }
+  t.label = GUIDE.label(s, w[1], w[2], i >= #path)
+  local was = GUIDE.target
+  local moved = was == nil or was.tx ~= t.tx or was.ty ~= t.ty
+  GUIDE.target = t
+  if GUIDE.mode == "carrot" then
+    aim_path_beacon(s, route_aim(path, wp, fx, fy), duck)
+    return
+  end
+  if moved then
+    if was ~= nil and math.abs(was.x - fx) + math.abs(was.y - fy) <= CARROT.AT_CORNER then
+      -- Picked up: the chime, then where the next one is.
+      sound.ui("pathfinder/nodereached")
+      GUIDE.say_leg(s, t)
+    elseif was == nil then
+      GUIDE.say_leg(s, t) -- the first leg of a route
+    end
+  end
+  CARROT.place(s, t.x - fx, t.y - fy, duck, true)
 end
 
 local function area_id(s)
@@ -2122,7 +2320,7 @@ function pathfind_to(wx, wy, arrival, level, face)
   end
   pathfind_goal = nil
   pathfind_active = false
-  beacon.clear("path")
+  CARROT.finish()
   say("No path there.", { priority = "navigation", category = "on-demand" })
   return false
 end
@@ -2134,7 +2332,35 @@ function pathfind_stop()
   pathfind_arrival = nil
   pathfind_face = nil
   pathfind_told = false
-  beacon.clear("path")
+  CARROT.clear()
+end
+
+-- Route upkeep. In a room, a route is re-planned when Link has left it. On the overworld,
+-- where the search is the host's, it is re-planned from him every few frames.
+ROUTE = {
+  OFF = 24,      -- px from the route that counts as having left it (three tiles)
+  CHECK = 10,    -- frames between checks that he is still on it (rooms)
+  REPLAN = 10,   -- frames between overworld re-plans from Link
+  RETRY = 120,   -- frames before trying again after "no route"
+}
+
+-- Whether the point (x, y) is further than ROUTE.OFF from every leg of `path` near waypoint
+-- `wp`: the leg into it, and the legs either side. Waypoints are tiles; x, y are pixels.
+function route_off(path, wp, x, y)
+  if path == nil or #path == 0 then return true end
+  local best = math.huge
+  local lo, hi = math.max(1, wp - 2), math.min(#path, wp + 1)
+  for k = lo, hi do
+    local ax, ay = path[k][1] * 8 + 4, path[k][2] * 8 + 4
+    local b = path[k + 1] or path[k]
+    local bx, by = b[1] * 8 + 4, b[2] * 8 + 4
+    local vx, vy = bx - ax, by - ay
+    local len2 = vx * vx + vy * vy
+    local t = len2 > 0 and math.max(0, math.min(1, ((x - ax) * vx + (y - ay) * vy) / len2)) or 0
+    local px, py = ax + vx * t - x, ay + vy * t - y
+    best = math.min(best, px * px + py * py)
+  end
+  return best > ROUTE.OFF * ROUTE.OFF
 end
 
 -- Where to start following a freshly planned route.
@@ -2202,10 +2428,14 @@ end
 -- Advance the follower one frame and place or clear the guide beacon.
 local function pathfind_update(s)
   if not pathfind_active then return end
-  if not in_play(s) then beacon.clear("path"); return end
+  if not in_play(s) then CARROT.clear(); return end
 
   pathfind_replan_in = pathfind_replan_in - 1
-  if pathfind_area ~= area_id(s) or pathfind_replan_in <= 0 then
+  local due = pathfind_replan_in <= 0
+  if due then pathfind_replan_in = ROUTE.CHECK end
+  local here_x, here_y = foot(s)
+  if pathfind_area ~= area_id(s)
+      or (due and route_off(pathfind_path, pathfind_wp, here_x, here_y)) then
     if not pathfind_replan(s) then
       -- Can't re-plan (e.g. Link stepped into a new room the chain hands off): stop
       -- quietly and let the guide re-aim next frame, rather than announcing a loss.
@@ -2217,6 +2447,7 @@ local function pathfind_update(s)
   local path = pathfind_path
   local fx, fy = foot(s)
   pathfind_wp = route_advance(path, pathfind_wp, fx, fy)
+  GUIDE.node(path, pathfind_wp, fx, fy)
   if pathfind_wp > #path then
     -- On the spot. If the errand also needs him pointed a particular way, that is the
     -- rest of arriving: say what to do and which way once, then keep the guide sounding
@@ -2233,16 +2464,18 @@ local function pathfind_update(s)
       aim_face_beacon(s, pathfind_face, combat_engaged)
       return
     end
+    local announced = pathfind_arrival ~= nil
     if pathfind_arrival and not pathfind_told then
       say(pathfind_arrival, { priority = "navigation", category = "on-demand" })
     end
+    CARROT.arrive(announced)
     pathfind_stop()
     return
   end
 
   -- Duck the guide while an enemy is engaged, so the threat tone reads clearly over
   -- it, but keep guiding — full volume returns once the enemy backs off.
-  aim_path_beacon(s, route_aim(path, pathfind_wp, fx, fy), combat_engaged)
+  GUIDE.aim(s, path, pathfind_wp, fx, fy, combat_engaged)
 end
 
 -- Tile-attribute classes, named like the collision sets (IMPASSABLE, COLLIDE_*),
@@ -2258,6 +2491,19 @@ do
   CHEST_TILES[0x63] = true                                -- minigame chest
   for a in pairs(STAIR_UP) do ENTRANCE_TILES[a] = true end
   for a in pairs(STAIR_DOWN) do ENTRANCE_TILES[a] = true end
+end
+
+-- What a waypoint is, by the tile it sits on, so the leg can name it: a door, stairs, an exit.
+-- After DOOR_TILES, which it needs; GUIDE itself is defined earlier, with the followers.
+function GUIDE.label(s, tx, ty, last)
+  local a = tile_attr_at(s, tx * 8 + 4, ty * 8 + 4)
+  if a ~= nil then
+    if DOOR_TILES[a] then return "Door" end
+    if STAIR_UP[a] then return "Stairs up" end
+    if STAIR_DOWN[a] then return "Stairs down" end
+    if ENTRANCE_TILES[a] then return "Exit" end
+  end
+  return last and "Destination" or "Waypoint"
 end
 
 -- The nearest door / passage tile in the current 64x64 window, as world pixel
@@ -2630,7 +2876,9 @@ markers = {}
 function mark_set(slot)
   local s = prev
   if s == nil or not in_play(s) then return false end
-  markers[slot] = { area = area_id(s), tx = s.x >> 3, ty = s.y >> 3 }
+  local fx, fy = foot(s)
+  markers[slot] = { area = area_id(s), tx = fx >> 3, ty = fy >> 3, module = s.module,
+                    room = s.module == 0x07 and s.dungeon_room or nil }
   return true
 end
 
@@ -2668,6 +2916,7 @@ local ow_replan_in = 0
 local function ow_route_stop()
   ow_route_goal = nil
   ow_route_path = nil
+  ow_replan_in = 0
 end
 
 -- Begin a cross-screen route to a world pixel destination.
@@ -2694,24 +2943,35 @@ end
 local function ow_route_update(s)
   if ow_route_goal == nil or pathfind_active then return end
   if s.module ~= 0x09 or not in_play(s) then
-    beacon.clear("path"); return
+    CARROT.clear(); return
   end
+  local fx, fy = foot(s)
+  -- Re-planned from where Link is, every ROUTE.REPLAN frames: the search is the host's and
+  -- costs about a millisecond, so the route is never one he has already left behind.
   ow_replan_in = ow_replan_in - 1
   if ow_route_path == nil or ow_replan_in <= 0 then
+    ow_replan_in = ROUTE.REPLAN
     -- ow_route_goal holds tile coordinates, which ow_plan_path expects directly.
-    ow_route_path = ow_plan_path(s, ow_route_goal[1], ow_route_goal[2], ow_route_goal.area)
-    ow_route_wp = ow_route_path and route_start_wp(ow_route_path) or 1
-    ow_replan_in = REPLAN_INTERVAL
+    local path, why = ow_plan_path(s, ow_route_goal[1], ow_route_goal[2], ow_route_goal.area)
+    if path ~= nil then
+      ow_route_path = path
+      ow_route_wp = route_start_wp(path)
+    elseif why == "building" then
+      ow_replan_in = 0 -- the grid is being made; try again next frame
+    else
+      ow_route_path = nil
+      ow_replan_in = ROUTE.RETRY -- no route: a failed search is the expensive kind
+    end
   end
   local path = ow_route_path
-  if path == nil then beacon.clear("path"); return end
-  local fx, fy = foot(s)
+  if path == nil then CARROT.clear(); return end
   ow_route_wp = route_advance(path, ow_route_wp, fx, fy)
+  GUIDE.node(path, ow_route_wp, fx, fy)
   if ow_route_wp > #path then
-    ow_route_stop(); beacon.clear("path"); return
+    ow_route_stop(); CARROT.arrive(); return
   end
   -- duck the guide in a fight
-  aim_path_beacon(s, route_aim(path, ow_route_wp, fx, fy), combat_engaged)
+  GUIDE.aim(s, path, ow_route_wp, fx, fy, combat_engaged)
 end
 
 -- The opening context navigation auto-starts in: Link up and controllable in his
@@ -2890,6 +3150,322 @@ function PUSH.tone(s)
   end
 end
 
+-- ── Enemies, Toby's way ─────────────────────────────────────────────────────
+-- In Doom every monster is heard by its own sounds; ALttP's are mostly silent, so the few
+-- nearest each carry Beacon's enemy tone. On top of that, Toby's targeting:
+--   lock     Toby's lock tick, every 7 tics (12 frames), while an enemy is straight ahead of
+--            the way Link faces, within LOCK_RANGE and in sight; a new target is named
+--   hit      a sound where a blow lands (an enemy's health drops)
+--   kill     a sound where an enemy falls (its health reaches nothing)
+--   snap     a command: turn Link to face the nearest enemy in sight (Toby's snap-to-target)
+ENEMY = {
+  VOICES = 4,        -- enemies that sound at once, nearest first
+  LOCK_RANGE = 128,  -- px ahead: eight tiles, about an arrow's useful reach
+  LOCK_WIDTH = 12,   -- px either side of the line he faces
+  LOCK_EVERY = 12,   -- frames between lock ticks
+  lock_in = 0,
+  target = nil,      -- slot of the enemy locked on
+  hp = {},           -- slot -> { kind, hp } as last seen, for hits and kills
+}
+
+function ENEMY.voices(s, list)
+  local k = 1
+  for _, sp in ipairs(list) do
+    if category(sp) == "enemy" then
+      if k > 1 then
+        sound_beacon(s, "enemy" .. k, sp.dx, sp.dy, sp.dist, BEACON_KINDS.enemy, false)
+      end
+      k = k + 1
+      if k > ENEMY.VOICES then break end
+    end
+  end
+  for i = math.max(2, k), ENEMY.VOICES do beacon.clear("enemy" .. i) end
+end
+
+function ENEMY.silence()
+  for i = 2, ENEMY.VOICES do beacon.clear("enemy" .. i) end
+  ENEMY.target, ENEMY.hp = nil, {}
+end
+
+-- The enemy straight ahead of Link's facing, nearest first, or nil.
+function ENEMY.ahead(s, list)
+  local d = DIRS[s.direction]
+  if d == nil then return nil end
+  local best, best_along
+  for _, sp in ipairs(list) do
+    if is_enemy(sp) and (sp.hp or 0) > 0 then
+      local along = d.dx * sp.dx + d.dy * sp.dy
+      local across = math.abs(d.dx * sp.dy - d.dy * sp.dx)
+      if along > 0 and along <= ENEMY.LOCK_RANGE and across <= ENEMY.LOCK_WIDTH
+          and (best_along == nil or along < best_along)
+          and not sight_blocked(s, s.x, s.y, s.x + sp.dx, s.y + sp.dy) then
+        best, best_along = sp, along
+      end
+    end
+  end
+  return best
+end
+
+function ENEMY.update(s, list)
+  -- Target lock.
+  local t = ENEMY.ahead(s, list)
+  if t then
+    ENEMY.lock_in = ENEMY.lock_in - 1
+    if ENEMY.lock_in <= 0 then
+      ENEMY.lock_in = ENEMY.LOCK_EVERY
+      sound.ui("weapons/lock")
+    end
+    if ENEMY.target ~= t.slot then
+      ENEMY.target = t.slot
+      say(poi_cap_name(enemy_name(t)) .. ".", { priority = "interaction", category = "target", rate_limit = "1s" })
+    end
+  else
+    ENEMY.target, ENEMY.lock_in = nil, 0
+  end
+
+  -- Hits and kills, by each enemy's health against its last.
+  local live = {}
+  for _, sp in ipairs(list) do
+    if is_enemy(sp) then
+      live[sp.slot] = true
+      local was = ENEMY.hp[sp.slot]
+      local hp = sp.hp or 0
+      if was ~= nil and was.kind == sp.kind and hp < was.hp then
+        sound.play(hp == 0 and "beacon/kill" or "beacon/hit", { x = sp.dx, y = sp.dy, volume = 0.9 })
+      end
+      ENEMY.hp[sp.slot] = { kind = sp.kind, hp = hp }
+    end
+  end
+  for slot in pairs(ENEMY.hp) do
+    if not live[slot] then ENEMY.hp[slot] = nil end
+  end
+end
+
+-- Capitalised, for saying a name on its own.
+function poi_cap_name(text)
+  return (text:gsub("^%l", string.upper))
+end
+
+-- Toby's snap-to-target: turn Link to face the nearest enemy in sight, and say which.
+on_command("snap", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  for _, sp in ipairs(sprites()) do
+    if is_enemy(sp) and (sp.hp or 0) > 0 and on_screen(sp.dx, sp.dy)
+        and not sight_blocked(s, s.x, s.y, s.x + sp.dx, s.y + sp.dy) then
+      local dir
+      if math.abs(sp.dx) > math.abs(sp.dy) then dir = sp.dx > 0 and "right" or "left"
+      else dir = sp.dy > 0 and "down" or "up" end
+      input.hold(dir, 2)
+      say(string.format("%s, %s.", poi_cap_name(enemy_name(sp)), direction(sp.dx, sp.dy)),
+          { priority = "navigation", category = "on-demand" })
+      return
+    end
+  end
+  say("No target in sight.", { priority = "navigation", category = "on-demand" })
+end)
+
+-- ── World cues, Toby's way ──────────────────────────────────────────────────
+-- Things in the world make their own sounds, from where they are, as Toby's beacons do — its
+-- own recordings, from the player's Toby install, or Beacon's stand-ins. Kept sparse by the
+-- same three means Toby uses: short falloffs, a range inside which a sound plays at all, and
+-- line of sight. Toby's distances are converted at Link's scale (a pixel is two Doom units).
+--   pickups   the item's category sound every 40 tics (69 frames), when in view
+--   chests    the same, with the armour sound, so a chest is told from a loose pickup
+--   markers   each its own Toby marker sound every 36 tics, in view, falling off 48-320 px
+--   exits     a continuous loop at the nearest exit, 32-72 px (Toby: 64-144 units)
+--   stairs    Toby's teleporter loop at the nearest stairs, 32-72 px
+--   locked    the locked-door loop at the nearest locked door, 48-104 px (96-208 units)
+--   doorways  one door sound on coming within 32 px, again a second later while there
+--   spikes    Toby's radiation clicks every 10 tics toward the nearest spike floor
+--   wind      optional, off by default as in Toby: the wall proximity "wind", four ways
+-- Fixed things come from the record of the current place (SEEN), refreshed every second, so
+-- nothing here scans the room per frame.
+WORLD = {
+  PICKUP_EVERY = 69, PICKUP_FIRST = 17, PICKUP_FAR = 600,
+  MARKER_EVERY = 62, MARKER_NEAR = 48, MARKER_FAR = 320,
+  EXIT_NEAR = 32, EXIT_FAR = 72,
+  LOCKED_NEAR = 48, LOCKED_FAR = 104,
+  DOOR_REACH = 32, DOOR_EVERY = 60, DOOR_NEAR = 24, DOOR_FAR = 80,
+  SPIKE_EVERY = 17, SPIKE_NEAR = 32, SPIKE_FAR = 128, SPIKE_SCAN = 16,
+  SPIKE_TILE = 0x0D,
+  WIND_REACH = 150,
+  wind = false,      -- the proximity "wind", toggled by the proximity command
+  timers = {},       -- per-source frames until its next sound
+  live = {},
+  LOOPS = { "exit", "stairs", "locked", "wind_n", "wind_s", "wind_e", "wind_w" },
+}
+
+-- 1 within `near`, 0 beyond `far`, linear between: GZDoom's `$rolloff linear`.
+function WORLD.linear(d, near, far)
+  if d <= near then return 1 elseif d >= far then return 0 end
+  return 1 - (d - near) / (far - near)
+end
+
+-- Whether source `id` sounds this frame: first after `first` frames, then every `period`.
+function WORLD.due(id, period, first)
+  WORLD.live[id] = true
+  local t = WORLD.timers[id]
+  if t == nil then t = first end
+  t = t - 1
+  if t <= 0 then WORLD.timers[id] = period; return true end
+  WORLD.timers[id] = t
+  return false
+end
+
+-- Toby's universal pickup sound for an item, by what it is.
+function WORLD.pickup_sound(name)
+  local n = name:lower()
+  if n:find("key") then return "toby/universalbeacons/key" end
+  if n:find("heart") or n:find("fairy") then return "toby/universalbeacons/health" end
+  if n:find("rupee") or n:find("bomb") or n:find("arrow") or n:find("magic") then
+    return "toby/universalbeacons/ammo"
+  end
+  return "toby/universalbeacons/weapon"
+end
+
+function WORLD.silence()
+  for _, id in ipairs(WORLD.LOOPS) do sound.stop(id) end
+  WORLD.timers, WORLD.live = {}, {}
+end
+
+-- The nearest of the current place's remembered things called `name`, from Link's centre,
+-- as (dx, dy, dist) or nil.
+function WORLD.nearest_thing(things, name, cx, cy)
+  local best
+  for _, t in ipairs(things) do
+    if t.name == name then
+      local dx, dy = t.x - cx, t.y - cy
+      local d = math.abs(dx) + math.abs(dy)
+      if best == nil or d < best[3] then best = { dx, dy, d } end
+    end
+  end
+  if best then return best[1], best[2], best[3] end
+end
+
+function WORLD.update(s, list, hushed)
+  -- What is on this place, before reading it. Cheap except on arrival and once a second.
+  SEEN.tick(s)
+  WORLD.live = {}
+  local cx, cy = s.x + 8, s.y + 8
+  local function seen(dx, dy) return not sight_blocked(s, s.x, s.y, s.x + dx, s.y + dy) end
+
+  -- Loose pickups.
+  for _, sp in ipairs(list) do
+    if not is_enemy(sp) and REF.item_types[sp.kind] and on_screen(sp.dx, sp.dy) then
+      if WORLD.due("pickup" .. sp.slot, WORLD.PICKUP_EVERY, WORLD.PICKUP_FIRST)
+          and not hushed and seen(sp.dx, sp.dy) then
+        sound.play(WORLD.pickup_sound(sprite_name(sp.kind)),
+          { x = sp.dx, y = sp.dy, volume = math.max(0.3, 1 - sp.dist / WORLD.PICKUP_FAR) })
+      end
+    end
+  end
+
+  local place = SEEN.places[SEEN.key_of(s)]
+  local things = place and place.things or {}
+
+  -- Chests, by the chest itself: a little above the spot Link opens it from.
+  for i, t in ipairs(things) do
+    if t.name == "Chest" then
+      local dx, dy = t.x - cx, t.y - 12 - cy
+      if on_screen(dx, dy) and WORLD.due("chest" .. t.x .. "," .. t.y, WORLD.PICKUP_EVERY, WORLD.PICKUP_FIRST)
+          and not hushed and seen(dx, dy) then
+        sound.play("toby/universalbeacons/armor",
+          { x = dx, y = dy, volume = math.max(0.3, 1 - (math.abs(dx) + math.abs(dy)) / WORLD.PICKUP_FAR) })
+      end
+    end
+  end
+
+  -- Exits, stairs and locked doors: a loop at the nearest, in range.
+  local function loop(id, name, sname, near, far)
+    local dx, dy, d = WORLD.nearest_thing(things, name, cx, cy)
+    if hushed or d == nil or d >= far then sound.stop(id); return end
+    sound.loop(id, sname, { x = dx, y = dy, volume = WORLD.linear(d, near, far) })
+  end
+  loop("exit", "Exit", "amb/exit1", WORLD.EXIT_NEAR, WORLD.EXIT_FAR)
+  local sx, sy, sd = WORLD.nearest_thing(things, "Stairs up", cx, cy)
+  local tx, ty, td = WORLD.nearest_thing(things, "Stairs down", cx, cy)
+  if td ~= nil and (sd == nil or td < sd) then sx, sy, sd = tx, ty, td end
+  if hushed or sd == nil or sd >= WORLD.EXIT_FAR then sound.stop("stairs")
+  else sound.loop("stairs", "amb/exit2", { x = sx, y = sy, volume = WORLD.linear(sd, WORLD.EXIT_NEAR, WORLD.EXIT_FAR) }) end
+  loop("locked", "Locked door", "amb/rdoor", WORLD.LOCKED_NEAR, WORLD.LOCKED_FAR)
+
+  -- Doorways: a door sound on coming near one, then a second apart while still there.
+  local dx, dy, d = WORLD.nearest_thing(things, "Doorway", cx, cy)
+  if d ~= nil and d < WORLD.DOOR_REACH then
+    if WORLD.due("door", WORLD.DOOR_EVERY, 0) and not hushed then
+      sound.play("amb/door2", { x = dx, y = dy, volume = WORLD.linear(d, WORLD.DOOR_NEAR, WORLD.DOOR_FAR) })
+    end
+  end
+
+  -- The player's markers, each its own sound, while in this area and in view.
+  for k = 1, 10 do
+    local m = markers[k]
+    if m ~= nil and m.area == area_id(s) then
+      local mdx, mdy = m.tx * 8 + 4 - cx, m.ty * 8 + 4 - cy
+      local md = math.abs(mdx) + math.abs(mdy)
+      if md < WORLD.MARKER_FAR and WORLD.due("marker" .. k, WORLD.MARKER_EVERY, 0)
+          and not hushed and seen(mdx, mdy) then
+        sound.play("marker/beacon" .. k,
+          { x = mdx, y = mdy, volume = WORLD.linear(md, WORLD.MARKER_NEAR, WORLD.MARKER_FAR) })
+      end
+    end
+  end
+
+  -- Spike floors: clicks toward the nearest, silent while standing on one.
+  if WORLD.due("spikes", WORLD.SPIKE_EVERY, 0) and not hushed then
+    local fx, fy = foot(s)
+    if tile_attr_at(s, fx, fy) ~= WORLD.SPIKE_TILE then
+      local best
+      local R = WORLD.SPIKE_SCAN
+      for oy = -R, R do
+        for ox = -R, R do
+          local px, py = fx + ox * 8, fy + oy * 8
+          if tile_attr_at(s, px, py) == WORLD.SPIKE_TILE then
+            local dd = math.abs(ox) + math.abs(oy)
+            if best == nil or dd < best[3] then best = { px - cx, py - cy, dd } end
+          end
+        end
+      end
+      if best then
+        local pd = math.abs(best[1]) + math.abs(best[2])
+        if pd < WORLD.SPIKE_FAR then
+          sound.play("toby/hurtfloordetector/rad",
+            { x = best[1], y = best[2], volume = WORLD.linear(pd, WORLD.SPIKE_NEAR, WORLD.SPIKE_FAR) })
+        end
+      end
+    end
+  end
+
+  -- The proximity "wind": in each direction, at the first wall, pitched by its distance.
+  if WORLD.wind and not hushed then
+    local fx, fy = foot(s)
+    for _, w in ipairs({ { "wind_n", 0, -1 }, { "wind_s", 0, 1 }, { "wind_e", 1, 0 }, { "wind_w", -1, 0 } }) do
+      local hit
+      for step = 1, WORLD.WIND_REACH // 8 do
+        local px, py = fx + w[2] * step * 8, fy + w[3] * step * 8
+        if not tile_passable(s, px >> 3, py >> 3) then hit = step * 8; break end
+      end
+      if hit then
+        sound.loop(w[1], "toby/proximitydetector/wind", { x = w[2] * hit, y = w[3] * hit,
+          pitch = 1 + 3 * hit / WORLD.WIND_REACH, volume = 0.15 + 0.6 * (1 - hit / WORLD.WIND_REACH) })
+      else
+        sound.stop(w[1])
+      end
+    end
+  else
+    for _, id in ipairs({ "wind_n", "wind_s", "wind_e", "wind_w" }) do sound.stop(id) end
+  end
+
+  -- Forget the timers of sources gone from view, so each comes back with its first sound.
+  for id in pairs(WORLD.timers) do
+    if not WORLD.live[id] then WORLD.timers[id] = nil end
+  end
+end
+
 function on_frame(frame)
   local now = read_state()
   if now == nil then return end
@@ -3047,17 +3623,15 @@ function on_frame(frame)
       end
     end
 
-    -- Treasure chests are tiles, not sprites, but they are just another beacon
-    -- source: sound the nearest unopened chest with the item tone through the same
-    -- body. An opened chest changes tile-type and no longer matches, so the tone
-    -- drops on its own the moment it is looted; hushed in combat like the pickups.
-    local chest = nearest_chest_tile(now)
-    if chest then
-      local dx, dy = chest[1] - now.x, chest[2] - now.y
-      sound_beacon(now, "chest", dx, dy, math.abs(dx) + math.abs(dy), CHEST_BEACON, combat_engaged)
-    else
-      beacon.clear("chest")
-    end
+    -- Every enemy sounds, not only the nearest: in Doom each monster makes its own noise,
+    -- and ALttP's mostly make none, so the nearest few each carry the enemy tone.
+    ENEMY.voices(now, list)
+
+    -- Pickups, chests, exits, stairs, doors, markers, spikes: Toby's sounds from the world.
+    WORLD.update(now, list, combat_engaged)
+
+    -- Toby's target lock, and the sound of a hit landing or an enemy falling.
+    ENEMY.update(now, list)
 
     -- The enemy-weapon tone, on the nearest swinging weapon (the flail ball today).
     -- Never hushed — it is the acute threat, and its own arc is what has to be dodged.
@@ -3076,9 +3650,10 @@ function on_frame(frame)
     for name in pairs(BEACON_KINDS) do -- no tone in menus or transitions
       beacon.clear(name)
     end
-    beacon.clear("chest")
     beacon.clear("weapon")
     beacon.clear("push")
+    WORLD.silence()
+    ENEMY.silence()
   end
 
   -- Remember where Link has been, for the explore command.
@@ -3095,10 +3670,12 @@ function on_frame(frame)
   STUCK.update(now) -- pressing into a wall, which FACE has no name for
   HAZARD.update(now) -- a pit in front of Link, guide or no guide
   room_route_update(now)
+  POI.tick(now)  -- (the place itself is recorded by WORLD.update, in the beacon pass)  -- a remembered target, once Link is in its room
 
   -- Route guidance runs last, so its beacon coexists with the object beacons.
   ow_route_update(now)
   pathfind_update(now)
+  TRAVEL.update(now)
 end
 
 -- "Where am I?"
@@ -3164,37 +3741,52 @@ on_command("scan", function()
     return
   end
   local list = sprites()
-  if #list == 0 then
+
+  -- Toby's area scanner: everything in view counted by name, in distance bands (close
+  -- within 200 Doom units, medium within 1000: 100 and 500 px here) and by direction, nearest
+  -- first. Enemies are named as enemies (a damageable sprite is a threat whatever the type
+  -- table would call it). The fixed things of this place — chests, locked doors, exits,
+  -- stairs — are counted too, as Toby counts doors and switches.
+  local function band(d)
+    if d < 100 then return "close" elseif d < 500 then return "medium distance" end
+    return "far"
+  end
+  local seen = {}
+  for _, sp in ipairs(list) do
+    local nm = is_enemy(sp) and enemy_name(sp) or (REF.sprite_names[sp.kind] or "object")
+    seen[#seen + 1] = { name = nm, dx = sp.dx, dy = sp.dy, dist = sp.dist }
+  end
+  local place = SEEN.places[SEEN.key_of(prev)]
+  local cx, cy = prev.x + 8, prev.y + 8
+  for _, t in ipairs(place and place.things or {}) do
+    if t.name ~= "Doorway" then
+      local dx, dy = t.x - cx, t.y - cy
+      if on_screen(dx, dy) then
+        seen[#seen + 1] = { name = t.name:lower(), dx = dx, dy = dy, dist = math.abs(dx) + math.abs(dy) }
+      end
+    end
+  end
+  if #seen == 0 then
     say("Nothing nearby.", { priority = "navigation", category = "on-demand" })
     return
   end
-
-  -- Group by name and direction; `list` is nearest-first, so a group's first
-  -- sighting is its nearest member, which fixes both the ordering and the
-  -- distance word. Enemies are named as enemies (a damageable sprite is a threat
-  -- even if the type table would call it something else); the rest by object name.
+  table.sort(seen, function(a, b) return a.dist < b.dist end)
   local groups, order = {}, {}
-  for _, sp in ipairs(list) do
-    local nm = is_enemy(sp) and enemy_name(sp) or (REF.sprite_names[sp.kind] or "object")
-    local dir = direction(sp.dx, sp.dy)
-    local key = nm .. "\0" .. dir
+  for _, o in ipairs(seen) do
+    local dir, b = direction(o.dx, o.dy), band(o.dist)
+    local key = o.name .. "\0" .. dir .. "\0" .. b
     local g = groups[key]
     if g == nil then
-      g = { name = nm, dir = dir, count = 0, dist = sp.dist }
+      g = { name = o.name, dir = dir, band = b, count = 0 }
       groups[key] = g
       order[#order + 1] = key
     end
     g.count = g.count + 1
   end
-
-  say(string.format("%d nearby.", #list), { priority = "navigation", category = "on-demand" })
-  -- Up to four groups, nearest first, so it stays a summary rather than a list.
-  for i = 1, math.min(4, #order) do
+  say(string.format("%d nearby.", #seen), { priority = "navigation", category = "on-demand" })
+  for i = 1, math.min(10, #order) do
     local g = groups[order[i]]
-    say(
-      group_phrase(g.count, g.name, g.dir, proximity(g.dist)),
-      { priority = "navigation", category = "on-demand" }
-    )
+    say(group_phrase(g.count, g.name, g.dir, g.band), { priority = "navigation", category = "on-demand" })
   end
 end)
 
@@ -3410,6 +4002,9 @@ end
 -- route lock on as exploration fills the learned graph in.
 local function route_to_room(s, target_room, label)
   if target_room == nil then return false end
+  -- A label of "" says only the way to go; trim so no line starts with a space.
+  local say_raw = nav_say
+  local function nav_say(text) say_raw((text:gsub("^%s+", ""))) end
   if s.dungeon_room == target_room then
     room_route_stop()
     local it = nearest_item_sprite(s)
@@ -4109,7 +4704,7 @@ local function route_to(s, g, v)
     end
     -- Inside a dungeon with a known path to the goal room: route room-to-room.
     if s.module == 0x07 and room_path(s.dungeon_room, g.room) then
-      route_to_room(s, g.room, g.lead or g.arrival or "Continue on.")
+      route_to_room(s, g.room, g.lead or g.arrival or "")
       return
     end
     -- Overworld with a known entrance area, else head for the way out.
@@ -4147,7 +4742,8 @@ local GOALS = {
   { id = "uncle", goal = "Reach your uncle for the sword",
     hint = "Enter Hyrule Castle by the hidden passage — the bush against the wall drops you in — and reach your dying uncle for the sword and shield.",
     done = { { 0x7EF359, 1 }, { 0x7EF3C5, 2 } }, room = 0x55, find = "sprite", kind = 115,
-    chain = UNCLE_APPROACH, leave = "Leave the house.", arrival = "Find your uncle." },
+    -- No arrival line: on reaching him, he is right there, and saying so added nothing.
+    chain = UNCLE_APPROACH, leave = "Leave the house." },
   { id = "zelda", goal = "Free Princess Zelda",
     hint = "Descend through the castle to the dungeon below and free Princess Zelda from her cell.",
     -- Her follower flag clears once she is delivered, so progress >= 2 also counts.
@@ -4776,6 +5372,27 @@ STUCK.AGAIN = 120
 STUCK.SHOVING = 120
 -- $00F0 is joypad1H_last, the directions actually HELD; $00F4 next to it is only the ones
 -- newly pressed, which is what the menus want and the opposite of what this does.
+-- Toby's wall bump: walking into something sounds where Link meets it, a moment after the
+-- push starts and again while it goes on. Against a locked door with no key it is Toby's
+-- "denied" instead, once — the door is the thing in the way, and it wants a key.
+STUCK.BUMP_AFTER = 4   -- frames of pressing without moving before the first bump
+STUCK.BUMP_EVERY = 20
+function STUCK.bump(s, dpad)
+  local f = STUCK.frames
+  if f < STUCK.BUMP_AFTER or (f - STUCK.BUMP_AFTER) % STUCK.BUMP_EVERY ~= 0 then return end
+  -- The H byte's direction bits: 8 up, 4 down, 2 left, 1 right.
+  local dx = ((dpad & 1) ~= 0 and 1 or 0) - ((dpad & 2) ~= 0 and 1 or 0)
+  local dy = ((dpad & 4) ~= 0 and 1 or 0) - ((dpad & 8) ~= 0 and 1 or 0)
+  local fx, fy = foot(s)
+  local ax, ay = fx + dx * 8, fy + dy * 8
+  local attr = tile_attr_at(s, ax, ay)
+  if s.module == 0x07 and attr ~= nil and attr >= 0xF0 and mem.u8(0x7EF36F) == 0 then
+    if f == STUCK.BUMP_AFTER then sound.ui("door/deniedred") end
+    return
+  end
+  sound.play("misc/wallhit", { x = dx * 8, y = dy * 8, volume = 0.8 })
+end
+
 STUCK.HELD = 0x7E00F0
 STUCK.DPAD = 0x0F -- kJoypadH_AnyDir: the four direction bits of the H byte
 
@@ -4809,6 +5426,7 @@ function STUCK.update(s)
   end
 
   STUCK.frames = STUCK.frames + 1
+  STUCK.bump(s, dpad)
   local wait = STUCK.shoving(s) and STUCK.SHOVING or STUCK.FRAMES
   local due = (STUCK.said == nil and STUCK.frames >= wait)
     or (STUCK.said ~= nil and STUCK.frames - STUCK.said >= STUCK.AGAIN)
@@ -5278,6 +5896,7 @@ local function nav_stop()
   room_route_stop()
   ow_route_stop()
   pathfind_stop()
+  CARROT.finish()
 end
 
 -- Per-frame while the assist is on: re-aim when the module or objective changes.
@@ -5622,6 +6241,680 @@ end
 -- from the collision map; elsewhere it is just the position/sprite overlay.
 -- Integer math throughout (// is floor division) so coordinates stay whole for
 -- the canvas.
+-- ===========================================================================
+-- Points of interest: Toby's M menu.
+--
+-- One menu holds every destination, as in Toby: the quest objective (Beacon's own, which
+-- Toby has no counterpart for), the player's ten markers, and Toby's exploration lists —
+-- unexplored ground, things not yet opened, keys, pickups, exits and stairs, and what is in
+-- this room. Each list starts with "Stop navigation", is nearest first BY WALKING DISTANCE,
+-- holds only places that can actually be reached, and reads each entry the way Toby does:
+-- "Chest - North-east - 6 tiles". Choosing one guides there with the carrot.
+--
+-- Reachability and distance come from one breadth-first search from Link's feet over the
+-- loaded 64x64-tile window (crossing a dungeon room's floors at its stairs, one way, as the
+-- router does), so every candidate's distance is known at once and the unexplored frontier
+-- falls out of the same search. Distances are said in Link-sized tiles, two of the 8-pixel
+-- tiles the search runs on.
+-- ===========================================================================
+POI = {
+  DEDUPE = 10,     -- 8px tiles: entries of one name closer than this are one entry
+  MAX = 12,        -- entries a list keeps, nearest first
+  FRONTIER_GAP = 16, -- 8px tiles between unexplored entries, so the list is not one place
+  FRONTIER_MIN = 6,  -- 8px tiles: unexplored ground nearer than this is where he already is
+  -- Unexplored ground nearby is Beacon's own; Toby's "unexplored" is the way into somewhere
+  -- not yet entered, which is the rooms and areas. So a few patches of ground, and the rest
+  -- of the list for those.
+  FRONTIER_KEEP = 4,
+  entries = {},    -- what the open menu's items lead to, by index
+  pending = nil,   -- a target in another room, aimed at once Link is in it
+}
+
+-- What Link has seen, as Toby keeps it: every room and overworld screen he has been on, and
+-- what was there — chests, locked doors, stairs, exits, items lying about — as of the last
+-- look. ALttP shows a whole room or screen at once, so being on it is seeing it. The menu
+-- lists from this, so a chest passed two rooms back is still there to go back to, and the
+-- rooms and screens next to visited ones that have never been entered are what is unexplored.
+-- Kept in the plugin's state for the session; global for MCP inspection.
+SEEN = {
+  places = {},      -- place key -> { room, area, world, ox, oy, things = { ... } }
+  announced = {},   -- things already said as "point of interest added"
+  key = nil,        -- the place Link was last recorded on
+  next_scan = 0,
+  PERIOD = 60,      -- frames between re-looks at the current place (opened chests drop out)
+}
+
+local function poi_cap(text)
+  return (text:gsub("^%l", string.upper))
+end
+
+-- Which place Link is on: the room, or the 512px block of the overworld.
+function SEEN.key_of(s)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  if s.module == 0x07 then return "d" .. s.dungeon_room end
+  return "o" .. (s.ow_screen & 0xFF) .. ":" .. ox .. "," .. oy
+end
+
+-- The fixed things on the current place's tiles, and the items lying on it, in world pixels.
+function POI.scan(s)
+  local out = {}
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local two = s.module == 0x07
+  local levels = two and { 0, 1 } or { two and mem.u8(LOWER_LEVEL) or 0 }
+  for _, lv in ipairs(levels) do
+    local L = two and lv or nil
+    local function at(x, y) return tile_attr_at(s, (ox + x) * 8, (oy + y) * 8, L) end
+    for y = 0, 63 do
+      for x = 0, 63 do
+        local a = at(x, y)
+        if a ~= nil and a ~= 0 then
+          local wx, wy = (ox + x) * 8 + 4, (oy + y) * 8 + 4
+          if CHEST_TILES[a] and not CHEST_TILES[at(x - 1, y) or 0] and not CHEST_TILES[at(x, y - 1) or 0] then
+            local cx, cy = chest_stand(s, ox + x, oy + y, L)
+            out[#out + 1] = { cat = "unopened", name = "Chest", x = cx, y = cy, level = lv, face = 0 }
+          elseif two and a >= 0xF0 and (at(x - 1, y) or 0) < 0xF0 and (at(x, y - 1) or 0) < 0xF0 then
+            -- 0xF0-0xFF is a locked door indoors only; outdoors the range means something else.
+            out[#out + 1] = { cat = "unopened", name = "Locked door", x = wx, y = wy, level = lv, poi = true }
+          elseif STAIR_UP[a] then
+            out[#out + 1] = { cat = "exits", name = "Stairs up", x = wx, y = wy, level = lv }
+          elseif STAIR_DOWN[a] then
+            out[#out + 1] = { cat = "exits", name = "Stairs down", x = wx, y = wy, level = lv }
+          elseif a == 0x8E or a == 0x8F then
+            out[#out + 1] = { cat = "exits", name = "Exit", x = wx, y = wy, level = lv, poi = true }
+          elseif DOOR_TILES[a] then
+            out[#out + 1] = { cat = "exits", name = "Doorway", x = wx, y = wy, level = lv }
+          end
+        end
+      end
+    end
+  end
+  for _, sp in ipairs(sprites()) do
+    if not is_enemy(sp) and REF.item_types[sp.kind] then
+      local name = poi_cap(sprite_name(sp.kind))
+      out[#out + 1] = { cat = name:lower():find("key") and "keys" or "pickups", name = name,
+                        x = sp.x + 8, y = sp.y + 8 }
+    end
+  end
+  return out
+end
+
+-- Records the place Link is on: at once on arriving, then every PERIOD frames while he stays,
+-- so what is there stays as it now is. A locked door or an exit seen for the first time is
+-- Toby's automatic marker: "Point of interest added."
+function SEEN.tick(s)
+  if not in_play(s) or (s.module ~= 0x07 and s.module ~= 0x09) then return end
+  -- On the overworld, build the world's walking grid ahead of need — a little each frame,
+  -- once — so the menu's distances to remembered places and unexplored areas are ready.
+  if s.module == 0x09 then OWGRID.get((s.ow_screen & 0x40) ~= 0 and 1 or 0) end
+  local key = SEEN.key_of(s)
+  SEEN.next_scan = SEEN.next_scan - 1
+  if key == SEEN.key and SEEN.next_scan > 0 then return end
+  SEEN.key, SEEN.next_scan = key, SEEN.PERIOD
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local things = POI.scan(s)
+  SEEN.places[key] = {
+    key = key,
+    room = s.module == 0x07 and s.dungeon_room or nil,
+    area = s.module == 0x09 and (s.ow_screen & 0xFF) or nil,
+    world = (s.ow_screen & 0x40) ~= 0 and 1 or 0,
+    ox = ox, oy = oy,
+    things = things,
+  }
+  local added = false
+  for _, t in ipairs(things) do
+    if t.poi then
+      local id = key .. ":" .. t.name .. ":" .. (t.x >> 4) .. "," .. (t.y >> 4)
+      if not SEEN.announced[id] then
+        SEEN.announced[id] = true
+        added = true
+      end
+    end
+  end
+  if added then
+    say("Point of interest added.", { priority = "ambient", category = "poi", rate_limit = "2s" })
+  end
+end
+
+-- Distances, in 8px tiles, from Link's feet to every tile he can walk to in the window,
+-- keyed level*4096 + y*64 + x (window-local), plus the window origin and his floor.
+function POI.flood(s)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local two = s.module == 0x07
+  local lv0 = two and mem.u8(LOWER_LEVEL) or 0
+  -- From the nearest tile he can stand on, as a route starts: his own may be furniture
+  -- (the bed at the start of the game) or the wall his head is in.
+  local rtx, rty = route_start(s)
+  local sx, sy = rtx - ox, rty - oy
+  local dist = {}
+  if sx < 0 or sx > 63 or sy < 0 or sy > 63 then return { dist = dist, ox = ox, oy = oy, lv = lv0 } end
+  local start = lv0 * 4096 + sy * 64 + sx
+  dist[start] = 0
+  local q, head = { start }, 1
+  while head <= #q do
+    local n = q[head]; head = head + 1
+    local lv, rest = n // 4096, n % 4096
+    local x, y = rest % 64, rest // 64
+    local d = dist[n] + 1
+    local function try(nx, ny, nlv)
+      if nx < 0 or nx > 63 or ny < 0 or ny > 63 then return end
+      local k = nlv * 4096 + ny * 64 + nx
+      if dist[k] == nil and tile_passable(s, ox + nx, oy + ny, two and nlv or nil) then
+        dist[k] = d; q[#q + 1] = k
+      end
+    end
+    try(x + 1, y, lv); try(x - 1, y, lv); try(x, y + 1, lv); try(x, y - 1, lv)
+    if two then
+      -- One-way stair hops, as plan_path: up from the lower floor, down from the upper.
+      local a = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8, lv)
+      if lv == 1 and STAIR_UP[a] then try(x, y, 0) end
+      if lv == 0 and STAIR_DOWN[a] then try(x, y, 1) end
+    end
+  end
+  return { dist = dist, ox = ox, oy = oy, lv = lv0 }
+end
+
+-- The walking distance to world pixel (wx, wy) on `level`, from a flood, or nil. A target
+-- on a solid tile (a door, a sprite against a wall) counts from its nearest reached neighbour.
+function POI.dist_to(fl, wx, wy, level)
+  local dist, ox, oy = fl.dist, fl.ox, fl.oy
+  local lv = level or fl.lv
+  local tx, ty = (wx >> 3) - ox, (wy >> 3) - oy
+  local best
+  for _, o in ipairs({ { 0, 0 }, { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 }, { 0, 2 }, { 2, 0 }, { -2, 0 }, { 0, -2 } }) do
+    local x, y = tx + o[1], ty + o[2]
+    if x >= 0 and x <= 63 and y >= 0 and y <= 63 then
+      local d = dist[lv * 4096 + y * 64 + x]
+      if d ~= nil then
+        d = d + math.abs(o[1]) + math.abs(o[2])
+        if best == nil or d < best then best = d end
+      end
+    end
+  end
+  return best
+end
+
+-- Overworld walking distances from Link to world tiles, in one search over the host grid; nil
+-- for each while the world's grid is still being built.
+function POI.ow_lengths(s, tiles)
+  local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
+  local grid = OWGRID.get(w)
+  if grid == nil or #tiles == 0 then return {} end
+  local fx, fy = foot(s)
+  local sx, sy = ow_nearest_walk(w, fx >> 3, fy >> 3)
+  if sx == nil then return {} end
+  local targets = {}
+  for i, t in ipairs(tiles) do
+    local tx, ty = ow_nearest_walk(w, t[1], t[2])
+    targets[i] = { tx or t[1], ty or t[2] }
+  end
+  return grid:lengths(sx, sy, targets)
+end
+
+-- A dungeon room's centre in world pixels (rooms sit on a 16-wide grid of 512px squares).
+local function poi_room_centre(r)
+  return (r & 0x0F) * 512 + 256, ((r >> 4) & 0x0F) * 512 + 256
+end
+
+-- Every destination the menu can offer, measured: { cat, name, x, y, level, face, dist,
+-- unit ("tiles" or "rooms"), go = "here" | "room" | "ow" | "area", room, area }.
+function POI.candidates(s)
+  local fl = POI.flood(s)
+  local here = SEEN.key_of(s)
+  local out = {}
+  local function add(c) out[#out + 1] = c end
+
+  -- On this place: everything, measured by the flood. Its things fresh, not remembered.
+  for _, c in ipairs(POI.scan(s)) do
+    local d = POI.dist_to(fl, c.x, c.y, c.level)
+    if d ~= nil and d > 0 then c.dist, c.unit, c.go = d, "tiles", "here"; add(c) end
+  end
+  for _, sp in ipairs(sprites()) do
+    local x, y = sp.x + 8, sp.y + 8
+    local name
+    if is_enemy(sp) then name = poi_cap(enemy_name(sp))
+    elseif REF.npc_types[sp.kind] then name = poi_cap(sprite_name(sp.kind)) end
+    if name then
+      local d = POI.dist_to(fl, x, y, nil)
+      if d ~= nil and d > 0 then add({ cat = "room", name = name, x = x, y = y, dist = d, unit = "tiles", go = "here" }) end
+    end
+  end
+  -- Unexplored ground here: reached tiles Link has not been near, nearest first, spread out.
+  local frontier = {}
+  for k, d in pairs(fl.dist) do
+    local rest = k % 4096
+    local wtx, wty = fl.ox + rest % 64, fl.oy + rest // 64
+    if d >= POI.FRONTIER_MIN and not explored[tile_key(wtx, wty)] then
+      frontier[#frontier + 1] = { k = k, d = d, tx = wtx, ty = wty }
+    end
+  end
+  table.sort(frontier, function(a, b) return a.d < b.d end)
+  local kept = {}
+  for _, f in ipairs(frontier) do
+    local far = true
+    for _, o in ipairs(kept) do
+      if math.abs(o.tx - f.tx) + math.abs(o.ty - f.ty) < POI.FRONTIER_GAP then far = false; break end
+    end
+    if far then
+      kept[#kept + 1] = f
+      add({ cat = "unexplored", name = "Unexplored ground", x = f.tx * 8 + 4, y = f.ty * 8 + 4,
+            level = f.k // 4096, dist = f.d, unit = "tiles", go = "here" })
+      if #kept >= POI.FRONTIER_KEEP then break end
+    end
+  end
+
+  -- Remembered places.
+  if s.module == 0x07 then
+    -- Other rooms of this dungeon: their things, rooms away by the room graph.
+    local visited = {}
+    for _, p in pairs(SEEN.places) do if p.room then visited[p.room] = p end end
+    for r, p in pairs(visited) do
+      if r ~= s.dungeon_room then
+        local path = room_path(s.dungeon_room, r)
+        if path then
+          for _, t in ipairs(p.things) do
+            add({ cat = t.cat, name = t.name, x = t.x, y = t.y, level = t.level, face = t.face,
+                  dist = #path, unit = "rooms", go = "room", room = r })
+          end
+        end
+      end
+    end
+    -- Unexplored rooms: next to a visited one, never entered, and on a known way.
+    local offered = {}
+    for r in pairs(visited) do
+      for nr in pairs(room_neighbors(r)) do
+        if not visited[nr] and not offered[nr] then
+          offered[nr] = true
+          local path = room_path(s.dungeon_room, nr)
+          if path then
+            local cx, cy = poi_room_centre(nr)
+            add({ cat = "unexplored", name = "Unexplored room", x = cx, y = cy, dist = #path,
+                  unit = "rooms", go = "room", room = nr })
+          end
+        end
+      end
+    end
+  elseif s.module == 0x09 then
+    local w = (s.ow_screen & 0x40) ~= 0 and 1 or 0
+    local tiles, refs = {}, {}
+    -- Things on other overworld places in this world.
+    for key, p in pairs(SEEN.places) do
+      if p.area and p.world == w and key ~= here then
+        for _, t in ipairs(p.things) do
+          tiles[#tiles + 1] = { t.x >> 3, t.y >> 3 }
+          refs[#refs + 1] = { cat = t.cat, name = t.name, x = t.x, y = t.y, go = "ow" }
+        end
+      end
+    end
+    -- Unexplored areas: screens next to a visited one, never visited.
+    local visited = {}
+    for _, p in pairs(SEEN.places) do
+      if p.area and p.world == w then visited[ow_parent(p.area & 0x3F)] = true end
+    end
+    local offered = {}
+    for parent in pairs(visited) do
+      for cell = 0, 63 do
+        if ow_parent(cell) == parent then
+          local col, row = cell & 7, cell >> 3
+          for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+            local c2, r2 = col + d[1], row + d[2]
+            if c2 >= 0 and c2 <= 7 and r2 >= 0 and r2 <= 7 then
+              local np = ow_parent(r2 * 8 + c2)
+              if not visited[np] and not offered[np] then
+                offered[np] = true
+                local cx, cy = (np & 7) * 512 + 256, (np >> 3) * 512 + 256
+                tiles[#tiles + 1] = { cx >> 3, cy >> 3 }
+                refs[#refs + 1] = { cat = "unexplored", name = "Unexplored area", x = cx, y = cy,
+                                    go = "area", area = w * 0x40 + np }
+              end
+            end
+          end
+        end
+      end
+    end
+    local lengths = POI.ow_lengths(s, tiles)
+    for i, r in ipairs(refs) do
+      local d = lengths[i]
+      if d then r.dist, r.unit = d, "tiles"; add(r) end
+    end
+  end
+  return out
+end
+
+-- The entries of one category: deduplicated, nearest first (this place before others), labelled.
+function POI.list(s, cands, cat)
+  local fx, fy = foot(s)
+  local rows = {}
+  for _, c in ipairs(cands) do
+    if c.cat == cat then rows[#rows + 1] = c end
+  end
+  local function rank(c) return (c.unit == "rooms" and 100000 or 0) + c.dist end
+  table.sort(rows, function(a, b) return rank(a) < rank(b) end)
+  local kept = {}
+  for _, r in ipairs(rows) do
+    local dup = false
+    for _, k in ipairs(kept) do
+      if k.name == r.name and k.go == r.go and k.room == r.room
+          and math.abs(k.x - r.x) + math.abs(k.y - r.y) < POI.DEDUPE * 8 then dup = true; break end
+    end
+    if not dup then
+      kept[#kept + 1] = r
+      if #kept >= POI.MAX then break end
+    end
+  end
+  local items = { { label = "Stop navigation", id = "stop" } }
+  for _, r in ipairs(kept) do
+    local n, unit = r.dist, r.unit
+    if unit == "tiles" then n = math.max(1, (n + 1) // 2) end
+    local word = unit == "rooms" and (n == 1 and "room" or "rooms") or (n == 1 and "tile" or "tiles")
+    POI.entries[#POI.entries + 1] = r
+    items[#items + 1] = {
+      label = string.format("%s - %s - %d %s", r.name, poi_cap(direction(r.x - fx, r.y - fy)), n, word),
+      id = "go:" .. #POI.entries,
+    }
+  end
+  return items
+end
+
+-- The marker lists: where each is, to go to it; and slots to place or remove.
+function POI.markers(s)
+  local fl = POI.flood(s)
+  local fx, fy = foot(s)
+  local go = { { label = "Stop navigation", id = "stop" } }
+  local add, remove = {}, {}
+  for k = 1, 10 do
+    local m = markers[k]
+    if m ~= nil then
+      local label = "Marker " .. k
+      local wx, wy = m.tx * 8 + 4, m.ty * 8 + 4
+      local where = poi_cap(direction(wx - fx, wy - fy))
+      if m.area == area_id(s) then
+        local d = POI.dist_to(fl, wx, wy, nil)
+        label = d and string.format("%s - %s - %d tiles", label, where, math.max(1, (d + 1) // 2))
+          or (label .. " - " .. where)
+      else
+        label = label .. " - " .. where .. " - elsewhere"
+      end
+      go[#go + 1] = { label = label, id = "mark:go:" .. k }
+      remove[#remove + 1] = { label = "Marker " .. k, id = "mark:del:" .. k }
+      add[#add + 1] = { label = "Marker " .. k .. ", in use", id = "mark:add:" .. k }
+    else
+      add[#add + 1] = { label = "Marker " .. k, id = "mark:add:" .. k }
+    end
+  end
+  go[#go + 1] = { label = "Add marker", items = add }
+  go[#go + 1] = { label = "Remove marker", items = remove }
+  return go
+end
+
+-- Builds and opens the menu.
+function POI.open(s)
+  POI.entries = {}
+  SEEN.tick(s) -- what is here now, before listing it
+  local cands = POI.candidates(s)
+  local items = {}
+  if nav_active or pathfind_active or ow_route_goal ~= nil or route_room ~= nil then
+    items[#items + 1] = { label = "Stop navigation", id = "stop" }
+  end
+  items[#items + 1] = { label = nav_active and "Quest objective, guiding" or "Quest objective", id = "objective" }
+  items[#items + 1] = { label = "Markers", items = POI.markers(s) }
+  items[#items + 1] = { label = "Guide style: " .. GUIDE.mode, id = "guide_style" }
+  items[#items + 1] = { label = "Exploration", items = {
+    { label = "Unexplored", items = POI.list(s, cands, "unexplored") },
+    { label = "Unopened", items = POI.list(s, cands, "unopened") },
+    { label = "Keys", items = POI.list(s, cands, "keys") },
+    { label = "Pickups", items = POI.list(s, cands, "pickups") },
+    { label = "Exits and stairs", items = POI.list(s, cands, "exits") },
+    { label = "This room", items = POI.list(s, cands, "room") },
+  } }
+  menu.open({ title = "Navigate", items = items })
+end
+
+-- Sets off toward a chosen entry, by whatever route reaches it.
+function POI.go(s, e)
+  -- A destination chosen by hand replaces the quest guide, which would otherwise re-aim at
+  -- the objective on its next pass.
+  nav_stop()
+  POI.pending = nil
+  CARROT.chosen = true
+  local arrival = e.name .. "."
+  if e.go == "here" then
+    pathfind_to(e.x, e.y, arrival, e.level, e.face)
+  elseif e.go == "room" then
+    -- Room by room to it, then the carrot to the thing itself once there.
+    if e.name ~= "Unexplored room" then
+      POI.pending = { room = e.room, x = e.x, y = e.y, level = e.level, face = e.face, arrival = arrival }
+    end
+    route_to_room(s, e.room, e.name .. ".")
+  elseif e.go == "ow" then
+    ow_route_to(e.x, e.y)
+  elseif e.go == "area" then
+    ow_route_to_area(e.area)
+  end
+end
+
+-- Once in the room a remembered target is in, the carrot takes over from the room route.
+function POI.tick(s)
+  local p = POI.pending
+  if p == nil or not in_play(s) or s.module ~= 0x07 or s.dungeon_room ~= p.room then return end
+  POI.pending = nil
+  room_route_stop()
+  pathfind_to(p.x, p.y, p.arrival, p.level, p.face)
+end
+
+-- ── Toby's compass, turns and stat checks ───────────────────────────────────
+-- Q says the way Link faces; F faces north; E and R turn left and right (a quarter turn: Link
+-- faces four ways where Doom turns freely); X turns him round. Turning is done by pressing the
+-- direction for a frame, which is how the game itself turns him. B, N, K and I are Toby's ammo,
+-- armour, key and item checks, read straight from the save data.
+TURN = { ORDER = { 0, 6, 2, 4 } } -- north, east, south, west: clockwise
+function TURN.say(text) say(text, { priority = "navigation", category = "on-demand" }) end
+
+function TURN.to(dir)
+  local s = prev
+  if s == nil or not in_play(s) then TURN.say("Not in play."); return end
+  local name = ({ [0] = "up", [2] = "down", [4] = "left", [6] = "right" })[dir]
+  input.hold(name, 1)
+  TURN.say("Facing " .. ((DIRS[dir] or {}).word or "north") .. ".")
+end
+
+function TURN.by(steps)
+  local s = prev
+  if s == nil or not in_play(s) then TURN.say("Not in play."); return end
+  local at = 1
+  for i, d in ipairs(TURN.ORDER) do if d == s.direction then at = i end end
+  TURN.to(TURN.ORDER[(at - 1 + steps) % 4 + 1])
+end
+
+on_command("compass", function()
+  local s = prev
+  if s == nil or not in_play(s) then TURN.say("Not in play."); return end
+  TURN.say("Facing " .. ((DIRS[s.direction] or {}).word or "north") .. ".")
+end)
+on_command("face_north", function() TURN.to(0) end)
+on_command("turn_left", function() TURN.by(-1) end)
+on_command("turn_right", function() TURN.by(1) end)
+on_command("quickturn", function()
+  sound.ui("misc/quickturn")
+  TURN.by(2)
+end)
+
+on_command("ammo", function()
+  local s = prev
+  if s == nil or s.max_health == 0 then TURN.say("No game state yet."); return end
+  local magic = mem.u8(0x7EF36E)
+  local m = magic >= 0x80 and "full" or (magic >= 0x40 and "over half" or (magic > 0 and "low" or "empty"))
+  TURN.say(string.format("%d rupees, %d bombs, %d arrows. Magic %s.",
+    s.rupees, mem.u8(0x7EF343), mem.u8(0x7EF377), m))
+end)
+
+on_command("armor", function()
+  local s = prev
+  if s == nil or s.max_health == 0 then TURN.say("No game state yet."); return end
+  local swords = { [0] = "No sword", "Fighter's sword", "Master sword", "Tempered sword", "Golden sword" }
+  local shields = { [0] = "no shield", "fighter's shield", "fire shield", "mirror shield" }
+  local mails = { [0] = "green mail", "blue mail", "red mail" }
+  local sw, sh, ma = mem.u8(0x7EF359), mem.u8(0x7EF35A), mem.u8(0x7EF35B)
+  TURN.say(string.format("%s, %s, %s.", swords[sw] or "A sword", shields[sh] or "a shield", mails[ma] or "mail"))
+end)
+
+on_command("keys", function()
+  local s = prev
+  if s == nil or not in_play(s) then TURN.say("Not in play."); return end
+  local k = mem.u8(0x7EF36F)
+  if s.module ~= 0x07 or k == 0xFF then TURN.say("No keys here."); return end
+  TURN.say(k == 1 and "1 small key." or string.format("%d small keys.", k))
+end)
+
+on_command("item", function()
+  local slot = mem.u8(PAUSE.ITEM)
+  local name = slot ~= 0 and PAUSE.name(slot) or nil
+  TURN.say(name and (name .. ".") or "No item.")
+end)
+
+-- ── Travel: walk to the next waypoint (Diablo Access) ────────────────────────
+-- Comma walks Link to the waypoint being led to, and stops there with its chime. It stops
+-- early, and says why, if an enemy comes close or Link is blocked; silently if the player
+-- presses a direction, which is the player taking over. Walking is holding the d-pad for him,
+-- a couple of frames at a time, toward the waypoint, correcting sideways when he has drifted
+-- off its line.
+TRAVEL = { active = false, frames = 0, still = 0, MAX = 900, STUCK = 24, ALIGN = 4 }
+
+function TRAVEL.stop(why)
+  TRAVEL.active = false
+  if why then say(why, { priority = "navigation", category = "on-demand" }) end
+end
+
+function TRAVEL.update(s)
+  if not TRAVEL.active then return end
+  if not in_play(s) then TRAVEL.stop(); return end
+  -- The player's own d-pad (up, down, left, right): they have taken over.
+  if (input.player() & 0x0F00) ~= 0 then TRAVEL.stop(); return end
+  if combat_engaged then TRAVEL.stop("Enemy near."); return end
+  local t = GUIDE.target
+  if t == nil or t.tx ~= TRAVEL.tx or t.ty ~= TRAVEL.ty then
+    TRAVEL.stop() -- arrived: the guide has moved on to the next one, and chimed
+    return
+  end
+  TRAVEL.frames = TRAVEL.frames + 1
+  if TRAVEL.frames > TRAVEL.MAX then TRAVEL.stop("Travel stopped."); return end
+  if s.x == TRAVEL.x and s.y == TRAVEL.y then TRAVEL.still = TRAVEL.still + 1 else TRAVEL.still = 0 end
+  TRAVEL.x, TRAVEL.y = s.x, s.y
+  if TRAVEL.still > TRAVEL.STUCK then TRAVEL.stop("Blocked."); return end
+  local fx, fy = foot(s)
+  local dx, dy = t.x - fx, t.y - fy
+  local held = {}
+  local function along(d, neg, pos) if d < 0 then held[#held + 1] = neg elseif d > 0 then held[#held + 1] = pos end end
+  if math.abs(dx) >= math.abs(dy) then
+    along(dx, "left", "right")
+    if math.abs(dy) > TRAVEL.ALIGN then along(dy, "up", "down") end
+  else
+    along(dy, "up", "down")
+    if math.abs(dx) > TRAVEL.ALIGN then along(dx, "left", "right") end
+  end
+  if #held > 0 then input.hold(held, 2) end
+end
+
+on_command("travel", function()
+  local s = prev
+  if s == nil or not in_play(s) then say("Not in play.", { priority = "navigation", category = "on-demand" }); return end
+  local t = GUIDE.target
+  if t == nil then say("No waypoint.", { priority = "navigation", category = "on-demand" }); return end
+  TRAVEL.active, TRAVEL.frames, TRAVEL.still = true, 0, 0
+  TRAVEL.tx, TRAVEL.ty, TRAVEL.x, TRAVEL.y = t.tx, t.ty, nil, nil
+  GUIDE.say_leg(s, t)
+end)
+
+on_command("waypoint", function()
+  local s = prev
+  if s == nil or not in_play(s) then say("Not in play.", { priority = "navigation", category = "on-demand" }); return end
+  if GUIDE.target == nil then say("No waypoint.", { priority = "navigation", category = "on-demand" }); return end
+  GUIDE.say_leg(s, GUIDE.target)
+end)
+
+on_command("guide_style", function()
+  GUIDE.mode = GUIDE.mode == "waypoints" and "carrot" or "waypoints"
+  GUIDE.target = nil
+  say(GUIDE.mode == "waypoints" and "Guide: waypoints." or "Guide: carrot.",
+    { priority = "navigation", category = "on-demand" })
+end)
+
+on_command("proximity", function()
+  WORLD.wind = not WORLD.wind
+  say(WORLD.wind and "Proximity sound on." or "Proximity sound off.",
+      { priority = "navigation", category = "on-demand" })
+end)
+
+on_command("poi", function()
+  local s = prev
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  POI.open(s)
+end)
+
+-- A choice from the menu.
+function on_menu(id)
+  local s = prev
+  if id == "stop" then
+    nav_stop()
+    say("Navigation stopped.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  if s == nil or not in_play(s) then
+    say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  if id == "guide_style" then
+    GUIDE.mode = GUIDE.mode == "waypoints" and "carrot" or "waypoints"
+    GUIDE.target = nil
+    say(GUIDE.mode == "waypoints" and "Guide: waypoints." or "Guide: carrot.",
+      { priority = "navigation", category = "on-demand" })
+    return
+  end
+  if id == "objective" then
+    if not nav_active then
+      nav_stop()
+      nav_active = true
+      local v = read_progress()
+      nav_sig = nav_signature(s, v)
+      nav_reaim(s, v)
+    end
+    return
+  end
+  local n = id:match("^go:(%d+)$")
+  if n then
+    local e = POI.entries[tonumber(n)]
+    if e ~= nil then POI.go(s, e) end
+    return
+  end
+  local verb, k = id:match("^mark:(%a+):(%d+)$")
+  k = tonumber(k)
+  if verb == "add" then
+    mark_set(k)
+    say("Marker " .. k .. " placed.", { priority = "navigation", category = "on-demand" })
+  elseif verb == "del" then
+    mark_clear(k)
+    say("Marker " .. k .. " removed.", { priority = "navigation", category = "on-demand" })
+  elseif verb == "go" then
+    local m = markers[k]
+    if m == nil then
+      say("No marker there.", { priority = "navigation", category = "on-demand" })
+    elseif m.area == area_id(s) then
+      nav_stop()
+      CARROT.chosen = true
+      mark_goto(k)
+    elseif m.room and s.module == 0x07 then
+      POI.go(s, { name = "Marker " .. k, go = "room", room = m.room, x = m.tx * 8 + 4, y = m.ty * 8 + 4 })
+    elseif m.module == 0x09 and s.module == 0x09 then
+      POI.go(s, { name = "Marker " .. k, go = "ow", x = m.tx * 8 + 4, y = m.ty * 8 + 4 })
+    else
+      say("That marker is somewhere this guide cannot route from here.",
+          { priority = "navigation", category = "on-demand" })
+    end
+  end
+end
+
 function on_draw(canvas)
   local w, h = canvas.width, canvas.height
   canvas:clear(0x101828)
@@ -5758,13 +7051,21 @@ function on_draw(canvas)
     -- The active guidance route: the same corners the audio beacon leads through,
     -- drawn as a magenta line with a dot at each corner and the current target
     -- brightened — so the guide is legible on the map too.
+    --
+    -- From Link, not from where the route was planned: a route is kept for as long as he is
+    -- on it, so its first corners are behind him, and drawing them showed a route that did
+    -- not follow him.
     if pathfind_active and pathfind_path then
-      for i = 1, #pathfind_path - 1 do
-        local ax, ay = plot(pathfind_path[i][1] * 8 + 4, pathfind_path[i][2] * 8 + 4)
-        local bx, by = plot(pathfind_path[i + 1][1] * 8 + 4, pathfind_path[i + 1][2] * 8 + 4)
+      local wp = math.min(pathfind_wp, #pathfind_path)
+      local lx, ly = foot(s)
+      local ax, ay = plot(lx, ly)
+      for i = wp, #pathfind_path do
+        local bx, by = plot(pathfind_path[i][1] * 8 + 4, pathfind_path[i][2] * 8 + 4)
         canvas:line(ax, ay, bx, by, 0xFF60D0)
+        ax, ay = bx, by
       end
-      for i, wt in ipairs(pathfind_path) do
+      for i = wp, #pathfind_path do
+        local wt = pathfind_path[i]
         local px, py = plot(wt[1] * 8 + 4, wt[2] * 8 + 4)
         canvas:rect(px - 1, py - 1, 3, 3, (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0)
       end
@@ -5857,7 +7158,7 @@ function on_draw(canvas)
       if pathfind_active and pathfind_path then
         local labels = {}
         for i, wt in ipairs(pathfind_path) do
-          if inwin(wt[1] * 8 + 4, wt[2] * 8 + 4) then
+          if i >= pathfind_wp and inwin(wt[1] * 8 + 4, wt[2] * 8 + 4) then
             local px, py = plot(wt[1] * 8 + 4, wt[2] * 8 + 4)
             labels[#labels + 1] = { px, py, text = tostring(i),
               color = (i == pathfind_wp) and 0xFFFFFF or 0xFF60D0,
@@ -5882,11 +7183,14 @@ function on_draw(canvas)
         return plot(tx * 8 + 4, ty * 8 + 4)
       end
       -- The active route to the immediate target, string-pulled, in pink.
+      -- From Link onward, as in a dungeon: the corners already passed are not drawn.
       if ow_route_path then
-        for i = 1, #ow_route_path - 1 do
-          local ax, ay = oplot(ow_route_path[i][1], ow_route_path[i][2])
-          local cx2, cy2 = oplot(ow_route_path[i + 1][1], ow_route_path[i + 1][2])
+        local lx, ly = foot(s)
+        local ax, ay = plot(lx, ly)
+        for i = math.min(ow_route_wp, #ow_route_path), #ow_route_path do
+          local cx2, cy2 = oplot(ow_route_path[i][1], ow_route_path[i][2])
           canvas:line(ax, ay, cx2, cy2, 0xFF60D0)
+          ax, ay = cx2, cy2
         end
       end
       if nav_chain then

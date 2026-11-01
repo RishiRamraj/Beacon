@@ -17,7 +17,9 @@
 //! a control the game needs.
 
 use beacon_emu::button;
-use gilrs::{Axis, Button, Gilrs};
+use std::time::{Duration, Instant};
+
+use gilrs::{Axis, Button, Gilrs, GilrsBuilder};
 use winit::keyboard::KeyCode;
 
 /// Analogue stick deflection past which a direction counts as held.
@@ -27,20 +29,23 @@ const STICK_DEADZONE: f32 = 0.5;
 
 /// Maps a physical key to a SNES button.
 ///
-/// The layout is the retro-emulator convention, which players arriving from
-/// other emulators will already know. This mapping is fixed: game controls are
-/// not rebindable in this version, and keeping them fixed is what lets action
-/// keys be rebindable safely.
+/// The SNES pad as emulators lay it out on a keyboard, which is what makes it learnable by
+/// feel: the arrows are the d-pad under the right hand, and the face buttons sit under the left
+/// in the pad's own shape — Z and X are B and A along the bottom, A and S are Y and X above
+/// them — with Q and W as the shoulders above those, Enter as Start and right Shift as Select.
+/// Toby's accessibility keys that would land on this cluster live elsewhere. This mapping is
+/// fixed: game controls are not rebindable in this version, and keeping them fixed is what
+/// lets action keys be rebindable safely.
 fn key_to_button(key: KeyCode) -> Option<u16> {
     Some(match key {
         KeyCode::ArrowUp => button::UP,
         KeyCode::ArrowDown => button::DOWN,
         KeyCode::ArrowLeft => button::LEFT,
         KeyCode::ArrowRight => button::RIGHT,
-        KeyCode::KeyX => button::A,
         KeyCode::KeyZ => button::B,
-        KeyCode::KeyS => button::X,
+        KeyCode::KeyX => button::A,
         KeyCode::KeyA => button::Y,
+        KeyCode::KeyS => button::X,
         KeyCode::KeyQ => button::L,
         KeyCode::KeyW => button::R,
         KeyCode::Enter => button::START,
@@ -106,7 +111,9 @@ key_table! {
     Escape => "Escape", Enter => "Enter", Space => "Space", Tab => "Tab",
     Backspace => "Backspace", Delete => "Delete", Insert => "Insert",
     Home => "Home", End => "End", PageUp => "PageUp", PageDown => "PageDown",
+    Pause => "Pause",
     ShiftLeft => "ShiftLeft", ShiftRight => "ShiftRight",
+    ControlLeft => "ControlLeft", ControlRight => "ControlRight",
     Minus => "Minus", Equal => "Equal",
     BracketLeft => "BracketLeft", BracketRight => "BracketRight",
     Backslash => "Backslash", Semicolon => "Semicolon", Quote => "Quote",
@@ -162,6 +169,53 @@ const ACTION_PAD: &[(Button, &str)] = &[
     (Button::Z, "Pad:Z"),
 ];
 
+/// The Select layer: hold Select and press another pad button for a Beacon action.
+///
+/// A SNES pad has twelve buttons and the game uses every one, so a controller-only player
+/// would have no way to reach Beacon's menu, the points-of-interest menu or a scan without a
+/// keyboard. Holding Select turns the other buttons into actions — `Pad:Select+A` and so on,
+/// bindable like any key — and a tap of Select on its own still reaches the game, pressed for
+/// it briefly on release, since ALttP barely uses it and a tap is what it ever needs.
+const SELECT_TAP: Duration = Duration::from_millis(120);
+
+/// The SNES name of a pad button, for naming a Select chord: `Pad:Select+A`.
+fn snes_name(b: Button) -> Option<&'static str> {
+    Some(match b {
+        Button::South => "B",
+        Button::East => "A",
+        Button::West => "Y",
+        Button::North => "X",
+        Button::LeftTrigger => "L",
+        Button::RightTrigger => "R",
+        Button::Start => "Start",
+        Button::DPadUp => "Up",
+        Button::DPadDown => "Down",
+        Button::DPadLeft => "Left",
+        Button::DPadRight => "Right",
+        _ => return None,
+    })
+}
+
+/// The stable name of Select chorded with `b`.
+fn chord_name(b: Button) -> Option<&'static str> {
+    Some(match snes_name(b)? {
+        "B" => "Pad:Select+B",
+        "A" => "Pad:Select+A",
+        "Y" => "Pad:Select+Y",
+        "X" => "Pad:Select+X",
+        "L" => "Pad:Select+L",
+        "R" => "Pad:Select+R",
+        "Start" => "Pad:Select+Start",
+        "Up" => "Pad:Select+Up",
+        "Down" => "Pad:Select+Down",
+        "Left" => "Pad:Select+Left",
+        _ => "Pad:Select+Right",
+    })
+}
+
+/// Words in a device's name that say it is not a controller, whatever gilrs makes of it.
+const NOT_A_PAD: &[&str] = &["keyboard", "system control", "consumer control", "mouse", "keypad", "touchpad"];
+
 /// Whether a device gilrs offered is actually a game controller.
 ///
 /// It is not always: gilrs enumerates evdev devices by their capabilities, and on this
@@ -173,8 +227,20 @@ const ACTION_PAD: &[(Button, &str)] = &[
 /// An SDL mapping is what tells them apart. A recognised controller has one, matched from
 /// the SDL database by device id; anything gilrs is guessing at from raw driver
 /// capabilities reports `Driver` instead, which is what that keyboard reported.
+///
+/// A pad missing from the database is still a pad, though — plenty of USB SNES pads are
+/// generic HID devices with no entry — so a device gilrs maps from its driver is accepted too,
+/// unless its name says what it really is. A pad whose buttons come out wrong can be given an
+/// SDL mapping (`input.pad_mappings`, or the `SDL_GAMECONTROLLERCONFIG` variable).
 fn is_controller(pad: &gilrs::Gamepad) -> bool {
-    pad.mapping_source() == gilrs::MappingSource::SdlMappings
+    match pad.mapping_source() {
+        gilrs::MappingSource::SdlMappings => true,
+        gilrs::MappingSource::Driver => {
+            let name = pad.name().to_ascii_lowercase();
+            !NOT_A_PAD.iter().any(|w| name.contains(w))
+        }
+        gilrs::MappingSource::None => false,
+    }
 }
 
 /// The stable name for a gamepad button, or `None` for one Beacon ignores.
@@ -232,7 +298,10 @@ pub fn key_label(name: &str) -> String {
         "Pad:Mode" => "mode button".into(),
         "Pad:C" => "C button".into(),
         "Pad:Z" => "Z button".into(),
-        other => other.to_string(),
+        other => match other.strip_prefix("Pad:Select+") {
+            Some(b) => format!("Select and {b}"),
+            None => other.to_string(),
+        },
     }
 }
 
@@ -240,13 +309,25 @@ pub struct Input {
     keyboard_buttons: u16,
     gamepad_buttons: u16,
     gilrs: Option<Gilrs>,
+    /// The Select layer: whether a chord was made while Select was down (so its release is
+    /// not a tap), which buttons are spoken for by a chord until released, and how long the
+    /// game should see a tapped Select.
+    chord_made: bool,
+    chorded: u16,
+    select_tap_until: Option<Instant>,
 }
 
 impl Input {
-    pub fn new() -> Self {
+    /// Opens the gamepad subsystem, adding `mappings` — SDL controller mapping lines, one per
+    /// line — for pads the built-in database does not know.
+    pub fn new(mappings: &str) -> Self {
         // A missing gamepad subsystem is not fatal: the keyboard still works,
         // and refusing to start over it would be absurd.
-        let gilrs = match Gilrs::new() {
+        let mut builder = GilrsBuilder::new();
+        if !mappings.trim().is_empty() {
+            builder = builder.add_mappings(mappings);
+        }
+        let gilrs = match builder.build() {
             Ok(g) => Some(g),
             Err(e) => {
                 eprintln!("gamepad support unavailable: {e}");
@@ -258,6 +339,9 @@ impl Input {
             keyboard_buttons: 0,
             gamepad_buttons: 0,
             gilrs,
+            chord_made: false,
+            chorded: 0,
+            select_tap_until: None,
         }
     }
 
@@ -298,21 +382,52 @@ impl Input {
         // that are really controllers: see `is_controller`.
         let mut pressed = Vec::new();
         while let Some(ev) = gilrs.next_event() {
-            if !is_controller(&gilrs.gamepad(ev.id)) {
+            let pad = gilrs.gamepad(ev.id);
+            if !is_controller(&pad) {
                 continue;
             }
-            if let gilrs::EventType::ButtonPressed(b, _) = ev.event {
-                if let Some(name) = pad_button_name(b) {
-                    pressed.push(name);
+            match ev.event {
+                gilrs::EventType::ButtonPressed(Button::Select, _) => {
+                    // Down: maybe a chord to come, maybe a tap; decided on release.
+                    self.chord_made = false;
                 }
+                gilrs::EventType::ButtonPressed(b, _) if pad.is_pressed(Button::Select) => {
+                    if let Some(name) = chord_name(b) {
+                        pressed.push(name);
+                        self.chord_made = true;
+                        if let Some((_, _, bit)) = GAME_PAD.iter().find(|(x, _, _)| *x == b) {
+                            self.chorded |= *bit;
+                        }
+                    } else if let Some(name) = pad_button_name(b) {
+                        pressed.push(name);
+                    }
+                }
+                gilrs::EventType::ButtonPressed(b, _) => {
+                    if let Some(name) = pad_button_name(b) {
+                        pressed.push(name);
+                    }
+                }
+                gilrs::EventType::ButtonReleased(Button::Select, _) => {
+                    if !self.chord_made {
+                        self.select_tap_until = Some(Instant::now() + SELECT_TAP);
+                    }
+                    self.chord_made = false;
+                }
+                _ => {}
             }
         }
 
-        // Rebuild the held SNES mask from the first connected pad.
+        // Rebuild the held SNES mask from the first connected pad. Select itself is held back
+        // (the layer key, given to the game only as a tap), and so is any button a chord has
+        // spoken for, until it is let go.
         let mut mask = 0u16;
         if let Some((_id, pad)) = gilrs.gamepads().find(|(_, pad)| is_controller(pad)) {
             for (b, _, bit) in GAME_PAD {
-                if pad.is_pressed(*b) {
+                let down = pad.is_pressed(*b);
+                if !down {
+                    self.chorded &= !*bit;
+                }
+                if down && *b != Button::Select && self.chorded & *bit == 0 {
                     mask |= *bit;
                 }
             }
@@ -334,6 +449,13 @@ impl Input {
                 mask |= button::DOWN;
             }
         }
+        if let Some(until) = self.select_tap_until {
+            if Instant::now() < until {
+                mask |= button::SELECT;
+            } else {
+                self.select_tap_until = None;
+            }
+        }
         self.gamepad_buttons = mask;
         pressed
     }
@@ -346,7 +468,7 @@ impl Input {
 
 impl Default for Input {
     fn default() -> Self {
-        Self::new()
+        Self::new("")
     }
 }
 
@@ -355,11 +477,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn select_chords_are_named_by_the_snes_button_and_spoken_plainly() {
+        assert_eq!(chord_name(Button::East), Some("Pad:Select+A"));
+        assert_eq!(chord_name(Button::South), Some("Pad:Select+B"));
+        assert_eq!(chord_name(Button::DPadUp), Some("Pad:Select+Up"));
+        assert_eq!(chord_name(Button::Mode), None);
+        assert_eq!(key_label("Pad:Select+Start"), "Select and Start");
+    }
+
+    #[test]
+    fn the_keyboard_is_the_snes_pad_in_its_own_shape() {
+        // Z X along the bottom are B A; A S above them are Y X; Q W are the shoulders.
+        assert_eq!(key_to_button(KeyCode::KeyZ), Some(button::B));
+        assert_eq!(key_to_button(KeyCode::KeyX), Some(button::A));
+        assert_eq!(key_to_button(KeyCode::KeyA), Some(button::Y));
+        assert_eq!(key_to_button(KeyCode::KeyS), Some(button::X));
+        assert_eq!(key_to_button(KeyCode::KeyQ), Some(button::L));
+        assert_eq!(key_to_button(KeyCode::KeyW), Some(button::R));
+        assert_eq!(key_to_button(KeyCode::Enter), Some(button::START));
+        // Toby's keys stay free for Beacon's actions.
+        for k in [KeyCode::KeyM, KeyCode::KeyV, KeyCode::KeyC, KeyCode::KeyG, KeyCode::KeyF] {
+            assert_eq!(key_to_button(k), None, "{k:?} is an action key");
+        }
+    }
+
+    #[test]
     fn keys_set_and_clear_their_bit() {
         let mut input = Input {
             keyboard_buttons: 0,
             gamepad_buttons: 0,
             gilrs: None,
+            chord_made: false,
+            chorded: 0,
+            select_tap_until: None,
         };
 
         input.on_key(KeyCode::ArrowLeft, true);

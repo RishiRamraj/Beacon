@@ -15,6 +15,11 @@ knowledge lives in plugins — a TOML manifest plus a Lua script — selected
 automatically by hashing the ROM. A Link to the Past ships built-in; other games
 are drop-in (see [Plugins](#plugins)).
 
+Navigation is modelled on the [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod)
+for Doom: the same menu of points of interest, the same sound to follow along a route, the
+same world sounds — Toby's own recordings, if you have Toby — and the same keys. See
+[Navigation](#navigation).
+
 ## What makes it different
 
 Existing approaches read a running emulator from the outside, over a socket, at
@@ -43,6 +48,17 @@ If you already cloned without submodules:
 git submodule update --init
 ```
 
+**Windows**, cross-compiled from Linux with MinGW-w64 (`g++-mingw-w64`, the win32 thread
+model):
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+`beacon.exe` needs `libstdc++-6.dll` and `libgcc_s_seh-1.dll` from the same MinGW
+(`/usr/lib/gcc/x86_64-w64-mingw32/*-win32/`) beside it, plus the speech DLLs below.
+
 ## Running
 
 Beacon ships no game data. **Bring your own ROM.**
@@ -54,28 +70,129 @@ Beacon ships no game data. **Bring your own ROM.**
 On Linux, speech goes through speech-dispatcher, so you get the voice and rate
 you have already configured. If it is not running, Beacon says so and plays on.
 
+On Windows, speech goes through your screen reader — NVDA, JAWS, or any other Tolk
+supports — falling back to SAPI. Keep `Tolk.dll`, `nvdaControllerClient64.dll` and
+`SAAPI64.dll` beside `beacon.exe`; the Windows download already has them.
+
 ### Controls
 
-Game controls are fixed; everything else is an **action** and every action is
-rebindable, from the keyboard or a controller.
+Written to read well with a screen reader: no tables, every key named as a word. The same
+text ships with the Windows build as `CONTROLS.txt`.
 
-| Game (fixed) | | Actions (default keys, rebindable) | |
-|---|---|---|---|
-| arrows | d-pad | c / e / h | scan / where am I / status |
-| z x a s | B A Y X | t / g | save state / load state |
-| q w | L R | n / b | next / previous save slot |
-| enter | start | p / f | pause / frame advance |
-| right shift | select | v / r | cycle verbosity / repeat last |
-| | | m | show/hide the plugin map |
-| | | k | open input configuration |
-| | | esc | quit |
+Beacon plays the game with the keyboard laid out like a Super Nintendo controller. All the
+other keys are Beacon's own, and they follow the
+[Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod) for Doom
+wherever Toby has the same thing. Every key except the game controls can be changed with F12.
 
-A gamepad works too, and both are live at once; the left stick doubles as a
-d-pad. Actions are reachable from the pad's spare buttons — by default the left
-stick button opens the input configuration, so a controller-only player can
-rebind everything without a keyboard.
+#### Playing the game
 
-**Rebinding.** Press the input-configuration key (`k`, or the left stick button).
+- Arrow keys: move.
+- Letter X: the A button. Talk, lift, open, read.
+- Letter Z: the B button. Swing the sword.
+- Letter S: the X button. The world map.
+- Letter A: the Y button. Use the item in hand.
+- Letter Q: the L button.
+- Letter W: the R button.
+- Enter: Start. The item menu.
+- Right Shift: Select.
+
+The letters Z, X, A and S sit in the same shape as the controller's buttons: Z and X along
+the bottom row, A and S above them.
+
+#### Finding your way
+
+- M: the navigation menu. It lists where you can go: your quest objective, your markers, and
+  places you have found, such as unexplored areas, unopened chests, keys, pickups, exits and
+  stairs, and what is in this room. Each list starts with Stop navigation. Pick a place and
+  the guide leads you there one waypoint at a time: a beeping sound sits on the next corner,
+  door or staircase along the way, and gets louder as you get close. Walk toward it. The beep
+  changes when you are facing it. When you reach a waypoint you hear a chime, and Beacon says
+  the next one, for example: Door, north, 5 tiles.
+- Period: say the next waypoint again: what it is, which way, and how far.
+- Comma: walk to the next waypoint for you. It stops at the waypoint, when you press an arrow
+  key yourself, when an enemy gets close, or if the way is blocked.
+- L: turn the quest guide on or off. It leads you to the next step of the story.
+- Y: stop guiding.
+- V: scan. Says what is around you, how far, and in which direction.
+- G: turn to face the nearest enemy.
+- Apostrophe: turn the wall sounds on or off. When on, a wind sound tells you how far the
+  walls are in each direction.
+- Backtick, the key left of 1: show or hide the map.
+- In the navigation menu, Guide style switches between waypoints and the carrot: a single
+  sound that rides a few steps ahead of you along the route, as in the Toby Doom mod.
+
+#### Which way you are facing
+
+- C: say which way you are facing.
+- F: face north.
+- E: turn left.
+- R: turn right.
+- T: turn around.
+
+#### Checking your status
+
+- H: health.
+- B: rupees, bombs, arrows and magic.
+- N: sword, shield and armour.
+- K: keys.
+- I: the item in your hand.
+- U: exact coordinates.
+- Delete: where am I.
+- Semicolon: the current quest objective.
+- D: read the text box on screen again.
+- Slash: repeat the last thing said.
+
+#### Saving and other keys
+
+- F6: save.
+- F9: load.
+- F7 and F8: previous and next save slot.
+- Escape: Beacon's menu, for opening games, settings and quitting.
+- Equals: change how much Beacon says.
+- J: mute.
+- F4: pause.
+- F12: change key bindings.
+- F11: full screen on or off.
+- Pause: quit.
+- F10: advance one frame, for debugging a plugin.
+
+#### In any menu
+
+- Up and down arrows: move through the list.
+- X, Enter or right arrow: choose.
+- Z, Backspace or left arrow: go back.
+- Escape: close.
+
+#### Using a USB controller
+
+Any USB controller should work alongside the keyboard, including Super Nintendo style
+controllers. The buttons work by position, the same as on a Super Nintendo: the right button
+is A and the bottom button is B. The left stick also moves.
+
+To use Beacon's own commands, hold Select and press another button. Tapping Select on its own
+still sends Select to the game.
+
+- Select and Start: Beacon's menu.
+- Select and A: the navigation menu.
+- Select and B: stop guiding.
+- Select and X: the quest guide.
+- Select and Y: scan.
+- Select and L: read the text box.
+- Select and R: face the nearest enemy.
+- Select and up: say which way you are facing.
+- Select and down: health.
+- Select and left: walk to the next waypoint.
+- Select and right: say the next waypoint.
+
+In menus on the controller, up and down move, A chooses, B goes back, and Start closes.
+
+A controller with more buttons also has its stick buttons, L2, R2 and guide button for
+Beacon's commands. A controller Beacon does not recognise, or whose buttons come out wrong,
+can be given an SDL controller mapping in the `input.pad_mappings` setting, or in the
+`SDL_GAMECONTROLLERCONFIG` environment variable.
+
+**Rebinding.** Press the input-configuration key (`f12`, or the left stick button).
+Press a Select chord there to bind it, like any key.
 The game pauses; use up/down to choose an action — each is spoken with its current
 binding — then press the key or button to assign it, delete to clear, escape to
 finish. Everything is announced, so it works without sight, and changes are saved
@@ -85,6 +202,78 @@ immediately.
 ROM so games never collide. Save and load act on the active slot; next/previous
 move between slots, announced as you go. Frame advance and pause are there for
 debugging a plugin — stepping one frame at a time to watch memory change.
+
+### Navigation
+
+Two ways to play, side by side:
+
+- **The quest guide** (`l`, or *Quest objective* in the menu) leads you through the story:
+  authored waypoints and goals, beat by beat, from the house to the castle and on.
+- **Exploration, Toby's way** (`m`). One menu holds every destination, as Toby's does:
+  the quest objective, ten markers of your own, and lists of what you have found —
+  *Unexplored*, *Unopened*, *Keys*, *Pickups*, *Exits and stairs*, *This room*. Every list
+  holds only places you can actually reach, nearest first by walking distance, and reads each
+  the way Toby does: "Chest - South-east - 13 tiles". Beacon remembers every room and screen
+  you have been on, so a chest passed two rooms back is still listed, and the rooms and
+  screens next to ones you have visited are *Unexplored*. The menu is drawn over the map.
+
+Choose a destination and Toby's **pathfinder** leads you there by ear: one sound rides the
+route a few steps ahead of you and beeps from where it is; walk toward it and it pulls you
+round each corner. Facing it, the beep changes. Corners and arrival have their own sounds.
+
+The **world makes Toby's sounds**, from where things are: pickups and chests, your markers,
+exits and stairs, doors and locked doors, spike floors, a ticking edge ahead of a pit, a bump
+where you walk into a wall, and — off by default, on with `'` — Toby's "wind" in each
+direction, pitched by how far the wall is. **Enemies** each carry a tone; a lock tick says
+one is straight ahead of you; hits and kills have their own sounds; `g` turns you to face the
+nearest, and `v` counts everything in view by name, distance and direction.
+
+**Toby's sounds.** Beacon ships none of Toby's recordings — they belong to its authors — but
+if you have the [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-accessibility-mod),
+point `sounds.dir` at its folder (the unpacked mod, or its git checkout) and Beacon plays
+them. Without it, every cue has a synthesized stand-in in the same spirit.
+
+### Streaming with OBS
+
+Beacon works as an ordinary window for [OBS Studio](https://obsproject.com/), in a window or
+full screen. These steps follow OBS's own documentation on
+[Window Capture](https://obsproject.com/kb/window-capture-sources) and
+[Application Audio Capture](https://obsproject.com/kb/application-audio-capture-guide).
+
+**The picture.**
+
+1. Start Beacon. Press F11 for full screen if you want it. Beacon remembers the choice. Full
+   screen is borderless, so OBS still sees an ordinary window, and the picture keeps its shape,
+   with black bars on a wide screen rather than a stretched game.
+2. In OBS, under Sources, add a **Window Capture** source and choose the window titled
+   `[beacon.exe]: Beacon`.
+3. On Windows, set **Capture Method** to **Windows 10 (1903 and up)**. Beacon draws its
+   picture with ordinary Windows drawing rather than DirectX, OpenGL or Vulkan, so use Window
+   Capture, not Game Capture. If the picture stays black or frozen, try the **BitBlt** method
+   instead.
+4. Leave **Window Match Priority** on its default: the title, `Beacon`, does not change.
+5. To stream the game without the map beside it, press backtick to hide the map, or crop the
+   source in OBS.
+
+On Linux, use **Window Capture (PipeWire)**, or **Screen Capture (PipeWire)** on Wayland, and
+pick the Beacon window when the desktop asks. On X11, **Window Capture (Xcomposite)** works too.
+
+**The sound.** Beacon's game audio and its navigation sounds come from Beacon itself. Speech
+comes from your screen reader, a separate program, unless Beacon is speaking through SAPI.
+
+- On Windows 10 version 2004 or later, with OBS 28 or later, add an **Application Audio
+  Capture** source and choose the Beacon window. Set its match priority to the executable
+  name, `beacon.exe`. Add a second one for your screen reader (for NVDA, `nvda.exe`) if your
+  viewers should hear the speech too, and leave it out if not. Turn off the global **Desktop
+  Audio** source in OBS's audio settings, or everything is captured twice.
+- With OBS 30.1 or later, the Window Capture source can carry Beacon's audio itself: tick
+  **Capture Audio** in its properties instead of adding a separate audio source.
+- On Linux, application audio capture needs PipeWire; add an **Application Audio Capture
+  (PipeWire)** source for Beacon, and one for `speech-dispatcher` if viewers should hear the
+  speech.
+
+Beacon's own audio settings apply to the stream as they do to you. `sounds.volume` and
+`beacons.music_duck` balance the navigation sounds against the game music.
 
 ### Other modes
 
@@ -103,6 +292,10 @@ or any other tool can subscribe:
 
 **stdout carries only the event stream.** Diagnostics and emulator logs go to
 stderr, so piping stdout into a parser is safe.
+
+Set `BEACON_STATS=1` to print frame rate, audio underruns and loop timing every two seconds,
+and to log any frame whose plugin work runs long — the first thing to look at if a game feels
+slow.
 
 ### Agent control (MCP)
 
@@ -180,6 +373,20 @@ enabled = true     # spatial-audio tones for where things are
 volume_max = 0.5   # 0 to 1, loudness when a source is closest
 volume_min = 0.05  # 0 to 1, loudness at the far edge of range
 music_duck = 0.5   # 0 to 1, how far game audio ducks under a beacon
+
+[audio]
+buffer_ms = 50     # 20 to 500, delay before game sound and tones are heard; raise if it crackles
+
+[sounds]
+dir = ""           # your Toby Accessibility Mod folder, for its sounds; empty = Beacon's own
+volume = 0.8       # 0 to 1, loudness of the recorded cues
+
+[input]
+pad_mappings = ""  # SDL controller mapping lines, for a pad Beacon does not recognise
+
+[video]
+enabled = true     # draw the picture; off saves CPU for a player who cannot see it
+fullscreen = false # fill the screen (F11), borderless; remembered
 ```
 
 ## Plugins
@@ -209,8 +416,10 @@ iterate without rebuilding.
 
 **[docs/plugins.md](docs/plugins.md) is the plugin authoring guide** — the full
 manifest format and the complete Lua host API (`mem`, `rom`, `watch`, `say`,
-`on_command`, `log`, `beacon` for spatial-audio cues, and `on_draw` for the map),
-with semantics and defaults. The reference plugin,
+`on_command`, `log`, `beacon` for spatial-audio tones, `sound` for recorded cues, `menu`
+for lists of the plugin's own in Beacon's menu, `nav` for grid pathfinding in the host,
+`input` for acting briefly on the player's behalf, and `on_draw` for the map), with
+semantics and defaults. The reference plugin,
 [`plugins/alttp/`](plugins/alttp/), is the worked example to read alongside it.
 
 ## Layout

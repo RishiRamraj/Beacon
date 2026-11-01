@@ -10,12 +10,16 @@ mod image;
 mod input;
 mod mcp;
 mod menu;
+mod menu_panel;
 // Windows and macOS have a real menu widget; Linux has none reachable from a winit window.
 #[cfg(any(windows, target_os = "macos"))]
 mod native;
 mod rom;
 mod session;
+mod soundbank;
 mod state;
+mod synth;
+mod voices;
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -235,6 +239,8 @@ fn run_headless(
         emu.drain_audio(&mut audio);
 
         let intents = plugin.on_frame(emu.main_ram()?, n);
+        // No audio device headless: the plugin's sounds have nowhere to go.
+        let _ = plugin.take_sounds();
         if !intents.is_empty() {
             // Time from the frame counter, not the clock, so a replay of the
             // same inputs arbitrates identically.
@@ -301,7 +307,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The device opens BEFORE the emulator, because the rate it settles on is the rate the
     // emulator has to produce. Asking a device to run at the emulator's rate instead is what
     // failed on Windows, where WASAPI shared mode serves only its own mix format.
-    let audio = audio::Audio::new()?;
+    let audio = audio::Audio::new(std::time::Duration::from_millis(
+        settings.audio.buffer_ms.into(),
+    ))?;
     let rate = audio.sample_rate();
 
     // No ROM is a legitimate start: an empty machine with a menu on it.
@@ -309,6 +317,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => Some(Emulator::load_at(path, rate)?),
         None => None,
     };
+    // Read before the settings move into the session: the pad mappings are a start-up matter.
+    let pad_mappings = settings.input.pad_mappings.clone();
     let mut session = session::Session::new(
         emu,
         audio,
@@ -372,7 +382,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     let mut app = app::App::new(
         session,
-        input::Input::new(),
+        input::Input::new(&pad_mappings),
         args.map_only,
         control_rx,
         event_loop.create_proxy(),

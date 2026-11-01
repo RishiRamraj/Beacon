@@ -26,6 +26,7 @@ use serde::Deserialize;
 
 pub mod canvas;
 pub mod lua;
+pub mod nav;
 
 pub use beacon_output::Intent;
 pub use lua::LuaPlugin;
@@ -100,6 +101,82 @@ pub trait Plugin {
     fn beacons(&self) -> Vec<BeaconState> {
         Vec::new()
     }
+
+    /// Takes the sound commands the plugin issued since the last call — recorded sounds
+    /// it asked to play, loop or stop. The host owns the sounds themselves (a bank of named
+    /// samples, with a synthesized stand-in for any it cannot find) and renders them; the
+    /// plugin only names them and says where.
+    fn take_sounds(&mut self) -> Vec<SoundCmd> {
+        Vec::new()
+    }
+
+    /// A menu the plugin asked the host to open since the last call, if any: a tree of
+    /// choices shown in Beacon's own menu, so it is read and driven exactly as the rest of the
+    /// menu is (by voice, screen reader, keys or pad). The root's label is the menu's title.
+    fn take_menu(&mut self) -> Option<MenuItem> {
+        None
+    }
+
+    /// The player chose the menu item with this id. Answers are spoken at once, as for a
+    /// command; the plugin may open another menu in reply.
+    fn menu_chosen(&mut self, _id: &str, _ram: &[u8]) -> Vec<Intent> {
+        Vec::new()
+    }
+
+    /// Buttons the plugin asked the host to hold for the player, and for how many frames,
+    /// since the last call: the SNES button mask (bsnes order, `UP` = 1 << 11) and a count.
+    /// For a command that acts on the player's behalf — turning Link to face a target — not
+    /// for playing the game: the host adds them to the player's own buttons, briefly.
+    fn take_input(&mut self) -> Option<(u16, u32)> {
+        None
+    }
+
+    /// Tells the plugin which SNES buttons the player is holding themselves, before a frame.
+    /// The game's own joypad register cannot say, once the plugin is holding buttons for them
+    /// (`take_input`): this is how a plugin acting on the player's behalf knows to stop the
+    /// moment the player takes over.
+    fn set_player_buttons(&mut self, _mask: u16) {}
+}
+
+/// One line of a plugin's menu: something to choose (it has an `id`), or a submenu (it has
+/// `items`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MenuItem {
+    pub label: String,
+    pub id: Option<String>,
+    pub items: Vec<MenuItem>,
+}
+
+/// A plugin's request to the host's sound engine.
+///
+/// Sounds are named the way Toby's SNDINFO names them (`"pathfinder/nodebeacon"`), so the
+/// host can find them in a Toby install or fall back to a synthesized stand-in. Offsets and
+/// volume follow the [`BeaconState`] convention: `dx`/`dy` are the plugin's units, used for
+/// direction only, and the plugin sets `volume` (0 to 1) from distance itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SoundCmd {
+    /// Plays a sound once. `positional` is false for an interface sound, heard centred
+    /// rather than from a place in the world.
+    Play {
+        name: String,
+        dx: f32,
+        dy: f32,
+        volume: f32,
+        pitch: f32,
+        positional: bool,
+    },
+    /// Starts a looping sound under `id`, or updates it if already running. A different
+    /// `name` for a running id restarts it with the new sound.
+    Loop {
+        id: String,
+        name: String,
+        dx: f32,
+        dy: f32,
+        volume: f32,
+        pitch: f32,
+    },
+    /// Stops the loop under `id`. Stopping one that is not running is harmless.
+    Stop { id: String },
 }
 
 /// A positioned tone the host renders. Offsets are the plugin's units, used only
@@ -145,13 +222,18 @@ pub struct CommandDecl {
     /// always wins, and the key is refused if it drives the game.
     #[serde(default)]
     pub key: Option<String>,
+    /// An optional default controller button, as for `key` but for a pad, e.g.
+    /// `"Pad:Select+A"` — a Select chord, which every pad has. Applied on its own, so a
+    /// command with a key still gets its button.
+    #[serde(default)]
+    pub pad: Option<String>,
 }
 
 /// The three commands the host itself always offers, independent of any plugin.
 pub const STANDARD_COMMANDS: [&str; 3] = ["scan", "where", "status"];
 
 /// The most custom commands a plugin may declare, beyond the standard three.
-pub const MAX_CUSTOM_COMMANDS: usize = 10;
+pub const MAX_CUSTOM_COMMANDS: usize = 24;
 
 /// A plugin that does nothing, used when no plugin matches the ROM.
 ///

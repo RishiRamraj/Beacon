@@ -28,7 +28,9 @@ use crate::beacons::BeaconMixer;
 use crate::config_modal::{Bound, ConfigModal};
 use crate::menu::{self, Act, Backed, Chosen, Menu};
 use crate::rom;
+use crate::soundbank::SoundBank;
 use crate::state::{SlotStore, SLOTS};
+use crate::voices::VoiceMixer;
 
 /// How many recent spoken lines to retain for an agent to read back. Bounded so
 /// a long GUI session does not accumulate them without limit.
@@ -103,6 +105,21 @@ pub struct Session {
     audio_scratch: Vec<f32>,
     /// Synthesises the plugin's spatial-audio beacons into the audio stream.
     beacon_mixer: BeaconMixer,
+    /// Named recorded sounds: Toby's from `sounds.dir`, or synthesized stand-ins.
+    sound_bank: SoundBank,
+    /// The plugin's recorded sounds that are currently playing.
+    voices: VoiceMixer,
+    /// The map with the open menu drawn over it, recomposed whenever the menu changes.
+    menu_overlay: Vec<u32>,
+    /// Bumped each time the overlay is recomposed, so the window knows to redraw it: the game
+    /// is frozen under a menu, so no new frame would ask for one.
+    menu_version: u64,
+    /// The plugin's own menu, flattened, while it is the menu on show.
+    plugin_menu: Vec<menu::PluginNode>,
+    /// Buttons the plugin is holding for the player (snap to target), and frames left.
+    plugin_hold: (u16, u32),
+    /// Whether to log frames whose plugin work is slow (`BEACON_STATS`).
+    slow_frame_log: bool,
     last_spoken: Option<String>,
     /// Recent spoken lines, for an agent to read what a player would have heard.
     speech_log: VecDeque<String>,
@@ -167,6 +184,8 @@ impl Session {
         settings: Settings,
         rom_id: Option<&str>,
     ) -> Self {
+        let rate = audio.sample_rate();
+        let sounds_dir = settings.sounds.dir.clone();
         let mut session = Session {
             emu,
             audio,
@@ -194,7 +213,16 @@ impl Session {
             quit: false,
             muted: false,
             audio_scratch: Vec::with_capacity(4096),
-            beacon_mixer: BeaconMixer::new(beacon_emu::AUDIO_SAMPLE_RATE),
+            // The device's rate, which the emulator is told to match: a tone synthesized at
+            // any other rate plays off-pitch by the ratio.
+            beacon_mixer: BeaconMixer::new(rate),
+            sound_bank: SoundBank::open(&sounds_dir, rate),
+            voices: VoiceMixer::default(),
+            slow_frame_log: std::env::var_os("BEACON_STATS").is_some(),
+            plugin_menu: Vec::new(),
+            plugin_hold: (0, 0),
+            menu_overlay: Vec::new(),
+            menu_version: 0,
             last_spoken: None,
             speech_log: VecDeque::new(),
             frames: 0,
@@ -253,7 +281,13 @@ impl Session {
         let Some(emu) = self.emu.as_mut() else {
             return;
         };
-        emu.set_buttons(0, self.held_buttons);
+        let hold = if self.plugin_hold.1 > 0 {
+            self.plugin_hold.1 -= 1;
+            self.plugin_hold.0
+        } else {
+            0
+        };
+        emu.set_buttons(0, self.held_buttons | hold);
 
         emu.run_frame();
         self.frames += 1;
@@ -265,6 +299,7 @@ impl Session {
                 // Silence game and beacons alike, but keep the sample count so the
                 // audio queue still paces emulation at normal speed.
                 self.audio_scratch.iter_mut().for_each(|s| *s = 0.0);
+                self.voices.clear();
             } else if self.settings.beacons.enabled {
                 // Mix the plugin's spatial-audio beacons into the game audio before
                 // it is queued. The beacons are owned here, so the mixer and the
@@ -277,6 +312,14 @@ impl Session {
                     self.settings.beacons.volume_max,
                     self.settings.beacons.music_duck,
                 );
+                // The beacons duck the music only when one is sounding; a recorded cue
+                // alone should cut through just the same.
+                if beacons.is_empty() && self.voices.active() {
+                    let duck = self.settings.beacons.music_duck;
+                    self.audio_scratch.iter_mut().for_each(|s| *s *= duck);
+                }
+                self.voices
+                    .mix(&mut self.audio_scratch, self.settings.sounds.volume);
             }
             let scratch = std::mem::take(&mut self.audio_scratch);
             self.audio.submit(&scratch);
@@ -285,11 +328,35 @@ impl Session {
 
         // Instrumentation runs here: between frames, against real memory.
         let frame = self.frames;
+        self.plugin.set_player_buttons(self.held_buttons);
+        let plugin_started = std::time::Instant::now();
         let intents = match ram_of(&self.emu) {
             Some(ram) => self.plugin.on_frame(ram, frame),
             None => Vec::new(),
         };
+        if self.slow_frame_log {
+            // A frame's plugin work over half the frame budget: the cause of a hitch. Logged
+            // with where the game was, because "choppy on the overworld" needs a place.
+            let took = plugin_started.elapsed();
+            if took >= Duration::from_millis(8) {
+                let at = ram_of(&self.emu)
+                    .map(|ram| {
+                        let b = |a: u32| beacon_plugin::wram_offset(a).map(|o| ram[o]).unwrap_or(0);
+                        format!(
+                            "module {:02x}/{:02x} area {:02x} room {:02x}{:02x}",
+                            b(0x7E0010),
+                            b(0x7E0011),
+                            b(0x7E008A),
+                            b(0x7E00A1),
+                            b(0x7E00A0)
+                        )
+                    })
+                    .unwrap_or_default();
+                eprintln!("slow frame {frame}: plugin {:.1} ms, {at}", took.as_secs_f64() * 1e3);
+            }
+        }
         self.dispatch(intents);
+        self.drain_sounds();
 
         // Bring the map up on its own the moment the plugin's navigation starts, so
         // the route shows without also pressing the map key. Edge-triggered on the
@@ -465,6 +532,7 @@ impl Session {
             Action::FrameAdvance => self.frame_advance(),
             Action::Mute => self.toggle_mute(),
             Action::ToggleMap => self.toggle_map(),
+            Action::ToggleFullscreen => self.toggle_fullscreen(),
             Action::OpenInputConfig => self.open_input_config(),
             Action::OpenMenu => self.open_menu(),
             Action::Command(name) => self.run_command(&name),
@@ -508,6 +576,31 @@ impl Session {
         };
         for intent in intents {
             self.say_now(intent.text);
+        }
+        self.drain_sounds();
+    }
+
+    /// Samples the audio device wanted and did not get, ever.
+    pub fn audio_underruns(&self) -> u64 {
+        self.audio.underruns()
+    }
+
+    /// The largest chunk the audio device has asked for at once, in frames.
+    pub fn audio_period(&self) -> usize {
+        self.audio.largest_request()
+    }
+
+    /// Starts, moves and stops the sounds the plugin asked for since the last drain. They
+    /// are heard from the next frame's audio, a sixtieth of a second on.
+    fn drain_sounds(&mut self) {
+        if let Some(hold) = self.plugin.take_input() {
+            self.plugin_hold = hold;
+        }
+        if let Some(tree) = self.plugin.take_menu() {
+            self.open_plugin_menu(tree);
+        }
+        for cmd in self.plugin.take_sounds() {
+            self.voices.apply(cmd, &mut self.sound_bank);
         }
     }
 
@@ -588,6 +681,19 @@ impl Session {
         }
     }
 
+    /// Fills the screen or returns to a window. A setting, so it is remembered; the window
+    /// layer applies it, since only it holds the window.
+    fn toggle_fullscreen(&mut self) {
+        self.settings.video.fullscreen = !self.settings.video.fullscreen;
+        self.persist_settings();
+        self.say_now(if self.settings.video.fullscreen { "Full screen." } else { "Windowed." });
+    }
+
+    /// Whether the window should fill the screen.
+    pub fn fullscreen(&self) -> bool {
+        self.settings.video.fullscreen
+    }
+
     /// Shows or hides the plugin's map view.
     fn toggle_map(&mut self) {
         if !self.plugin.has_map() {
@@ -620,8 +726,16 @@ impl Session {
         dims
     }
 
-    /// The current map as (width, height, pixels), if it is showing and drawn.
+    /// The current map as (width, height, pixels), if it is showing and drawn. With a menu
+    /// open, the map with the menu drawn over it — shown whether or not the map was.
     pub fn map_view(&self) -> Option<(u32, u32, &[u32])> {
+        if self.menu.is_some() && !self.menu_overlay.is_empty() {
+            return Some((
+                beacon_plugin::canvas::WIDTH,
+                beacon_plugin::canvas::HEIGHT,
+                &self.menu_overlay,
+            ));
+        }
         if self.show_map && !self.map_buffer.is_empty() {
             Some((self.map_dims.0, self.map_dims.1, &self.map_buffer))
         } else {
@@ -629,9 +743,39 @@ impl Session {
         }
     }
 
-    /// Whether the map is currently shown, so the window can size for it.
+    /// Changes whenever the menu drawn over the map does.
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    /// Whether the map panel is currently shown, so the window can size for it: the map, or
+    /// the menu drawn where it would be.
     pub fn map_shown(&self) -> bool {
-        self.show_map
+        self.show_map || self.menu.is_some()
+    }
+
+    /// Redraws the open menu over the map. Called on every change to the menu, since the game
+    /// is frozen while it is up and nothing else would draw it.
+    fn compose_menu_overlay(&mut self) {
+        self.menu_version += 1;
+        let Some(open) = self.menu.as_ref() else {
+            self.menu_overlay.clear();
+            return;
+        };
+        let (w, h) = (
+            beacon_plugin::canvas::WIDTH as usize,
+            beacon_plugin::canvas::HEIGHT as usize,
+        );
+        self.menu_overlay.clear();
+        if self.map_buffer.len() == w * h {
+            self.menu_overlay.extend_from_slice(&self.map_buffer);
+        } else {
+            self.menu_overlay.resize(w * h, 0);
+        }
+        let title = open.title().to_string();
+        let items = open.shown();
+        let selected = open.selected();
+        crate::menu_panel::draw(&mut self.menu_overlay, w, h, &title, &items, selected);
     }
 
     /// The last rendered map pixels, for encoding by the MCP server.
@@ -668,6 +812,7 @@ impl Session {
                 .iter()
                 .map(|c| (c.id.clone(), c.label.clone()))
                 .collect(),
+            plugin_nodes: self.plugin_menu.clone(),
             roms: match self.rom_path.as_ref().and_then(|p| p.parent()) {
                 Some(dir) => rom::files_in(dir),
                 None => std::env::current_dir()
@@ -690,8 +835,26 @@ impl Session {
         let open = Menu::open(&self.menu_context());
         let first = open.announce();
         self.menu = Some(open);
+        self.compose_menu_overlay();
         self.say_now(menu::HELP);
         self.say_now(first);
+    }
+
+    /// Opens a menu of the plugin's own, as it asked: frozen like Beacon's menu, read the same
+    /// way, and with its choices handed back to the plugin.
+    fn open_plugin_menu(&mut self, tree: beacon_plugin::MenuItem) {
+        if self.menu.is_none() {
+            self.paused_before_menu = self.paused;
+        }
+        self.paused = true;
+        self.timing_disturbed = true;
+        self.held_buttons = 0;
+        self.plugin_menu = menu::flatten(&tree);
+        let open = Menu::open_plugin(&self.menu_context());
+        let said = open.arrival();
+        self.menu = Some(open);
+        self.compose_menu_overlay();
+        self.say_now(said);
     }
 
     /// Whether the menu is open.
@@ -739,6 +902,7 @@ impl Session {
             return;
         };
         let said = open.navigate(delta);
+        self.compose_menu_overlay();
         self.say_now(said);
     }
 
@@ -751,6 +915,7 @@ impl Session {
             return;
         };
         let said = open.select(index);
+        self.compose_menu_overlay();
         self.say_now(said);
     }
 
@@ -762,7 +927,10 @@ impl Session {
         };
         let chosen = open.choose(&ctx);
         match chosen {
-            Chosen::Moved(said) | Chosen::Nothing(said) => self.say_now(said),
+            Chosen::Moved(said) | Chosen::Nothing(said) => {
+                self.compose_menu_overlay();
+                self.say_now(said)
+            }
             Chosen::Act(act) => {
                 // Choosing finishes with the menu. Every act either leaves Beacon,
                 // replaces what is running, or is done the moment it is spoken, and
@@ -770,6 +938,8 @@ impl Session {
                 self.menu = None;
                 self.paused = self.paused_before_menu;
                 self.perform(act);
+                // The act may have opened another menu (a plugin answering a choice).
+                self.compose_menu_overlay();
             }
         }
     }
@@ -780,7 +950,10 @@ impl Session {
             return;
         };
         match open.back() {
-            Backed::Moved(said) => self.say_now(said),
+            Backed::Moved(said) => {
+                self.compose_menu_overlay();
+                self.say_now(said)
+            }
             Backed::Close => self.menu_close(),
         }
     }
@@ -790,6 +963,7 @@ impl Session {
         self.menu = None;
         self.held_buttons = 0;
         self.paused = self.paused_before_menu;
+        self.compose_menu_overlay();
         self.say_now("Menu closed.");
     }
 
@@ -835,6 +1009,16 @@ impl Session {
                 }
             },
             Act::Command(name) => self.run_command(&name),
+            Act::Plugin(id) => {
+                let intents = match ram_of(&self.emu) {
+                    Some(ram) => self.plugin.menu_chosen(&id, ram),
+                    None => Vec::new(),
+                };
+                for intent in intents {
+                    self.say_now(intent.text);
+                }
+                self.drain_sounds();
+            }
         }
     }
 
@@ -868,6 +1052,7 @@ impl Session {
         self.emu = Some(emu);
         self.apply_video();
         self.plugin = plugin;
+        self.voices.clear();
         self.reload_spec = spec;
         self.rom = bytes;
         self.slots = Some(SlotStore::new(sha1.as_deref().unwrap_or("unknown")));
@@ -1096,15 +1281,25 @@ impl Session {
             .plugin
             .commands()
             .iter()
-            .filter_map(|c| {
-                c.key
-                    .as_ref()
-                    .map(|k| (k.clone(), format!("command:{}", c.id)))
+            .flat_map(|c| {
+                let action = format!("command:{}", c.id);
+                [c.key.clone(), c.pad.clone()]
+                    .into_iter()
+                    .flatten()
+                    .map(move |k| (k, action.clone()))
             })
             .collect();
 
+        // A keyboard key and a pad button are separate gaps: a command with a key still gets
+        // its button, so a controller-only player is not left without it.
         for (key, action) in suggestions {
-            let command_unbound = self.settings.keymap.keys_for(&action).is_empty();
+            let pad = key.starts_with("Pad:");
+            let command_unbound = !self
+                .settings
+                .keymap
+                .keys_for(&action)
+                .iter()
+                .any(|k| k.starts_with("Pad:") == pad);
             let key_free = self.settings.keymap.action_for(&key).is_none();
             if command_unbound && key_free && !crate::input::is_game_input_name(&key) {
                 self.settings.keymap.bind(&key, &action);
@@ -1152,6 +1347,17 @@ impl Session {
         // Drawing the picture is a live property of the emulator, not something read at load,
         // so a change here has to reach it now.
         self.apply_video();
+        self.audio
+            .set_buffer(Duration::from_millis(self.settings.audio.buffer_ms.into()));
+        if key == "sounds.dir" {
+            // A different install is a different bank; what was playing came from the old one.
+            self.voices.clear();
+            self.sound_bank = SoundBank::open(&self.settings.sounds.dir, self.audio.sample_rate());
+            // Said, because a wrong folder otherwise sounds exactly like no folder at all.
+            if !self.settings.sounds.dir.trim().is_empty() && self.sound_bank.source().is_none() {
+                self.say_now("No Toby sounds there. Using Beacon's own.");
+            }
+        }
         self.persist_settings();
         Ok(())
     }
@@ -1188,6 +1394,7 @@ impl Session {
         let name = plugin.name().to_string();
         let from_disk = fresh.is_reloadable_from_disk();
         self.plugin = Box::new(plugin);
+        self.voices.clear();
         self.reload_spec = Some(fresh);
         // The old map belongs to the old plugin; drop it and let it redraw.
         self.map_buffer.clear();
@@ -1207,7 +1414,10 @@ impl Session {
         let Some(ram) = ram_of(&self.emu) else {
             return Err("no game loaded".to_string());
         };
-        self.plugin.eval(code, ram)
+        let result = self.plugin.eval(code, ram);
+        // A snippet may play a sound (`sound.play(...)`), which is how an agent checks one.
+        self.drain_sounds();
+        result
     }
 }
 
@@ -1230,6 +1440,9 @@ mod tests {
         assert!(is_game_input_name("ArrowUp"));
         assert!(is_game_input_name("Pad:South"));
         assert!(!is_game_input_name("KeyD"));
+        // A Select chord is an action, not a game control: that is the point of the layer.
+        assert!(!is_game_input_name("Pad:Select+A"));
+        assert!(is_game_input_name("Pad:Select"));
         assert!(!is_game_input_name("Pad:C"));
         assert!(!is_game_input_name("F5"));
     }

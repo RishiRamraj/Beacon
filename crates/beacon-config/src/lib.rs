@@ -28,6 +28,9 @@ pub struct Settings {
     pub arbiter: ArbiterSettings,
     pub braille: Braille,
     pub beacons: Beacons,
+    pub audio: AudioSettings,
+    pub sounds: Sounds,
+    pub input: InputSettings,
     pub video: Video,
     /// Key bindings. Serialized as `[keys]`; the field is `keymap` to avoid
     /// colliding with [`Settings::keys`], the list of scalar setting names.
@@ -114,11 +117,17 @@ pub struct Video {
     /// happens — which is worth about an eighth of a CPU core to a player who cannot see the
     /// picture anyway. It is the largest single cost in the program.
     pub enabled: bool,
+    /// Fill the screen with the window (borderless), remembered between runs. The picture
+    /// keeps its shape, with black bars; OBS's Window Capture records it either way.
+    pub fullscreen: bool,
 }
 
 impl Default for Video {
     fn default() -> Self {
-        Video { enabled: true }
+        Video {
+            enabled: true,
+            fullscreen: false,
+        }
     }
 }
 
@@ -171,6 +180,57 @@ impl Default for Beacons {
             volume_min: 0.05,
             // Dip the music ~6 dB while a beacon plays so the cue stays clear.
             music_duck: 0.5,
+        }
+    }
+}
+
+/// How the sound reaches the device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioSettings {
+    /// How far ahead of the device the emulator may run, in milliseconds. This is the
+    /// delay between a frame and hearing it, so it is the latency of every game sound and
+    /// every beacon tone: a button press is heard this much later. Lower is more responsive;
+    /// too low and a slow frame starves the device, which clicks. Raise it if the audio
+    /// crackles. Clamped to 20-500.
+    pub buffer_ms: u32,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        // Three frames. A frame costs well under half its 16.7 ms on modest hardware, so
+        // this leaves room for a slow one without a delay a player can feel.
+        AudioSettings { buffer_ms: 50 }
+    }
+}
+
+/// Controllers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputSettings {
+    /// SDL game controller mapping lines, one per line, for a pad the built-in database does
+    /// not know or maps wrongly — the format SDL's own tools and the community database use.
+    /// Read at start-up. Empty, the default, uses the database alone.
+    pub pad_mappings: String,
+}
+
+/// Recorded navigation sounds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sounds {
+    /// A Toby Accessibility Mod install to take sounds from: its git checkout, or an
+    /// unpacked `.pk3`. Empty, the default, uses Beacon's synthesized stand-ins. Nothing of
+    /// Toby's ships with Beacon, so its sounds come only from the player's own copy.
+    pub dir: String,
+    /// Loudness of the recorded cues, 0 to 1, independent of the synthesized beacon tones.
+    pub volume: f32,
+}
+
+impl Default for Sounds {
+    fn default() -> Self {
+        Sounds {
+            dir: String::new(),
+            volume: 0.8,
         }
     }
 }
@@ -231,31 +291,43 @@ impl Keymap {
 impl Default for Keymap {
     /// The out-of-the-box bindings.
     ///
-    /// Chosen from the letter keys that are neither SNES buttons nor claimed by
-    /// screen readers (function keys and the number row are avoided). Every one
-    /// is rebindable; these are only a starting point. Plugin custom commands
-    /// are unbound by default, since only the plugin knows what they are.
+    /// Toby's keys where Toby has the same thing (V scan, Delete where, H health, F6 / F9
+    /// quick save and load, Escape the menu), and keys clear of the SNES buttons and of Toby's
+    /// own for the rest. Every one is rebindable; these are only a starting point. A plugin's
+    /// commands suggest their own keys in its manifest.
     fn default() -> Self {
         let mut bindings = BTreeMap::new();
         let mut bind = |k: &str, a: &str| {
             bindings.insert(k.to_string(), a.to_string());
         };
-        bind("KeyC", "command:scan");
-        bind("KeyE", "command:where");
+        bind("KeyV", "command:scan");
+        bind("Delete", "command:where");
         bind("KeyH", "command:status");
-        bind("KeyV", "cycle_verbosity");
-        bind("KeyR", "repeat_last");
-        bind("Escape", "quit");
-        bind("KeyT", "save_state");
-        bind("KeyG", "load_state");
-        bind("KeyN", "next_slot");
-        bind("KeyB", "prev_slot");
-        bind("KeyP", "pause");
+        bind("Equal", "cycle_verbosity");
+        bind("Slash", "repeat_last");
+        bind("F6", "save_state");
+        bind("F9", "load_state");
+        bind("F8", "next_slot");
+        bind("F7", "prev_slot");
+        bind("F4", "pause");
         bind("KeyJ", "mute");
-        bind("KeyF", "frame_advance");
-        bind("KeyM", "toggle_map");
-        bind("KeyK", "bind");
+        bind("F10", "frame_advance");
+        bind("Backquote", "toggle_map");
+        bind("F12", "bind");
+        // F11 is full screen, as everywhere else. Quit is out of the way, so it is never hit by
+        // accident, and is also File, Exit in the menu.
+        bind("F11", "toggle_fullscreen");
+        bind("Pause", "quit");
+        bind("Escape", "menu");
         bind("Tab", "menu");
+
+        // The Select layer, which every pad has: hold Select and press a button. A SNES pad has
+        // no spare buttons, so this is how a controller-only player reaches Beacon at all. The
+        // plugin suggests its own commands' chords in its manifest.
+        bind("Pad:Select+Start", "menu");
+        bind("Pad:Select+Y", "command:scan");
+        bind("Pad:Select+Down", "command:status");
+        // Select with left and right are the plugin's: travel to, and say, the next waypoint.
 
         // Gamepad defaults, on the pad's extra buttons so a controller-only
         // player can reach the essentials and the configuration without a
@@ -368,11 +440,15 @@ impl Settings {
             "arbiter.bucket_refill_per_sec",
             "braille.enabled",
             "video.enabled",
+            "video.fullscreen",
             "braille.verbosity",
             "beacons.enabled",
             "beacons.volume_max",
             "beacons.volume_min",
             "beacons.music_duck",
+            "audio.buffer_ms",
+            "sounds.dir",
+            "sounds.volume",
         ]
     }
 
@@ -391,11 +467,15 @@ impl Settings {
             "arbiter.bucket_refill_per_sec" => self.arbiter.bucket_refill_per_sec.to_string(),
             "braille.enabled" => self.braille.enabled.to_string(),
             "video.enabled" => self.video.enabled.to_string(),
+            "video.fullscreen" => self.video.fullscreen.to_string(),
             "braille.verbosity" => self.braille.verbosity.to_string(),
             "beacons.enabled" => self.beacons.enabled.to_string(),
             "beacons.volume_max" => self.beacons.volume_max.to_string(),
             "beacons.volume_min" => self.beacons.volume_min.to_string(),
             "beacons.music_duck" => self.beacons.music_duck.to_string(),
+            "audio.buffer_ms" => self.audio.buffer_ms.to_string(),
+            "sounds.dir" => self.sounds.dir.clone(),
+            "sounds.volume" => self.sounds.volume.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
         })
     }
@@ -435,6 +515,7 @@ impl Settings {
             }
             "braille.enabled" => self.braille.enabled = parse(key, value)?,
             "video.enabled" => self.video.enabled = parse(key, value)?,
+            "video.fullscreen" => self.video.fullscreen = parse(key, value)?,
             "braille.verbosity" => self.braille.verbosity = parse::<u8>(key, value)?.min(3),
             "beacons.enabled" => self.beacons.enabled = parse(key, value)?,
             "beacons.volume_max" => {
@@ -446,6 +527,9 @@ impl Settings {
             "beacons.music_duck" => {
                 self.beacons.music_duck = parse::<f32>(key, value)?.clamp(0.0, 1.0)
             }
+            "audio.buffer_ms" => self.audio.buffer_ms = parse::<u32>(key, value)?.clamp(20, 500),
+            "sounds.dir" => self.sounds.dir = value.to_string(),
+            "sounds.volume" => self.sounds.volume = parse::<f32>(key, value)?.clamp(0.0, 1.0),
             other => return Err(Error::UnknownKey(other.to_string())),
         }
         Ok(())
@@ -478,16 +562,18 @@ mod tests {
     #[test]
     fn keymap_defaults_are_present_and_editable() {
         let mut k = Keymap::default();
-        assert_eq!(k.action_for("Escape"), Some("quit"));
-        assert_eq!(k.action_for("KeyF"), Some("frame_advance"));
+        // Toby's: Escape opens the menu, V scans.
+        assert_eq!(k.action_for("Escape"), Some("menu"));
+        assert_eq!(k.action_for("KeyV"), Some("command:scan"));
+        assert_eq!(k.action_for("F10"), Some("frame_advance"));
 
         // A rebind replaces the key's action; several keys can share an action.
         k.bind("KeyC", "command:custom1");
         assert_eq!(k.action_for("KeyC"), Some("command:custom1"));
-        k.bind("KeyO", "command:custom1");
+        k.bind("KeyG", "command:custom1");
         let mut keys = k.keys_for("command:custom1");
         keys.sort();
-        assert_eq!(keys, vec!["KeyC".to_string(), "KeyO".to_string()]);
+        assert_eq!(keys, vec!["KeyC".to_string(), "KeyG".to_string()]);
 
         k.unbind("KeyC");
         assert_eq!(k.action_for("KeyC"), None);
@@ -497,7 +583,7 @@ mod tests {
     fn absent_keys_table_yields_default_bindings() {
         // A settings file with no [keys] must still be fully bound.
         let s: Settings = toml::from_str("[speech]\nrate = 20\n").unwrap();
-        assert_eq!(s.keymap.action_for("Escape"), Some("quit"));
+        assert_eq!(s.keymap.action_for("Escape"), Some("menu"));
     }
 
     #[test]

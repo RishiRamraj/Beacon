@@ -126,7 +126,7 @@ impl Default for Canvas {
 /// The classic glcd 5x7 set, restricted to the glyphs a map label needs:
 /// digits, uppercase letters, space, and a little punctuation. Enough for
 /// coordinates and room numbers; lowercase can be added when something wants it.
-mod font {
+pub mod font {
     pub fn glyph(c: char) -> Option<[u8; 5]> {
         Some(match c.to_ascii_uppercase() {
             ' ' => [0x00, 0x00, 0x00, 0x00, 0x00],
@@ -171,6 +171,9 @@ mod font {
             '.' => [0x00, 0x60, 0x60, 0x00, 0x00],
             ',' => [0x00, 0x50, 0x30, 0x00, 0x00],
             '/' => [0x20, 0x10, 0x08, 0x04, 0x02],
+            '>' => [0x00, 0x41, 0x22, 0x14, 0x08],
+            '<' => [0x08, 0x14, 0x22, 0x41, 0x00],
+            '\'' => [0x00, 0x00, 0x07, 0x00, 0x00],
             _ => return None,
         })
     }

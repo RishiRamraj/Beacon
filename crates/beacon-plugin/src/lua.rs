@@ -39,7 +39,7 @@ use mlua::{Function, Lua, Table, Value};
 use std::collections::BTreeMap;
 
 use crate::canvas::{self, Canvas};
-use crate::{BeaconState, CommandDecl, Error, Manifest, Plugin, PluginSpec};
+use crate::{BeaconState, CommandDecl, Error, Manifest, MenuItem, Plugin, PluginSpec, SoundCmd};
 
 /// Work RAM is 128 KiB: bank $7E is the first 64 KiB, $7F the second.
 const WRAM_LEN: usize = 128 * 1024;
@@ -53,6 +53,19 @@ type Intents = Rc<RefCell<Vec<Intent>>>;
 /// The plugin's live spatial-audio beacons, keyed by id. Ordered so the host
 /// reads them deterministically.
 type Beacons = Rc<RefCell<BTreeMap<String, BeaconState>>>;
+/// Sound commands issued since the host last took them.
+type Sounds = Rc<RefCell<Vec<SoundCmd>>>;
+/// A menu the plugin asked to have opened, until the host takes it.
+type MenuRequest = Rc<RefCell<Option<MenuItem>>>;
+/// Buttons the plugin asked to have held, and for how many frames.
+type InputRequest = Rc<RefCell<Option<(u16, u32)>>>;
+/// The buttons the player is holding themselves, as the host last said.
+type PlayerButtons = Rc<std::cell::Cell<u16>>;
+
+/// The most sound commands kept between drains. A host that never drains them (the
+/// headless benchmark, a test) must not grow this without bound; past the cap the oldest
+/// are dropped, which is what would have happened to them anyway.
+const MAX_QUEUED_SOUNDS: usize = 256;
 
 /// A loaded Lua plugin.
 pub struct LuaPlugin {
@@ -64,6 +77,10 @@ pub struct LuaPlugin {
     canvas: Canvas,
     has_draw: bool,
     beacons: Beacons,
+    sounds: Sounds,
+    menu: MenuRequest,
+    input: InputRequest,
+    player: PlayerButtons,
 }
 
 impl LuaPlugin {
@@ -90,6 +107,14 @@ impl LuaPlugin {
         install_rom(&lua, rom)?;
         let beacons: Beacons = Rc::new(RefCell::new(BTreeMap::new()));
         install_beacon(&lua, &beacons)?;
+        let sounds: Sounds = Rc::new(RefCell::new(Vec::new()));
+        install_sound(&lua, &sounds)?;
+        let menu: MenuRequest = Rc::new(RefCell::new(None));
+        install_menu(&lua, &menu)?;
+        let input: InputRequest = Rc::new(RefCell::new(None));
+        let player: PlayerButtons = Rc::new(std::cell::Cell::new(0));
+        install_input(&lua, &input, &player)?;
+        crate::nav::install(&lua)?;
 
         // Modules first, in declared order, each its own chunk (its own local
         // budget) sharing this Lua state's globals — so a data module's namespace is
@@ -118,6 +143,10 @@ impl LuaPlugin {
             canvas,
             has_draw,
             beacons,
+            sounds,
+            menu,
+            input,
+            player,
         })
     }
 
@@ -220,6 +249,32 @@ impl Plugin for LuaPlugin {
 
     fn beacons(&self) -> Vec<BeaconState> {
         self.beacons.borrow().values().cloned().collect()
+    }
+
+    fn take_sounds(&mut self) -> Vec<SoundCmd> {
+        std::mem::take(&mut self.sounds.borrow_mut())
+    }
+
+    fn take_menu(&mut self) -> Option<MenuItem> {
+        self.menu.borrow_mut().take()
+    }
+
+    fn take_input(&mut self) -> Option<(u16, u32)> {
+        self.input.borrow_mut().take()
+    }
+
+    fn set_player_buttons(&mut self, mask: u16) {
+        self.player.set(mask);
+    }
+
+    fn menu_chosen(&mut self, id: &str, ram: &[u8]) -> Vec<Intent> {
+        self.stage_ram(ram);
+        if let Ok(Value::Function(f)) = self.lua.globals().get::<Value>("on_menu") {
+            if let Err(e) = f.call::<()>(id) {
+                eprintln!("plugin {} on_menu {id}: {e}", self.name);
+            }
+        }
+        self.drain()
     }
 
     fn eval(&mut self, code: &str, ram: &[u8]) -> Result<String, String> {
@@ -573,6 +628,185 @@ fn install_beacon(lua: &Lua, beacons: &Beacons) -> Result<(), Error> {
     Ok(())
 }
 
+/// Installs the `sound` table: named recorded sounds, played by the host.
+///
+/// - `sound.play(name, opts)` — once, from a place: `opts` is `x`/`y` (offset, for direction),
+///   `volume` (0-1, default 1, set from distance by the plugin) and `pitch` (playback-rate
+///   multiplier, default 1).
+/// - `sound.ui(name, opts)` — once, centred: an interface sound with no place (`volume`,
+///   `pitch`).
+/// - `sound.loop(id, name, opts)` — start or update a continuous sound under `id`, with the
+///   same `opts` as `play`. Re-issue it each frame as the source moves.
+/// - `sound.stop(id)` — end the loop under `id`.
+///
+/// Names are Toby SNDINFO names (`"pathfinder/nodebeacon"`). An unknown name is silent, not
+/// an error: the host may simply not have that sound.
+fn install_sound(lua: &Lua, sounds: &Sounds) -> Result<(), Error> {
+    fn opts_of(opts: &Option<Table>) -> mlua::Result<(f32, f32, f32, f32)> {
+        let Some(o) = opts else {
+            return Ok((0.0, 0.0, 1.0, 1.0));
+        };
+        Ok((
+            o.get::<Option<f64>>("x")?.unwrap_or(0.0) as f32,
+            o.get::<Option<f64>>("y")?.unwrap_or(0.0) as f32,
+            (o.get::<Option<f64>>("volume")?.unwrap_or(1.0) as f32).clamp(0.0, 1.0),
+            (o.get::<Option<f64>>("pitch")?.unwrap_or(1.0) as f32).clamp(0.05, 8.0),
+        ))
+    }
+    fn push(queue: &Sounds, cmd: SoundCmd) {
+        let mut q = queue.borrow_mut();
+        if q.len() >= MAX_QUEUED_SOUNDS {
+            q.remove(0);
+        }
+        q.push(cmd);
+    }
+
+    let table = lua.create_table()?;
+
+    for (key, positional) in [("play", true), ("ui", false)] {
+        let q = sounds.clone();
+        table.set(
+            key,
+            lua.create_function(move |_, (name, opts): (String, Option<Table>)| {
+                let (dx, dy, volume, pitch) = opts_of(&opts)?;
+                push(
+                    &q,
+                    SoundCmd::Play {
+                        name,
+                        dx: if positional { dx } else { 0.0 },
+                        dy: if positional { dy } else { 0.0 },
+                        volume,
+                        pitch,
+                        positional,
+                    },
+                );
+                Ok(())
+            })?,
+        )?;
+    }
+
+    let q = sounds.clone();
+    table.set(
+        "loop",
+        lua.create_function(
+            move |_, (id, name, opts): (String, String, Option<Table>)| {
+                let (dx, dy, volume, pitch) = opts_of(&opts)?;
+                push(
+                    &q,
+                    SoundCmd::Loop {
+                        id,
+                        name,
+                        dx,
+                        dy,
+                        volume,
+                        pitch,
+                    },
+                );
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let q = sounds.clone();
+    table.set(
+        "stop",
+        lua.create_function(move |_, id: String| {
+            push(&q, SoundCmd::Stop { id });
+            Ok(())
+        })?,
+    )?;
+
+    lua.globals().set("sound", table)?;
+    Ok(())
+}
+
+/// Installs `menu.open(tree)`: ask the host to show a menu of the plugin's own.
+///
+/// `tree` is `{ title = "...", items = { ... } }`; each item is `{ label = "...", id = "..." }`
+/// to choose, or `{ label = "...", items = { ... } }` for a submenu. Choosing calls the
+/// script's global `on_menu(id)`. The menu opens after the current call returns, and freezes
+/// the game while it is up, as Beacon's own menu does.
+fn install_menu(lua: &Lua, request: &MenuRequest) -> Result<(), Error> {
+    fn item(t: &Table, label_key: &str) -> mlua::Result<MenuItem> {
+        let label = t
+            .get::<Option<String>>(label_key)?
+            .or(t.get::<Option<String>>("label")?)
+            .unwrap_or_default();
+        let id = t.get::<Option<String>>("id")?;
+        let mut items = Vec::new();
+        if let Some(children) = t.get::<Option<Table>>("items")? {
+            for child in children.sequence_values::<Table>() {
+                items.push(item(&child?, "label")?);
+            }
+        }
+        Ok(MenuItem { label, id, items })
+    }
+    let table = lua.create_table()?;
+    let r = request.clone();
+    table.set(
+        "open",
+        lua.create_function(move |_, tree: Table| {
+            *r.borrow_mut() = Some(item(&tree, "title")?);
+            Ok(())
+        })?,
+    )?;
+    lua.globals().set("menu", table)?;
+    Ok(())
+}
+
+/// Installs `input.hold(buttons, frames)`: press buttons for the player, briefly.
+///
+/// `buttons` is a name or a list of names — `up`, `down`, `left`, `right`, `a`, `b`, `x`,
+/// `y`, `l`, `r`, `start`, `select` — and `frames` how long to hold them (default 1, at most
+/// 60). For acting on the player's behalf, such as turning to face a target; the host adds
+/// them to the player's own buttons rather than replacing them.
+fn install_input(lua: &Lua, request: &InputRequest, player: &PlayerButtons) -> Result<(), Error> {
+    fn bit(name: &str) -> Option<u16> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "b" => 1 << 15,
+            "y" => 1 << 14,
+            "select" => 1 << 13,
+            "start" => 1 << 12,
+            "up" => 1 << 11,
+            "down" => 1 << 10,
+            "left" => 1 << 9,
+            "right" => 1 << 8,
+            "a" => 1 << 7,
+            "x" => 1 << 6,
+            "l" => 1 << 5,
+            "r" => 1 << 4,
+            _ => return None,
+        })
+    }
+    let table = lua.create_table()?;
+    let r = request.clone();
+    table.set(
+        "hold",
+        lua.create_function(move |_, (buttons, frames): (Value, Option<u32>)| {
+            let mut mask = 0u16;
+            match buttons {
+                Value::String(s) => mask |= bit(&s.to_str()?).unwrap_or(0),
+                Value::Table(t) => {
+                    for name in t.sequence_values::<String>() {
+                        mask |= bit(&name?).unwrap_or(0);
+                    }
+                }
+                _ => {}
+            }
+            if mask != 0 {
+                *r.borrow_mut() = Some((mask, frames.unwrap_or(1).clamp(1, 60)));
+            }
+            Ok(())
+        })?,
+    )?;
+    // `input.player()`: the buttons the player is holding themselves, as a SNES mask (bsnes
+    // order: up 1 << 11, down 1 << 10, left 1 << 9, right 1 << 8). Not what the plugin holds.
+    let p = player.clone();
+    table.set("player", lua.create_function(move |_, ()| Ok(p.get()))?)?;
+    lua.globals().set("input", table)?;
+    Ok(())
+}
+
 /// Exposes the manifest's named watches to Lua as a `watch` table.
 fn install_watch(lua: &Lua, manifest: &Manifest) -> Result<(), Error> {
     let watch = lua.create_table()?;
@@ -630,7 +864,9 @@ mod tests {
         };
         let mut plugin = LuaPlugin::load(&spec, std::rc::Rc::new(Vec::new())).unwrap();
         assert_eq!(
-            plugin.eval("return tostring(seen)", &vec![0u8; WRAM_LEN]).unwrap(),
+            plugin
+                .eval("return tostring(seen)", &vec![0u8; WRAM_LEN])
+                .unwrap(),
             "42",
             "the script sees the module's REF namespace"
         );
@@ -823,6 +1059,93 @@ mod tests {
         let b = p.beacons();
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].id, "goal"); // enemy cleared
+    }
+
+    #[test]
+    fn sound_calls_become_commands_for_the_host() {
+        let mut p = plugin_from(
+            r#"
+            function on_frame(frame)
+              sound.play("pathfinder/nodebeacon", { x = 16, y = -32, volume = 0.5 })
+              sound.ui("pathfinder/pathfound")
+              sound.loop("exit", "amb/exit1", { x = -8, pitch = 1.5 })
+              sound.stop("exit")
+            end
+            "#,
+        );
+        p.on_frame(&vec![0u8; WRAM_LEN], 0);
+        let cmds = p.take_sounds();
+        assert_eq!(
+            cmds,
+            vec![
+                SoundCmd::Play {
+                    name: "pathfinder/nodebeacon".into(),
+                    dx: 16.0,
+                    dy: -32.0,
+                    volume: 0.5,
+                    pitch: 1.0,
+                    positional: true
+                },
+                SoundCmd::Play {
+                    name: "pathfinder/pathfound".into(),
+                    dx: 0.0,
+                    dy: 0.0,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    positional: false
+                },
+                SoundCmd::Loop {
+                    id: "exit".into(),
+                    name: "amb/exit1".into(),
+                    dx: -8.0,
+                    dy: 0.0,
+                    volume: 1.0,
+                    pitch: 1.5
+                },
+                SoundCmd::Stop { id: "exit".into() },
+            ]
+        );
+        // Taken means gone: the next take is empty.
+        assert!(p.take_sounds().is_empty());
+    }
+
+    #[test]
+    fn a_plugin_menu_is_a_tree_and_choosing_calls_back() {
+        let mut p = plugin_from(
+            r#"
+            chosen = nil
+            on_command("poi", function()
+              menu.open({ title = "Navigate", items = {
+                { label = "Stop", id = "stop" },
+                { label = "Keys", items = { { label = "Small key - north", id = "k1" } } },
+              } })
+            end)
+            function on_menu(id) chosen = id; say("chose " .. id) end
+            "#,
+        );
+        let ram = vec![0u8; WRAM_LEN];
+        p.command("poi", &ram);
+        let m = p.take_menu().expect("a menu was asked for");
+        assert_eq!(m.label, "Navigate");
+        assert_eq!(m.items.len(), 2);
+        assert_eq!(m.items[0].id.as_deref(), Some("stop"));
+        assert_eq!(m.items[1].items[0].label, "Small key - north");
+        assert!(p.take_menu().is_none(), "taken once");
+        let said = p.menu_chosen("k1", &ram);
+        assert_eq!(said[0].text, "chose k1");
+    }
+
+    #[test]
+    fn an_undrained_sound_queue_stays_bounded() {
+        let mut p = plugin_from(
+            r#"
+            function on_frame(frame)
+              for i = 1, 1000 do sound.ui("x") end
+            end
+            "#,
+        );
+        p.on_frame(&vec![0u8; WRAM_LEN], 0);
+        assert_eq!(p.take_sounds().len(), MAX_QUEUED_SOUNDS);
     }
 
     #[test]
