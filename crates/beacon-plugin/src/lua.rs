@@ -59,6 +59,8 @@ type Sounds = Rc<RefCell<Vec<SoundCmd>>>;
 type MenuRequest = Rc<RefCell<Option<MenuItem>>>;
 /// Buttons the plugin asked to have held, and for how many frames.
 type InputRequest = Rc<RefCell<Option<(u16, u32)>>>;
+/// The buttons the player is holding themselves, as the host last said.
+type PlayerButtons = Rc<std::cell::Cell<u16>>;
 
 /// The most sound commands kept between drains. A host that never drains them (the
 /// headless benchmark, a test) must not grow this without bound; past the cap the oldest
@@ -78,6 +80,7 @@ pub struct LuaPlugin {
     sounds: Sounds,
     menu: MenuRequest,
     input: InputRequest,
+    player: PlayerButtons,
 }
 
 impl LuaPlugin {
@@ -109,7 +112,8 @@ impl LuaPlugin {
         let menu: MenuRequest = Rc::new(RefCell::new(None));
         install_menu(&lua, &menu)?;
         let input: InputRequest = Rc::new(RefCell::new(None));
-        install_input(&lua, &input)?;
+        let player: PlayerButtons = Rc::new(std::cell::Cell::new(0));
+        install_input(&lua, &input, &player)?;
         crate::nav::install(&lua)?;
 
         // Modules first, in declared order, each its own chunk (its own local
@@ -142,6 +146,7 @@ impl LuaPlugin {
             sounds,
             menu,
             input,
+            player,
         })
     }
 
@@ -256,6 +261,10 @@ impl Plugin for LuaPlugin {
 
     fn take_input(&mut self) -> Option<(u16, u32)> {
         self.input.borrow_mut().take()
+    }
+
+    fn set_player_buttons(&mut self, mask: u16) {
+        self.player.set(mask);
     }
 
     fn menu_chosen(&mut self, id: &str, ram: &[u8]) -> Vec<Intent> {
@@ -751,7 +760,7 @@ fn install_menu(lua: &Lua, request: &MenuRequest) -> Result<(), Error> {
 /// `y`, `l`, `r`, `start`, `select` — and `frames` how long to hold them (default 1, at most
 /// 60). For acting on the player's behalf, such as turning to face a target; the host adds
 /// them to the player's own buttons rather than replacing them.
-fn install_input(lua: &Lua, request: &InputRequest) -> Result<(), Error> {
+fn install_input(lua: &Lua, request: &InputRequest, player: &PlayerButtons) -> Result<(), Error> {
     fn bit(name: &str) -> Option<u16> {
         Some(match name.to_ascii_lowercase().as_str() {
             "b" => 1 << 15,
@@ -790,6 +799,10 @@ fn install_input(lua: &Lua, request: &InputRequest) -> Result<(), Error> {
             Ok(())
         })?,
     )?;
+    // `input.player()`: the buttons the player is holding themselves, as a SNES mask (bsnes
+    // order: up 1 << 11, down 1 << 10, left 1 << 9, right 1 << 8). Not what the plugin holds.
+    let p = player.clone();
+    table.set("player", lua.create_function(move |_, ()| Ok(p.get()))?)?;
     lua.globals().set("input", table)?;
     Ok(())
 }

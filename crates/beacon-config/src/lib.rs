@@ -319,9 +319,8 @@ impl Default for Keymap {
         // plugin suggests its own commands' chords in its manifest.
         bind("Pad:Select+Start", "menu");
         bind("Pad:Select+Y", "command:scan");
-        bind("Pad:Select+Right", "command:where");
         bind("Pad:Select+Down", "command:status");
-        bind("Pad:Select+Left", "repeat_last");
+        // Select with left and right are the plugin's: travel to, and say, the next waypoint.
 
         // Gamepad defaults, on the pad's extra buttons so a controller-only
         // player can reach the essentials and the configuration without a

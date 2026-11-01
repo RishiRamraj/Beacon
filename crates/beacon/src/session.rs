@@ -328,6 +328,7 @@ impl Session {
 
         // Instrumentation runs here: between frames, against real memory.
         let frame = self.frames;
+        self.plugin.set_player_buttons(self.held_buttons);
         let plugin_started = std::time::Instant::now();
         let intents = match ram_of(&self.emu) {
             Some(ram) => self.plugin.on_frame(ram, frame),

@@ -7027,6 +7027,8 @@ fn alttp_the_guide_tone_is_high_only_toward_the_route() {
     // still pass.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // The carrot is the alternative guide now; waypoints are the default.
+    plugin.eval("GUIDE.mode = 'carrot'", &vec![0u8; 128 * 1024]).unwrap();
 
     // Open floor, Link at tile (32,40), and a goal ten tiles due east of him.
     let facing = |dir: u8| -> Vec<u8> {
@@ -7355,6 +7357,8 @@ fn alttp_the_route_is_followed_by_ear_toward_tobys_carrot() {
     // faces it — with Toby's "path found" and "destination reached" spoken.
     let r = Registry::builtin();
     let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // The carrot is the alternative guide now; waypoints are the default.
+    plugin.eval("GUIDE.mode = 'carrot'", &vec![0u8; 128 * 1024]).unwrap();
 
     let at = |tx: u16, dir: u8| -> Vec<u8> {
         let mut ram = dungeon_frame((tx, 40), (10, 10), &[]);
@@ -7745,4 +7749,64 @@ fn alttp_tobys_compass_and_turns() {
     assert_eq!(said(&mut p, "turn_left"), "Facing west.");
     assert_eq!(said(&mut p, "quickturn"), "Facing south.");
     assert_eq!(p.take_input(), Some((1 << 10, 1)), "down, for a frame");
+}
+
+
+#[test]
+fn alttp_the_waypoint_guide_sits_on_each_corner_and_chimes_on_reaching_it() {
+    // The default guide: the beacon sits ON the next corner, never between corners, so it
+    // follows the route round walls; reaching one chimes and says the next leg in words, which
+    // tells north from south where stereo cannot.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // A long wall with its gap well to the east: the route goes east first, then south.
+    let walls: Vec<(u16, u16)> = (0..=15).map(|x| (x, 13)).collect();
+    let ram = dungeon_frame((10, 10), (10, 18), &walls);
+    plugin.on_frame(&ram, 0);
+    plugin.command("pathfind", &ram);
+    let said: Vec<String> = plugin.on_frame(&ram, 1).into_iter().map(|i| i.text).collect();
+    let first = path_beacon(&mut plugin).expect("a beacon on the first waypoint");
+    assert!(first.dx > 0.0, "the first waypoint is east, round the wall: {first:?}");
+    assert!(
+        said.iter().any(|t| t.contains("east") && t.contains("tile")),
+        "the first leg is said: {said:?}"
+    );
+
+    // Period says it again.
+    let again: Vec<String> = plugin.command("waypoint", &ram).into_iter().map(|i| i.text).collect();
+    assert!(again.iter().any(|t| t.contains("east")), "{again:?}");
+
+    // Comma walks there: right is held.
+    plugin.command("travel", &ram);
+    plugin.on_frame(&ram, 2);
+    let (mask, _) = plugin.take_input().expect("travel holds the d-pad");
+    assert!(mask & (1 << 8) != 0, "toward the east waypoint: {mask:#x}");
+    // The player pressing a direction takes over: travel lets go.
+    plugin.set_player_buttons(1 << 11);
+    plugin.on_frame(&ram, 3);
+    assert_eq!(plugin.take_input(), None, "nothing held once the player takes over");
+
+    // Standing on the corner: the chime, and the next leg, south.
+    let w = plugin
+        .eval("return GUIDE.target.tx .. ',' .. GUIDE.target.ty", &ram)
+        .unwrap();
+    let (tx, ty): (u16, u16) = {
+        let mut it = w.split(',').map(|v| v.parse::<u16>().unwrap());
+        (it.next().unwrap(), it.next().unwrap())
+    };
+    // Put his feet on that tile (feet are two rows below the top of his sprite, one column in).
+    let there = dungeon_frame((tx - 1, ty - 2), (10, 18), &walls);
+    plugin.set_player_buttons(0);
+    plugin.take_sounds();
+    let mut said = Vec::new();
+    let mut heard = Vec::new();
+    for f in 10..14 {
+        said.extend(plugin.on_frame(&there, f).into_iter().map(|i| i.text));
+        heard.extend(played(&mut plugin));
+    }
+    assert!(
+        heard.iter().any(|(n, _, _)| n == "pathfinder/nodereached"),
+        "the pickup chime: {heard:?}"
+    );
+    assert!(said.iter().any(|t| t.contains("south")), "then the next leg, south: {said:?}");
 }

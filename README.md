@@ -103,8 +103,14 @@ the bottom row, A and S above them.
 
 - M: the navigation menu. It lists where you can go: your quest objective, your markers, and
   places you have found, such as unexplored areas, unopened chests, keys, pickups, exits and
-  stairs, and what is in this room. Each list starts with Stop navigation. Pick a place and a
-  beeping sound leads you there. Walk toward the beep. It changes when you are facing it.
+  stairs, and what is in this room. Each list starts with Stop navigation. Pick a place and
+  the guide leads you there one waypoint at a time: a beeping sound sits on the next corner,
+  door or staircase along the way, and gets louder as you get close. Walk toward it. The beep
+  changes when you are facing it. When you reach a waypoint you hear a chime, and Beacon says
+  the next one, for example: Door, north, 5 tiles.
+- Period: say the next waypoint again: what it is, which way, and how far.
+- Comma: walk to the next waypoint for you. It stops at the waypoint, when you press an arrow
+  key yourself, when an enemy gets close, or if the way is blocked.
 - L: turn the quest guide on or off. It leads you to the next step of the story.
 - Y: stop guiding.
 - V: scan. Says what is around you, how far, and in which direction.
@@ -112,6 +118,8 @@ the bottom row, A and S above them.
 - Apostrophe: turn the wall sounds on or off. When on, a wind sound tells you how far the
   walls are in each direction.
 - Backtick, the key left of 1: show or hide the map.
+- In the navigation menu, Guide style switches between waypoints and the carrot: a single
+  sound that rides a few steps ahead of you along the route, as in the Toby Doom mod.
 
 #### Which way you are facing
 
@@ -172,8 +180,8 @@ still sends Select to the game.
 - Select and R: face the nearest enemy.
 - Select and up: say which way you are facing.
 - Select and down: health.
-- Select and left: repeat the last thing said.
-- Select and right: where am I.
+- Select and left: walk to the next waypoint.
+- Select and right: say the next waypoint.
 
 In menus on the controller, up and down move, A chooses, B goes back, and Start closes.
 

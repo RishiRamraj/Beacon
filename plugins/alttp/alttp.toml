@@ -155,3 +155,19 @@ key   = "KeyK"                       # Toby's key checker
 id    = "item"
 label = "Say the item in hand"
 key   = "KeyI"                       # Toby's inventory item check
+
+[[command]]
+id    = "waypoint"
+label = "Say the next waypoint"
+key   = "Period"
+pad   = "Pad:Select+Right"
+
+[[command]]
+id    = "travel"
+label = "Walk to the next waypoint"
+key   = "Comma"                      # Diablo Access's travel key, beside period
+pad   = "Pad:Select+Left"
+
+[[command]]
+id    = "guide_style"
+label = "Switch the guide between waypoints and the carrot"

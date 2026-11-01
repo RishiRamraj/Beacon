@@ -2067,15 +2067,21 @@ CARROT = {
 
 -- Places the carrot along the offset (dx, dy) toward the point being steered for, no further
 -- than the leash, and beeps it when due.
-function CARROT.place(s, dx, dy, duck)
+--
+-- `exact` places it on the point itself, with no leash, louder the nearer it is: the waypoint
+-- guide, where the sound sits on the next corner rather than riding ahead toward it.
+function CARROT.place(s, dx, dy, duck, exact)
   local d = math.sqrt(dx * dx + dy * dy)
-  if d > CARROT.LEASH then
+  if not exact and d > CARROT.LEASH then
     dx, dy = dx * CARROT.LEASH / d, dy * CARROT.LEASH / d
   end
   -- Facing it is the same judgement the old guide tone made with its high note: Link faces
   -- one of four ways, so "toward" is the dominant axis of the offset.
   local fast = path_tone(s.direction, dx, dy) == PATH_TONE.ahead
   local volume = duck and CARROT.VOLUME * CARROT.DUCK or CARROT.VOLUME
+  if exact then
+    volume = volume * (0.45 + 0.55 * (1 - math.min(d, GUIDE.NEAR) / GUIDE.NEAR))
+  end
   if not CARROT.journey then
     CARROT.journey = true
     if CARROT.chosen then say("Path found.", { priority = "navigation", category = "route" }) end
@@ -2120,6 +2126,7 @@ function CARROT.clear()
   CARROT.timer = 0
   CARROT.last_fast, CARROT.side = nil, nil
   CARROT.corner = nil
+  GUIDE.target = nil
 end
 
 -- Ends the journey: the next route is a new one, announced with "path found".
@@ -2165,6 +2172,90 @@ local function aim_face_beacon(s, dir, duck)
   local d = DIRS[dir]
   if d == nil then CARROT.clear(); return end
   CARROT.place(s, d.dx * 16, d.dy * 16, duck)
+end
+
+-- ── The waypoint guide ──────────────────────────────────────────────────────
+-- The carrot rides a leash ahead toward the next corner, and once Link nears a corner it is
+-- already pulling toward the one after — a straight line that can cut across the inside of
+-- the corner, through a wall or past the doorway the route uses. In stereo, with north always
+-- in front, a sound dead ahead and one dead behind are also the same sound. Players found both
+-- hard to follow.
+--
+-- So, by default, the route is a chain of waypoints, as World of Warcraft and Diablo Access
+-- lay one out: the beacon sits ON the next corner, doorway or stairs, never between them, and
+-- grows louder as Link nears it. Reaching one is Toby's "node reached" chime, then the next leg
+-- in words — "Door, north, 5 tiles" — which says what stereo cannot. Period says the leg again;
+-- comma walks Link there. The carrot stays, as a choice (the guide_style command, or the menu).
+GUIDE = {
+  mode = "waypoints",  -- "waypoints" or "carrot"
+  MERGE = 16,          -- px: corners this close together are one waypoint, not two chimes
+  NEAR = 160,          -- px over which a waypoint's beacon grows louder as Link closes on it
+  target = nil,        -- the waypoint being led to: { x, y, tx, ty, label }; global for tests
+}
+
+-- The waypoint for a route at index `wp`: that corner, or the one after it when the two are
+-- only a jog apart AND the straight way from Link to the later one is clear. A short corner
+-- that takes the route round the end of a wall is the one that matters most, so it is never
+-- skipped for a line through the wall.
+function GUIDE.pick(s, path, wp, fx, fy)
+  local i = wp
+  while path[i] ~= nil and path[i + 1] ~= nil do
+    local a, b = path[i], path[i + 1]
+    if (math.abs(a[1] - b[1]) + math.abs(a[2] - b[2])) * 8 > GUIDE.MERGE then break end
+    if not GUIDE.clear_line(s, fx, fy, b[1] * 8 + 4, b[2] * 8 + 4) then break end
+    i = i + 1
+  end
+  return path[i], i
+end
+
+-- Whether every tile on the straight line between two world points can be walked.
+function GUIDE.clear_line(s, x0, y0, x1, y1)
+  local n = math.max(1, (math.abs(x1 - x0) + math.abs(y1 - y0)) // 4)
+  for k = 0, n do
+    local x = x0 + (x1 - x0) * k // n
+    local y = y0 + (y1 - y0) * k // n
+    if not tile_passable(s, x >> 3, y >> 3) then return false end
+  end
+  return true
+end
+
+-- Says the leg to waypoint `t`: what it is, which way, how far.
+function GUIDE.say_leg(s, t)
+  local fx, fy = foot(s)
+  local dx, dy = t.x - fx, t.y - fy
+  local tiles = math.max(1, (math.abs(dx) + math.abs(dy) + 8) // 16)
+  say(string.format("%s, %s, %d %s.", t.label, direction(dx, dy), tiles, tiles == 1 and "tile" or "tiles"),
+    { priority = "navigation", category = "waypoint" })
+end
+
+-- Notes the follower's progress; the carrot counts its corners here, the waypoint guide in aim.
+function GUIDE.node(path, wp, x, y)
+  if GUIDE.mode == "carrot" then CARROT.node(path, wp, x, y) end
+end
+
+-- Leads toward the route `path` at waypoint `wp`, in whichever style is chosen.
+function GUIDE.aim(s, path, wp, fx, fy, duck)
+  local w, i = GUIDE.pick(s, path, wp, fx, fy)
+  if w == nil then return end
+  local t = { x = w[1] * 8 + 4, y = w[2] * 8 + 4, tx = w[1], ty = w[2] }
+  t.label = GUIDE.label(s, w[1], w[2], i >= #path)
+  local was = GUIDE.target
+  local moved = was == nil or was.tx ~= t.tx or was.ty ~= t.ty
+  GUIDE.target = t
+  if GUIDE.mode == "carrot" then
+    aim_path_beacon(s, route_aim(path, wp, fx, fy), duck)
+    return
+  end
+  if moved then
+    if was ~= nil and math.abs(was.x - fx) + math.abs(was.y - fy) <= CARROT.AT_CORNER then
+      -- Picked up: the chime, then where the next one is.
+      sound.ui("pathfinder/nodereached")
+      GUIDE.say_leg(s, t)
+    elseif was == nil then
+      GUIDE.say_leg(s, t) -- the first leg of a route
+    end
+  end
+  CARROT.place(s, t.x - fx, t.y - fy, duck, true)
 end
 
 local function area_id(s)
@@ -2356,7 +2447,7 @@ local function pathfind_update(s)
   local path = pathfind_path
   local fx, fy = foot(s)
   pathfind_wp = route_advance(path, pathfind_wp, fx, fy)
-  CARROT.node(path, pathfind_wp, fx, fy)
+  GUIDE.node(path, pathfind_wp, fx, fy)
   if pathfind_wp > #path then
     -- On the spot. If the errand also needs him pointed a particular way, that is the
     -- rest of arriving: say what to do and which way once, then keep the guide sounding
@@ -2384,7 +2475,7 @@ local function pathfind_update(s)
 
   -- Duck the guide while an enemy is engaged, so the threat tone reads clearly over
   -- it, but keep guiding — full volume returns once the enemy backs off.
-  aim_path_beacon(s, route_aim(path, pathfind_wp, fx, fy), combat_engaged)
+  GUIDE.aim(s, path, pathfind_wp, fx, fy, combat_engaged)
 end
 
 -- Tile-attribute classes, named like the collision sets (IMPASSABLE, COLLIDE_*),
@@ -2400,6 +2491,19 @@ do
   CHEST_TILES[0x63] = true                                -- minigame chest
   for a in pairs(STAIR_UP) do ENTRANCE_TILES[a] = true end
   for a in pairs(STAIR_DOWN) do ENTRANCE_TILES[a] = true end
+end
+
+-- What a waypoint is, by the tile it sits on, so the leg can name it: a door, stairs, an exit.
+-- After DOOR_TILES, which it needs; GUIDE itself is defined earlier, with the followers.
+function GUIDE.label(s, tx, ty, last)
+  local a = tile_attr_at(s, tx * 8 + 4, ty * 8 + 4)
+  if a ~= nil then
+    if DOOR_TILES[a] then return "Door" end
+    if STAIR_UP[a] then return "Stairs up" end
+    if STAIR_DOWN[a] then return "Stairs down" end
+    if ENTRANCE_TILES[a] then return "Exit" end
+  end
+  return last and "Destination" or "Waypoint"
 end
 
 -- The nearest door / passage tile in the current 64x64 window, as world pixel
@@ -2862,12 +2966,12 @@ local function ow_route_update(s)
   local path = ow_route_path
   if path == nil then CARROT.clear(); return end
   ow_route_wp = route_advance(path, ow_route_wp, fx, fy)
-  CARROT.node(path, ow_route_wp, fx, fy)
+  GUIDE.node(path, ow_route_wp, fx, fy)
   if ow_route_wp > #path then
     ow_route_stop(); CARROT.arrive(); return
   end
   -- duck the guide in a fight
-  aim_path_beacon(s, route_aim(path, ow_route_wp, fx, fy), combat_engaged)
+  GUIDE.aim(s, path, ow_route_wp, fx, fy, combat_engaged)
 end
 
 -- The opening context navigation auto-starts in: Link up and controllable in his
@@ -3571,6 +3675,7 @@ function on_frame(frame)
   -- Route guidance runs last, so its beacon coexists with the object beacons.
   ow_route_update(now)
   pathfind_update(now)
+  TRAVEL.update(now)
 end
 
 -- "Where am I?"
@@ -6552,6 +6657,7 @@ function POI.open(s)
   end
   items[#items + 1] = { label = nav_active and "Quest objective, guiding" or "Quest objective", id = "objective" }
   items[#items + 1] = { label = "Markers", items = POI.markers(s) }
+  items[#items + 1] = { label = "Guide style: " .. GUIDE.mode, id = "guide_style" }
   items[#items + 1] = { label = "Exploration", items = {
     { label = "Unexplored", items = POI.list(s, cands, "unexplored") },
     { label = "Unopened", items = POI.list(s, cands, "unopened") },
@@ -6665,6 +6771,73 @@ on_command("item", function()
   TURN.say(name and (name .. ".") or "No item.")
 end)
 
+-- ── Travel: walk to the next waypoint (Diablo Access) ────────────────────────
+-- Comma walks Link to the waypoint being led to, and stops there with its chime. It stops
+-- early, and says why, if an enemy comes close or Link is blocked; silently if the player
+-- presses a direction, which is the player taking over. Walking is holding the d-pad for him,
+-- a couple of frames at a time, toward the waypoint, correcting sideways when he has drifted
+-- off its line.
+TRAVEL = { active = false, frames = 0, still = 0, MAX = 900, STUCK = 24, ALIGN = 4 }
+
+function TRAVEL.stop(why)
+  TRAVEL.active = false
+  if why then say(why, { priority = "navigation", category = "on-demand" }) end
+end
+
+function TRAVEL.update(s)
+  if not TRAVEL.active then return end
+  if not in_play(s) then TRAVEL.stop(); return end
+  -- The player's own d-pad (up, down, left, right): they have taken over.
+  if (input.player() & 0x0F00) ~= 0 then TRAVEL.stop(); return end
+  if combat_engaged then TRAVEL.stop("Enemy near."); return end
+  local t = GUIDE.target
+  if t == nil or t.tx ~= TRAVEL.tx or t.ty ~= TRAVEL.ty then
+    TRAVEL.stop() -- arrived: the guide has moved on to the next one, and chimed
+    return
+  end
+  TRAVEL.frames = TRAVEL.frames + 1
+  if TRAVEL.frames > TRAVEL.MAX then TRAVEL.stop("Travel stopped."); return end
+  if s.x == TRAVEL.x and s.y == TRAVEL.y then TRAVEL.still = TRAVEL.still + 1 else TRAVEL.still = 0 end
+  TRAVEL.x, TRAVEL.y = s.x, s.y
+  if TRAVEL.still > TRAVEL.STUCK then TRAVEL.stop("Blocked."); return end
+  local fx, fy = foot(s)
+  local dx, dy = t.x - fx, t.y - fy
+  local held = {}
+  local function along(d, neg, pos) if d < 0 then held[#held + 1] = neg elseif d > 0 then held[#held + 1] = pos end end
+  if math.abs(dx) >= math.abs(dy) then
+    along(dx, "left", "right")
+    if math.abs(dy) > TRAVEL.ALIGN then along(dy, "up", "down") end
+  else
+    along(dy, "up", "down")
+    if math.abs(dx) > TRAVEL.ALIGN then along(dx, "left", "right") end
+  end
+  if #held > 0 then input.hold(held, 2) end
+end
+
+on_command("travel", function()
+  local s = prev
+  if s == nil or not in_play(s) then say("Not in play.", { priority = "navigation", category = "on-demand" }); return end
+  local t = GUIDE.target
+  if t == nil then say("No waypoint.", { priority = "navigation", category = "on-demand" }); return end
+  TRAVEL.active, TRAVEL.frames, TRAVEL.still = true, 0, 0
+  TRAVEL.tx, TRAVEL.ty, TRAVEL.x, TRAVEL.y = t.tx, t.ty, nil, nil
+  GUIDE.say_leg(s, t)
+end)
+
+on_command("waypoint", function()
+  local s = prev
+  if s == nil or not in_play(s) then say("Not in play.", { priority = "navigation", category = "on-demand" }); return end
+  if GUIDE.target == nil then say("No waypoint.", { priority = "navigation", category = "on-demand" }); return end
+  GUIDE.say_leg(s, GUIDE.target)
+end)
+
+on_command("guide_style", function()
+  GUIDE.mode = GUIDE.mode == "waypoints" and "carrot" or "waypoints"
+  GUIDE.target = nil
+  say(GUIDE.mode == "waypoints" and "Guide: waypoints." or "Guide: carrot.",
+    { priority = "navigation", category = "on-demand" })
+end)
+
 on_command("proximity", function()
   WORLD.wind = not WORLD.wind
   say(WORLD.wind and "Proximity sound on." or "Proximity sound off.",
@@ -6690,6 +6863,13 @@ function on_menu(id)
   end
   if s == nil or not in_play(s) then
     say("Not in play.", { priority = "navigation", category = "on-demand" })
+    return
+  end
+  if id == "guide_style" then
+    GUIDE.mode = GUIDE.mode == "waypoints" and "carrot" or "waypoints"
+    GUIDE.target = nil
+    say(GUIDE.mode == "waypoints" and "Guide: waypoints." or "Guide: carrot.",
+      { priority = "navigation", category = "on-demand" })
     return
   end
   if id == "objective" then

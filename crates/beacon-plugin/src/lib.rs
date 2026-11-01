@@ -130,6 +130,12 @@ pub trait Plugin {
     fn take_input(&mut self) -> Option<(u16, u32)> {
         None
     }
+
+    /// Tells the plugin which SNES buttons the player is holding themselves, before a frame.
+    /// The game's own joypad register cannot say, once the plugin is holding buttons for them
+    /// (`take_input`): this is how a plugin acting on the player's behalf knows to stop the
+    /// moment the player takes over.
+    fn set_player_buttons(&mut self, _mask: u16) {}
 }
 
 /// One line of a plugin's menu: something to choose (it has an `id`), or a submenu (it has
