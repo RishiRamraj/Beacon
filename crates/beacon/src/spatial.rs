@@ -469,7 +469,7 @@ mod tests {
         one.set_behind_semitones(1.0);
         assert!((one.rate_for(0.0, 10.0, true) - 0.944).abs() < 0.001, "adjustable: one semitone");
         let side = h.rate_for(10.0, 0.0, true);
-        assert!(side < 1.0 && side > 0.944, "the sides are between: {side}");
+        assert!((side - 0.891).abs() < 0.001, "the sides are two semitones down: {side}");
         assert_eq!(h.rate_for(0.0, 10.0, false), 1.0, "an interface sound is never shifted");
         let st = Spatial::new(Mode::Stereo, 2, 48_000);
         assert!(st.rate_for(0.0, 10.0, true) < 1.0, "stereo needs it most");
