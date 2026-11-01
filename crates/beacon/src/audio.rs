@@ -41,6 +41,8 @@ pub struct Audio {
     /// 100 ms target with a `* 2` on the end — and every sound came a fifth of a second
     /// after the button that caused it.
     high_water: usize,
+    /// The device's channel count, which the mix is interleaved in.
+    channels: usize,
     /// Samples consumed per second: the device's rate times its channel count. What turns a
     /// queue depth into an amount of TIME, which is what the event loop needs to know in
     /// order to sleep rather than spin.
@@ -72,30 +74,21 @@ where
             };
             s.largest_request = s.largest_request.max(out.len() / channels.max(1));
 
+            // The mix is built in the device's own channel count (see `Audio::channels`), so
+            // each frame is taken as it is: stereo for a stereo device, all six for 5.1.
             for frame in out.chunks_mut(channels) {
-                // The emulator is stereo. Mono devices take the left channel; anything wider
-                // gets silence in the extra channels rather than a wrong-sounding upmix.
-                let l = s.queue.pop_front();
-                let r = if channels > 1 {
-                    s.queue.pop_front()
-                } else {
-                    None
-                };
-
-                match l {
-                    Some(l) => {
-                        frame[0] = T::from_sample(l);
-                        if channels > 1 {
-                            frame[1] = T::from_sample(r.unwrap_or(l));
-                        }
-                        for extra in frame.iter_mut().skip(2) {
-                            *extra = T::EQUILIBRIUM;
+                let mut short = false;
+                for slot in frame.iter_mut() {
+                    match s.queue.pop_front() {
+                        Some(x) => *slot = T::from_sample(x),
+                        None => {
+                            short = true;
+                            *slot = T::EQUILIBRIUM;
                         }
                     }
-                    None => {
-                        s.underruns += 1;
-                        frame.fill(T::EQUILIBRIUM);
-                    }
+                }
+                if short {
+                    s.underruns += 1;
                 }
             }
         },
@@ -214,8 +207,14 @@ impl Audio {
             sample_rate,
             high_water,
             samples_per_sec,
+            channels,
             _stream: stream,
         })
+    }
+
+    /// How many channels the device takes: the mix is built in this many (a 5.1 system is six).
+    pub fn channels(&self) -> usize {
+        self.channels.max(1)
     }
 
     /// The rate the device settled on. The emulator is created to match it.

@@ -1,21 +1,20 @@
-//! Spatial-audio beacons: turning positioned tones into stereo sound.
+//! Spatial-audio beacons: positioned tones, synthesised and placed around the player.
 //!
-//! A plugin places [`BeaconState`]s — a tone with a direction and a loudness.
-//! This mixer renders them as sine tones, panned left/right by direction and
-//! scaled by the plugin's volume, and adds them to the game audio. It is the
-//! simple, dependency-free first step of the design's spatial audio: constant-
-//! power stereo panning, not HRTF. Front and back cannot be told apart in stereo
-//! — that is what the spoken cue ("Enemy north") is for — and an HRTF renderer
-//! can slot in behind this same interface later.
+//! A plugin places [`BeaconState`]s — a tone with a direction and a loudness. This mixer
+//! renders each as a sine tone at the plugin's volume, with its tremolo or sonar ping, and hands
+//! it to [`Spatial`], which places it in stereo, on surround speakers, or for headphones, and
+//! adds it to the game audio.
 //!
-//! Each beacon keeps a continuous oscillator phase across frames, so a moving
-//! source glides rather than clicking. Sound is synthesised here, on the frame
-//! path, and mixed into the buffer the audio thread plays — never on the audio
+//! Each beacon keeps a continuous oscillator phase across frames, and the renderer glides its
+//! placement, so a moving source glides rather than clicking. Sound is synthesised here, on
+//! the frame path, and mixed into the buffer the audio thread plays — never on the audio
 //! thread itself.
 
 use std::collections::HashMap;
 
 use beacon_plugin::BeaconState;
+
+use crate::spatial::Spatial;
 
 /// The reference tone, an unobtrusive mid pitch. A beacon's `pitch` scales it.
 const BASE_FREQ: f32 = 330.0;
@@ -53,12 +52,13 @@ impl BeaconMixer {
         }
     }
 
-    /// Mixes the beacons into `out` (interleaved stereo), additively, then clamps
-    /// so the sum with the game audio cannot clip.
+    /// Mixes the beacons into `out` (interleaved in `spatial`'s channels), additively, then
+    /// clamps so the sum with the game audio cannot clip. Each beacon is placed by `spatial`.
     ///
     /// A beacon's own `volume` (0 to 1, the plugin's distance curve) is mapped
     /// into `[vol_min, vol_max]` — the player-set quietest and loudest levels — so
     /// the far end and the near end are independently adjustable.
+    #[allow(clippy::too_many_arguments)]
     pub fn mix(
         &mut self,
         beacons: &[BeaconState],
@@ -66,10 +66,12 @@ impl BeaconMixer {
         vol_min: f32,
         vol_max: f32,
         music_duck: f32,
+        spatial: &mut Spatial,
     ) {
         if beacons.is_empty() {
             self.phases.clear();
             self.trem_phases.clear();
+            spatial.retain(|k| !k.starts_with("b:"));
             return;
         }
 
@@ -86,32 +88,24 @@ impl BeaconMixer {
             .retain(|id, _| beacons.iter().any(|b| &b.id == id));
         self.trem_phases
             .retain(|id, _| beacons.iter().any(|b| &b.id == id));
+        spatial.retain(|k| {
+            !k.starts_with("b:") || beacons.iter().any(|b| k.strip_prefix("b:") == Some(&b.id))
+        });
 
-        let frames = out.len() / 2;
+        let frames = out.len() / spatial.channels();
+        let mut mono = vec![0.0f32; frames];
         for b in beacons {
-            let dist = (b.dx * b.dx + b.dy * b.dy).sqrt();
-            // Pan from the left/right ratio; scale-independent, so the host needs
-            // no notion of a game's units.
-            let pan = if dist > 0.0 {
-                (b.dx / dist).clamp(-1.0, 1.0)
-            } else {
-                0.0
-            };
-            // Constant-power panning: equal energy at centre, all to one side at
-            // the extremes.
-            let angle = (pan + 1.0) * std::f32::consts::FRAC_PI_4;
-            let (left_gain, right_gain) = (angle.cos(), angle.sin());
             let amp = vol_min + (vol_max - vol_min) * b.volume.clamp(0.0, 1.0);
             let step = (BASE_FREQ * b.pitch) / self.sample_rate;
             // Tremolo advances its own phase per sample; 0 Hz leaves the tone
             // steady. The LFO rides in [1 - depth, 1] so it only ever ducks the
-            // amplitude, never boosts it past the panned/volume level above.
+            // amplitude, never boosts it past the volume level above.
             let tremolo = b.tremolo.max(0.0);
             let trem_step = tremolo / self.sample_rate;
 
             let mut phase = self.phases.get(&b.id).copied().unwrap_or(0.0);
             let mut trem_phase = self.trem_phases.get(&b.id).copied().unwrap_or(0.0);
-            for i in 0..frames {
+            for m in mono.iter_mut() {
                 let trem_gain = if tremolo <= 0.0 {
                     1.0
                 } else if b.ping {
@@ -124,9 +118,7 @@ impl BeaconMixer {
                     let lfo = (trem_phase * std::f32::consts::TAU).sin() * 0.5 + 0.5;
                     1.0 - TREMOLO_DEPTH + TREMOLO_DEPTH * lfo
                 };
-                let s = (phase * std::f32::consts::TAU).sin() * amp * trem_gain;
-                out[2 * i] += s * left_gain;
-                out[2 * i + 1] += s * right_gain;
+                *m = (phase * std::f32::consts::TAU).sin() * amp * trem_gain;
                 phase += step;
                 if phase >= 1.0 {
                     phase -= 1.0;
@@ -138,6 +130,8 @@ impl BeaconMixer {
             }
             self.phases.insert(b.id.clone(), phase);
             self.trem_phases.insert(b.id.clone(), trem_phase);
+            // Placed by the renderer: stereo, surround or headphones.
+            spatial.add(&format!("b:{}", b.id), &mono, b.dx, b.dy, true, out);
         }
 
         for s in out.iter_mut() {
@@ -177,7 +171,7 @@ mod tests {
     fn render(beacons: &[BeaconState], vol_max: f32) -> Vec<f32> {
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.0f32; 2 * 1024];
-        mixer.mix(beacons, &mut out, 0.0, vol_max, 1.0);
+        mixer.mix(beacons, &mut out, 0.0, vol_max, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         out
     }
 
@@ -219,7 +213,7 @@ mod tests {
         // volume_min lifts the floor.
         let mut mixer = BeaconMixer::new(48_000);
         let mut floored = vec![0.0f32; 2 * 256];
-        mixer.mix(&[beacon("e", 100.0, 0.0, 0.0)], &mut floored, 0.1, 0.5, 1.0);
+        mixer.mix(&[beacon("e", 100.0, 0.0, 0.0)], &mut floored, 0.1, 0.5, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         assert!(floored.iter().any(|&s| s != 0.0), "min level makes it audible");
     }
 
@@ -231,14 +225,14 @@ mod tests {
         // A silent beacon (volume 0) adds nothing, so the buffer shows the duck
         // alone: 1.0 game audio * 0.5 duck = 0.5.
         let mut out = vec![1.0f32; 2 * 8];
-        mixer.mix(&[beacon("e", 100.0, 0.0, 0.0)], &mut out, 0.0, 1.0, 0.5);
+        mixer.mix(&[beacon("e", 100.0, 0.0, 0.0)], &mut out, 0.0, 1.0, 0.5, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         assert!(
             out.iter().all(|&s| (s - 0.5).abs() < 1e-6),
             "game audio ducked to half: {out:?}"
         );
         // No beacon -> no ducking.
         let mut out = vec![1.0f32; 4];
-        mixer.mix(&[], &mut out, 0.0, 1.0, 0.5);
+        mixer.mix(&[], &mut out, 0.0, 1.0, 0.5, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         assert!(out.iter().all(|&s| s == 1.0), "untouched with no beacon");
     }
 
@@ -246,7 +240,7 @@ mod tests {
     fn no_beacons_leaves_the_buffer_untouched() {
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.25f32; 8];
-        mixer.mix(&[], &mut out, 0.0, 1.0, 1.0);
+        mixer.mix(&[], &mut out, 0.0, 1.0, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         assert!(out.iter().all(|&s| s == 0.25));
     }
 
@@ -255,7 +249,7 @@ mod tests {
         // Loud game audio already near the rails, plus a beacon.
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.95f32; 2 * 512];
-        mixer.mix(&[beacon("e", 100.0, 0.0, 1.0)], &mut out, 0.0, 1.0, 1.0);
+        mixer.mix(&[beacon("e", 100.0, 0.0, 1.0)], &mut out, 0.0, 1.0, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         assert!(out.iter().all(|&s| (-1.0..=1.0).contains(&s)));
     }
 
@@ -272,7 +266,7 @@ mod tests {
             b.tremolo = tremolo;
             let mut mixer = BeaconMixer::new(48_000);
             let mut out = vec![0.0f32; 2 * 4800]; // 100 ms; a 30 Hz LFO = 3 cycles
-            mixer.mix(std::slice::from_ref(&b), &mut out, 0.0, 1.0, 1.0);
+            mixer.mix(std::slice::from_ref(&b), &mut out, 0.0, 1.0, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
             let mono: Vec<f32> = out.chunks(2).map(|f| f[0]).collect();
             let mut lo = f32::MAX;
             let mut hi = 0.0f32;
@@ -308,7 +302,7 @@ mod tests {
         b.ping = true;
         let mut mixer = BeaconMixer::new(48_000);
         let mut out = vec![0.0f32; 2 * 4800]; // 100 ms -> exactly one ping cycle
-        mixer.mix(std::slice::from_ref(&b), &mut out, 0.0, 1.0, 1.0);
+        mixer.mix(std::slice::from_ref(&b), &mut out, 0.0, 1.0, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         let mono: Vec<f32> = out.chunks(2).map(|f| f[0]).collect();
         let mut rms: Vec<f32> = mono
             .chunks(window)
@@ -340,8 +334,8 @@ mod tests {
         let bs = [b];
         let mut a1 = vec![0.0f32; 2 * 64];
         let mut a2 = vec![0.0f32; 2 * 64];
-        mixer.mix(&bs, &mut a1, 0.0, 1.0, 1.0);
-        mixer.mix(&bs, &mut a2, 0.0, 1.0, 1.0);
+        mixer.mix(&bs, &mut a1, 0.0, 1.0, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
+        mixer.mix(&bs, &mut a2, 0.0, 1.0, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         // If the tremolo phase reset to 0 at the second call, the first sample of
         // a2 would use the same LFO value as the first sample of a1. Continuity
         // means the store advanced it; assert the mixer kept a tremolo phase.
@@ -361,8 +355,8 @@ mod tests {
         let b = [beacon("e", 0.0, 100.0, 1.0)];
         let mut a1 = vec![0.0f32; 2 * 64];
         let mut a2 = vec![0.0f32; 2 * 64];
-        mixer.mix(&b, &mut a1, 0.0, 1.0, 1.0);
-        mixer.mix(&b, &mut a2, 0.0, 1.0, 1.0);
+        mixer.mix(&b, &mut a1, 0.0, 1.0, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
+        mixer.mix(&b, &mut a2, 0.0, 1.0, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         // The step between the last sample of a1 and the first of a2 is no larger
         // than the largest step within a single buffer.
         let max_internal = a1

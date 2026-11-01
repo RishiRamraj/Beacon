@@ -50,6 +50,8 @@ pub struct Context {
     pub json_events: bool,
     pub muted: bool,
     pub map_shown: bool,
+    /// How positioned sounds are placed: auto, stereo, surround or headphones.
+    pub spatial: String,
 
     /// The loaded plugin's commands, as `(id, label)`.
     ///
@@ -255,6 +257,7 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
                 "speech.screen_reader",
             ),
             toggle("Spatial audio", ctx.beacons, "beacons.enabled"),
+            spatial_entry(&ctx.spatial),
             toggle("Braille", ctx.braille, "braille.enabled"),
             // Worth a menu entry rather than only a config file: drawing the picture is the
             // single largest cost in the program, and a player who cannot see it is paying it.
@@ -317,6 +320,21 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
             })
             .unwrap_or_default(),
     }
+}
+
+/// "Spatial sound: auto", and the act that moves it on to the next of the four.
+fn spatial_entry(current: &str) -> Entry {
+    const ORDER: [&str; 4] = ["auto", "stereo", "surround", "headphones"];
+    let at = ORDER.iter().position(|m| *m == current).unwrap_or(0);
+    let next = ORDER[(at + 1) % ORDER.len()];
+    Entry::act(
+        format!("Spatial sound: {}", ORDER[at]),
+        Act::SetSetting {
+            key: "audio.spatial",
+            value: next.to_string(),
+            said: format!("Spatial sound: {next}."),
+        },
+    )
 }
 
 /// "Speech: on", and the act that turns it off.
@@ -890,7 +908,7 @@ mod tests {
         menu.navigate(4); // Settings
         menu.choose(&ctx);
 
-        assert_eq!(menu.navigate(1), "Speech: on, 2 of 7.");
+        assert_eq!(menu.navigate(1), "Speech: on, 2 of 8.");
         assert_eq!(
             menu.choose(&ctx),
             Chosen::Act(Act::SetSetting {
@@ -903,9 +921,9 @@ mod tests {
 
         assert_eq!(
             menu.navigate(1),
-            "Announce through screen reader: off, 3 of 7."
+            "Announce through screen reader: off, 3 of 8."
         );
-        assert_eq!(menu.navigate(1), "Spatial audio: off, 4 of 7.");
+        assert_eq!(menu.navigate(1), "Spatial audio: off, 4 of 8.");
         assert_eq!(
             menu.choose(&ctx),
             Chosen::Act(Act::SetSetting {
@@ -927,7 +945,7 @@ mod tests {
         menu.navigate(4); // Settings
         menu.choose(&ctx);
         // The Settings entry carries the level in force, so it can be read without entering.
-        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 7, submenu.");
+        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 8, submenu.");
         menu.choose(&ctx); // into Verbosity
 
         assert_eq!(menu.announce(), "critical only, 1 of 4.");

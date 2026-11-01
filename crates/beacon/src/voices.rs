@@ -2,18 +2,15 @@
 //!
 //! The counterpart of [`crate::beacons`] for recorded sounds. A plugin issues
 //! [`SoundCmd`]s; this keeps the sounds they started — each a clip, a read position, a
-//! playback rate and a gain per channel — and mixes them, a frame's buffer at a time, into
-//! the interleaved stereo the game produced.
+//! playback rate, a volume and a place — and mixes them, a frame's buffer at a time, into the
+//! game's audio.
 //!
 //! # Placement
 //!
-//! North is front: the listener faces up the screen, always, so the soundscape does not spin
-//! each time Link turns, and it matches the map. In stereo only left and right can be heard,
-//! so placement is the beacons' constant-power pan from the offset's left/right ratio; front
-//! and back await the HRTF renderer, which slots in behind [`pan`].
-//!
-//! Loop gains glide to their new value across one buffer when the plugin moves a source, and
-//! a stopped loop fades out over one, so neither clicks.
+//! Each voice is rendered as a mono block and handed, with its offset from the player, to
+//! [`Spatial`], which places it in stereo, on surround speakers, or for headphones. North is
+//! front, always. A loop's volume glides to its new value across one buffer, and a stopped loop
+//! fades out over one, so neither clicks; the renderer glides its position the same way.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,24 +18,30 @@ use std::sync::Arc;
 use beacon_plugin::SoundCmd;
 
 use crate::soundbank::{Clip, SoundBank};
+use crate::spatial::Spatial;
 
 /// The most one-shots sounding at once. Past this the oldest is dropped: a cue that has been
 /// playing longest is the one the player has most likely already heard.
 const MAX_ONESHOTS: usize = 24;
 
 struct Voice {
+    /// Its name to the renderer, which keeps its gains (and head state) between buffers.
+    id: String,
     clip: Arc<Clip>,
     /// Read position in the clip, in samples; fractional so a pitch other than 1 resamples.
     pos: f64,
     rate: f64,
-    gains: (f32, f32),
+    volume: f32,
+    dx: f32,
+    dy: f32,
+    positional: bool,
 }
 
 struct Looping {
     name: String,
     voice: Voice,
-    /// Gains to glide to by the end of the next buffer.
-    target: (f32, f32),
+    /// Volume to glide to by the end of the next buffer.
+    target: f32,
     /// Fading out, to be removed once silent.
     stopping: bool,
 }
@@ -47,21 +50,10 @@ struct Looping {
 pub struct VoiceMixer {
     oneshots: Vec<Voice>,
     loops: HashMap<String, Looping>,
-}
-
-/// Left and right gains for a source at (`dx`, `dy`), at `volume`.
-///
-/// Constant-power: equal energy at centre, all to one side at the extremes. An interface
-/// sound (`positional` false), or one exactly at the listener, is centred.
-pub fn pan(dx: f32, dy: f32, volume: f32, positional: bool) -> (f32, f32) {
-    let dist = (dx * dx + dy * dy).sqrt();
-    let p = if positional && dist > 0.0 {
-        (dx / dist).clamp(-1.0, 1.0)
-    } else {
-        0.0
-    };
-    let angle = (p + 1.0) * std::f32::consts::FRAC_PI_4;
-    (angle.cos() * volume, angle.sin() * volume)
+    /// Numbers one-shots for the renderer.
+    next_id: u64,
+    /// A mono buffer, reused.
+    mono: Vec<f32>,
 }
 
 impl VoiceMixer {
@@ -82,11 +74,16 @@ impl VoiceMixer {
                 if self.oneshots.len() >= MAX_ONESHOTS {
                     self.oneshots.remove(0);
                 }
+                self.next_id += 1;
                 self.oneshots.push(Voice {
+                    id: format!("v:{}", self.next_id),
                     clip,
                     pos: 0.0,
                     rate: pitch as f64,
-                    gains: pan(dx, dy, volume * gain, positional),
+                    volume: volume * gain,
+                    dx,
+                    dy,
+                    positional,
                 });
             }
             SoundCmd::Loop {
@@ -100,24 +97,30 @@ impl VoiceMixer {
                 let Some((clip, gain)) = bank.get(&name) else {
                     return;
                 };
-                let target = pan(dx, dy, volume * gain, true);
+                let target = volume * gain;
                 match self.loops.get_mut(&id) {
                     Some(l) if l.name == name => {
                         l.target = target;
                         l.voice.rate = pitch as f64;
+                        l.voice.dx = dx;
+                        l.voice.dy = dy;
                         l.stopping = false;
                     }
                     _ => {
                         self.loops.insert(
-                            id,
+                            id.clone(),
                             Looping {
                                 name,
                                 // Starts silent and glides up, so a new loop fades in.
                                 voice: Voice {
+                                    id: format!("l:{id}"),
                                     clip,
                                     pos: 0.0,
                                     rate: pitch as f64,
-                                    gains: (0.0, 0.0),
+                                    volume: 0.0,
+                                    dx,
+                                    dy,
+                                    positional: true,
                                 },
                                 target,
                                 stopping: false,
@@ -129,7 +132,7 @@ impl VoiceMixer {
             SoundCmd::Stop { id } => {
                 if let Some(l) = self.loops.get_mut(&id) {
                     l.stopping = true;
-                    l.target = (0.0, 0.0);
+                    l.target = 0.0;
                 }
             }
         }
@@ -146,47 +149,57 @@ impl VoiceMixer {
         self.loops.clear();
     }
 
-    /// Adds every sounding voice into `out` (interleaved stereo) at `master` gain.
-    pub fn mix(&mut self, out: &mut [f32], master: f32) {
-        let frames = out.len() / 2;
+    /// Adds every sounding voice into `out` at `master` gain, placed by `spatial` (whose
+    /// channel count `out` is interleaved in).
+    pub fn mix(&mut self, out: &mut [f32], master: f32, spatial: &mut Spatial) {
+        let n = spatial.channels();
+        let frames = out.len() / n;
         if frames == 0 {
             return;
         }
+        let mut mono = std::mem::take(&mut self.mono);
 
         self.oneshots.retain_mut(|v| {
-            let g = (v.gains.0 * master, v.gains.1 * master);
-            render(v, out, frames, g, g, false)
+            let more = render(v, &mut mono, frames, v.volume * master, v.volume * master, false);
+            spatial.add(&v.id, &mono, v.dx, v.dy, v.positional, out);
+            more
         });
 
         self.loops.retain(|_, l| {
-            let from = (l.voice.gains.0 * master, l.voice.gains.1 * master);
-            let to = (l.target.0 * master, l.target.1 * master);
-            render(&mut l.voice, out, frames, from, to, true);
-            l.voice.gains = l.target;
-            !(l.stopping && l.target == (0.0, 0.0))
+            let (from, to) = (l.voice.volume * master, l.target * master);
+            render(&mut l.voice, &mut mono, frames, from, to, true);
+            spatial.add(&l.voice.id, &mono, l.voice.dx, l.voice.dy, true, out);
+            l.voice.volume = l.target;
+            !(l.stopping && l.target == 0.0)
         });
 
+        // The renderer forgets sources that have finished.
+        let live: std::collections::HashSet<String> = self
+            .oneshots
+            .iter()
+            .map(|v| v.id.clone())
+            .chain(self.loops.values().map(|l| l.voice.id.clone()))
+            .collect();
+        spatial.retain(|k| !(k.starts_with("v:") || k.starts_with("l:")) || live.contains(k));
+
+        self.mono = mono;
         for s in out.iter_mut() {
             *s = s.clamp(-1.0, 1.0);
         }
     }
 }
 
-/// Adds `frames` of `v` into `out`, gliding the gains from `from` to `to`. Returns whether the
-/// voice has more to play: a one-shot ends at its last sample; a loop wraps.
-fn render(
-    v: &mut Voice,
-    out: &mut [f32],
-    frames: usize,
-    from: (f32, f32),
-    to: (f32, f32),
-    looping: bool,
-) -> bool {
+/// Renders `frames` of `v` into `mono`, its volume gliding from `from` to `to`, silence past
+/// its end. Returns whether the voice has more to play: a one-shot ends at its last sample; a
+/// loop wraps.
+fn render(v: &mut Voice, mono: &mut Vec<f32>, frames: usize, from: f32, to: f32, looping: bool) -> bool {
+    mono.clear();
+    mono.resize(frames, 0.0);
     let len = v.clip.samples.len();
     if len == 0 {
         return false;
     }
-    for i in 0..frames {
+    for (i, m) in mono.iter_mut().enumerate() {
         if v.pos >= len as f64 {
             if looping {
                 v.pos %= len as f64;
@@ -204,10 +217,8 @@ fn render(
         } else {
             a
         };
-        let s = a + (b - a) * frac;
         let t = i as f32 / frames as f32;
-        out[2 * i] += s * (from.0 + (to.0 - from.0) * t);
-        out[2 * i + 1] += s * (from.1 + (to.1 - from.1) * t);
+        *m = (a + (b - a) * frac) * (from + (to - from) * t);
         v.pos += v.rate;
     }
     looping || v.pos < len as f64
@@ -239,7 +250,7 @@ mod tests {
         let mut m = VoiceMixer::default();
         m.apply(play(100.0, true), &mut bank);
         let mut out = vec![0.0; 2 * 1024];
-        m.mix(&mut out, 1.0);
+        m.mix(&mut out, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         let (l, r) = energy(&out);
         assert!(r > l * 5.0, "right {r} vs left {l}");
     }
@@ -250,7 +261,7 @@ mod tests {
         let mut m = VoiceMixer::default();
         m.apply(play(100.0, false), &mut bank);
         let mut out = vec![0.0; 2 * 1024];
-        m.mix(&mut out, 1.0);
+        m.mix(&mut out, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         let (l, r) = energy(&out);
         assert!((l - r).abs() < l * 0.01, "{l} vs {r}");
     }
@@ -273,13 +284,13 @@ mod tests {
         );
         // A second of audio: the 0.12 s one-shot is long finished, the loop is not.
         let mut out = vec![0.0; 2 * 48_000];
-        m.mix(&mut out, 1.0);
+        m.mix(&mut out, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         assert!(m.oneshots.is_empty());
         assert_eq!(m.loops.len(), 1);
 
         m.apply(SoundCmd::Stop { id: "x".into() }, &mut bank);
         let mut out = vec![0.0; 2 * 800];
-        m.mix(&mut out, 1.0);
+        m.mix(&mut out, 1.0, &mut Spatial::new(crate::spatial::Mode::Stereo, 2, 48_000));
         assert!(
             !m.active(),
             "a stopped loop fades out over one buffer and is gone"

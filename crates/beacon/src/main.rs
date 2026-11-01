@@ -17,6 +17,7 @@ mod native;
 mod rom;
 mod session;
 mod soundbank;
+mod spatial;
 mod state;
 mod synth;
 mod voices;

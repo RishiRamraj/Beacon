@@ -109,6 +109,10 @@ pub struct Session {
     sound_bank: SoundBank,
     /// The plugin's recorded sounds that are currently playing.
     voices: VoiceMixer,
+    /// Places every positioned sound: stereo, surround speakers, or headphones.
+    spatial: crate::spatial::Spatial,
+    /// The frame's mix, in the device's channels.
+    mix_buf: Vec<f32>,
     /// The map with the open menu drawn over it, recomposed whenever the menu changes.
     menu_overlay: Vec<u32>,
     /// Bumped each time the overlay is recomposed, so the window knows to redraw it: the game
@@ -185,6 +189,8 @@ impl Session {
         rom_id: Option<&str>,
     ) -> Self {
         let rate = audio.sample_rate();
+        let channels = audio.channels();
+        let spatial_setting = settings.audio.spatial.clone();
         let sounds_dir = settings.sounds.dir.clone();
         let mut session = Session {
             emu,
@@ -218,6 +224,8 @@ impl Session {
             beacon_mixer: BeaconMixer::new(rate),
             sound_bank: SoundBank::open(&sounds_dir, rate),
             voices: VoiceMixer::default(),
+            spatial: Self::spatial_for(&spatial_setting, channels, rate),
+            mix_buf: Vec::new(),
             slow_frame_log: std::env::var_os("BEACON_STATS").is_some(),
             plugin_menu: Vec::new(),
             plugin_hold: (0, 0),
@@ -295,10 +303,14 @@ impl Session {
         self.audio_scratch.clear();
         emu.drain_audio(&mut self.audio_scratch);
         if !self.audio_scratch.is_empty() {
+            // The game is stereo; the mix is in the device's channels — its front pair, or
+            // all six of a 5.1 system — with the placed sounds added on top.
+            let mut mix = std::mem::take(&mut self.mix_buf);
+            self.spatial.place_game(&self.audio_scratch, &mut mix);
             if self.muted {
                 // Silence game and beacons alike, but keep the sample count so the
                 // audio queue still paces emulation at normal speed.
-                self.audio_scratch.iter_mut().for_each(|s| *s = 0.0);
+                mix.iter_mut().for_each(|s| *s = 0.0);
                 self.voices.clear();
             } else if self.settings.beacons.enabled {
                 // Mix the plugin's spatial-audio beacons into the game audio before
@@ -307,23 +319,23 @@ impl Session {
                 let beacons = self.plugin.beacons();
                 self.beacon_mixer.mix(
                     &beacons,
-                    &mut self.audio_scratch,
+                    &mut mix,
                     self.settings.beacons.volume_min,
                     self.settings.beacons.volume_max,
                     self.settings.beacons.music_duck,
+                    &mut self.spatial,
                 );
                 // The beacons duck the music only when one is sounding; a recorded cue
                 // alone should cut through just the same.
                 if beacons.is_empty() && self.voices.active() {
                     let duck = self.settings.beacons.music_duck;
-                    self.audio_scratch.iter_mut().for_each(|s| *s *= duck);
+                    mix.iter_mut().for_each(|s| *s *= duck);
                 }
                 self.voices
-                    .mix(&mut self.audio_scratch, self.settings.sounds.volume);
+                    .mix(&mut mix, self.settings.sounds.volume, &mut self.spatial);
             }
-            let scratch = std::mem::take(&mut self.audio_scratch);
-            self.audio.submit(&scratch);
-            self.audio_scratch = scratch;
+            self.audio.submit(&mix);
+            self.mix_buf = mix;
         }
 
         // Instrumentation runs here: between frames, against real memory.
@@ -590,6 +602,14 @@ impl Session {
         self.audio.largest_request()
     }
 
+    /// The renderer for a setting on a device, said on stderr: whether surround or headphones
+    /// is in force is the first thing to know when sound is not where it should be.
+    fn spatial_for(setting: &str, channels: usize, rate: u32) -> crate::spatial::Spatial {
+        let mode = crate::spatial::Mode::resolve(setting, channels);
+        eprintln!("audio: {} sound, {channels} channel(s)", mode.name());
+        crate::spatial::Spatial::new(mode, channels, rate)
+    }
+
     /// Starts, moves and stops the sounds the plugin asked for since the last drain. They
     /// are heard from the next frame's audio, a sixtieth of a second on.
     fn drain_sounds(&mut self) {
@@ -805,6 +825,7 @@ impl Session {
             json_events: self.settings.speech.json_events,
             muted: self.muted,
             map_shown: self.show_map,
+            spatial: self.settings.audio.spatial.clone(),
             // Everything the plugin offers, so a command is reachable without knowing its key.
             commands: self
                 .plugin
@@ -1349,6 +1370,19 @@ impl Session {
         self.apply_video();
         self.audio
             .set_buffer(Duration::from_millis(self.settings.audio.buffer_ms.into()));
+        if key == "audio.spatial" {
+            self.spatial = Self::spatial_for(
+                &self.settings.audio.spatial,
+                self.audio.channels(),
+                self.audio.sample_rate(),
+            );
+            let mode = self.spatial.mode().name();
+            self.say_now(match mode {
+                "surround" => "Surround sound.",
+                "headphones" => "Headphone sound.",
+                _ => "Stereo sound.",
+            });
+        }
         if key == "sounds.dir" {
             // A different install is a different bank; what was playing came from the old one.
             self.voices.clear();

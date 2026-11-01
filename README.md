@@ -233,6 +233,20 @@ if you have the [Toby Accessibility Mod](https://www.moddb.com/mods/toby-doom-ac
 point `sounds.dir` at its folder (the unpacked mod, or its git checkout) and Beacon plays
 them. Without it, every cue has a synthesized stand-in in the same spirit.
 
+### Surround sound and headphones
+
+Every navigation and world sound is placed around you, with north always in front. How
+depends on `audio.spatial`, which is also *Spatial sound* in Beacon's Settings menu:
+
+- **auto**, the default: surround on a 5.1, 7.1 or four-speaker system, stereo otherwise.
+- **surround**: each sound comes from the speakers either side of it, so a sound to the south
+  comes from behind you. The game's own music stays on the front speakers.
+- **headphones**: a model of how a head hears, so that over ordinary headphones a sound can be
+  in front, behind or to the side, not just left or right. Sounds behind are duller. It is a
+  model, not measurements of real ears, so front and back are clearer on surround speakers.
+- **stereo**: left and right only. Front and back sound the same, which is why the waypoint
+  guide also says each leg out loud.
+
 ### Streaming with OBS
 
 Beacon works as an ordinary window for [OBS Studio](https://obsproject.com/), in a window or
@@ -376,6 +390,7 @@ music_duck = 0.5   # 0 to 1, how far game audio ducks under a beacon
 
 [audio]
 buffer_ms = 50     # 20 to 500, delay before game sound and tones are heard; raise if it crackles
+spatial = "auto"   # auto, stereo, surround or headphones: how sounds are placed around you
 
 [sounds]
 dir = ""           # your Toby Accessibility Mod folder, for its sounds; empty = Beacon's own

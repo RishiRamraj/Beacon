@@ -194,13 +194,20 @@ pub struct AudioSettings {
     /// too low and a slow frame starves the device, which clicks. Raise it if the audio
     /// crackles. Clamped to 20-500.
     pub buffer_ms: u32,
+    /// How positioned sounds are placed: `auto` (surround on a 5.1, 7.1 or quad device,
+    /// stereo otherwise), `stereo`, `surround`, or `headphones` (a head model that puts sounds
+    /// in front, behind and to the sides over ordinary headphones).
+    pub spatial: String,
 }
 
 impl Default for AudioSettings {
     fn default() -> Self {
         // Three frames. A frame costs well under half its 16.7 ms on modest hardware, so
         // this leaves room for a slow one without a delay a player can feel.
-        AudioSettings { buffer_ms: 50 }
+        AudioSettings {
+            buffer_ms: 50,
+            spatial: "auto".to_string(),
+        }
     }
 }
 
@@ -447,6 +454,7 @@ impl Settings {
             "beacons.volume_min",
             "beacons.music_duck",
             "audio.buffer_ms",
+            "audio.spatial",
             "sounds.dir",
             "sounds.volume",
         ]
@@ -474,6 +482,7 @@ impl Settings {
             "beacons.volume_min" => self.beacons.volume_min.to_string(),
             "beacons.music_duck" => self.beacons.music_duck.to_string(),
             "audio.buffer_ms" => self.audio.buffer_ms.to_string(),
+            "audio.spatial" => self.audio.spatial.clone(),
             "sounds.dir" => self.sounds.dir.clone(),
             "sounds.volume" => self.sounds.volume.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
@@ -528,6 +537,16 @@ impl Settings {
                 self.beacons.music_duck = parse::<f32>(key, value)?.clamp(0.0, 1.0)
             }
             "audio.buffer_ms" => self.audio.buffer_ms = parse::<u32>(key, value)?.clamp(20, 500),
+            "audio.spatial" => {
+                let v = value.trim().to_ascii_lowercase();
+                if !["auto", "stereo", "surround", "headphones"].contains(&v.as_str()) {
+                    return Err(Error::BadValue {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    });
+                }
+                self.audio.spatial = v
+            }
             "sounds.dir" => self.sounds.dir = value.to_string(),
             "sounds.volume" => self.sounds.volume = parse::<f32>(key, value)?.clamp(0.0, 1.0),
             other => return Err(Error::UnknownKey(other.to_string())),
