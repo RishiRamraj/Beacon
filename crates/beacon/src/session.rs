@@ -191,6 +191,7 @@ impl Session {
         let rate = audio.sample_rate();
         let channels = audio.channels();
         let spatial_setting = settings.audio.spatial.clone();
+        let behind = settings.audio.behind_semitones;
         let sounds_dir = settings.sounds.dir.clone();
         let mut session = Session {
             emu,
@@ -224,7 +225,7 @@ impl Session {
             beacon_mixer: BeaconMixer::new(rate),
             sound_bank: SoundBank::open(&sounds_dir, rate),
             voices: VoiceMixer::default(),
-            spatial: Self::spatial_for(&spatial_setting, channels, rate),
+            spatial: Self::spatial_for(&spatial_setting, channels, rate, behind),
             mix_buf: Vec::new(),
             slow_frame_log: std::env::var_os("BEACON_STATS").is_some(),
             plugin_menu: Vec::new(),
@@ -610,10 +611,12 @@ impl Session {
 
     /// The renderer for a setting on a device, said on stderr: whether surround or headphones
     /// is in force is the first thing to know when sound is not where it should be.
-    fn spatial_for(setting: &str, channels: usize, rate: u32) -> crate::spatial::Spatial {
+    fn spatial_for(setting: &str, channels: usize, rate: u32, behind: f32) -> crate::spatial::Spatial {
         let mode = crate::spatial::Mode::resolve(setting, channels);
         eprintln!("audio: {} sound, {channels} channel(s)", mode.name());
-        crate::spatial::Spatial::new(mode, channels, rate)
+        let mut spatial = crate::spatial::Spatial::new(mode, channels, rate);
+        spatial.set_behind_semitones(behind);
+        spatial
     }
 
     /// Starts, moves and stops the sounds the plugin asked for since the last drain. They
@@ -1381,6 +1384,7 @@ impl Session {
                 &self.settings.audio.spatial,
                 self.audio.channels(),
                 self.audio.sample_rate(),
+                self.settings.audio.behind_semitones,
             );
             let mode = self.spatial.mode().name();
             self.say_now(match mode {
@@ -1388,6 +1392,10 @@ impl Session {
                 "headphones" => "Headphone sound.",
                 _ => "Stereo sound.",
             });
+        }
+        if key == "audio.behind_semitones" {
+            self.spatial
+                .set_behind_semitones(self.settings.audio.behind_semitones);
         }
         if key == "sounds.dir" {
             // A different install is a different bank; what was playing came from the old one.

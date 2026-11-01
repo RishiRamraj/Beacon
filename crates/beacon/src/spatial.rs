@@ -164,10 +164,6 @@ impl Section {
     }
 }
 
-/// How much lower a sound directly behind is pitched, in stereo and on headphones: about a
-/// semitone (2^(-1/12) is 0.944).
-const BEHIND_DROP: f32 = 0.056;
-
 const HEAD_RADIUS: f32 = 0.0875; // metres
 const SPEED_OF_SOUND: f32 = 343.0; // metres per second
 const DELAY_LEN: usize = 64; // samples of history: more than the largest ear delay at 96 kHz
@@ -245,6 +241,8 @@ impl Head {
 /// The renderer: places mono sources into an interleaved buffer of `channels` channels.
 pub struct Spatial {
     mode: Mode,
+    /// How far below its own pitch a sound directly behind plays, as a rate: 2^(-semitones/12).
+    behind_rate: f32,
     channels: usize,
     rate: f32,
     /// Per source: the gains last used, so the next block glides from them.
@@ -256,6 +254,7 @@ impl Spatial {
     pub fn new(mode: Mode, channels: usize, rate: u32) -> Spatial {
         Spatial {
             mode,
+            behind_rate: 2f32.powf(-4.0 / 12.0),
             channels: channels.max(1),
             rate: rate as f32,
             gains: HashMap::new(),
@@ -267,12 +266,17 @@ impl Spatial {
         &self.mode
     }
 
+    /// How many semitones lower a sound directly behind plays (0 for none).
+    pub fn set_behind_semitones(&mut self, semitones: f32) {
+        self.behind_rate = 2f32.powf(-semitones.clamp(0.0, 12.0) / 12.0);
+    }
+
     /// The playback-rate multiplier for a source at (`dx`, `dy`): lower behind, in stereo and on
     /// headphones.
     ///
     /// Two ears can place a sound left or right, but in front or behind is the hard call — in
     /// stereo there is nothing to tell them apart at all, and the head model's cues are subtle.
-    /// So a sound behind is also pitched a little lower, a learnable earcon: up to a semitone
+    /// So a sound behind is also pitched lower, a learnable earcon: `audio.behind_semitones`
     /// directly behind, half that at the sides, nothing in front. Speakers behind the player
     /// need no such help, so surround leaves the pitch alone.
     pub fn rate_for(&self, dx: f32, dy: f32, positional: bool) -> f32 {
@@ -280,7 +284,8 @@ impl Spatial {
             return 1.0;
         }
         let behind = (1.0 - azimuth(dx, dy).cos()) / 2.0; // 0 in front, 0.5 at the sides, 1 behind
-        1.0 - BEHIND_DROP * behind
+        // In semitones, so the sides are half the interval, not half the rate.
+        self.behind_rate.powf(behind)
     }
 
     pub fn channels(&self) -> usize {
@@ -456,10 +461,13 @@ mod tests {
     }
 
     #[test]
-    fn behind_is_a_semitone_lower_on_headphones_and_in_stereo_but_not_on_speakers() {
+    fn behind_is_a_major_third_lower_on_headphones_and_in_stereo_but_not_on_speakers() {
         let h = Spatial::new(Mode::Headphones, 2, 48_000);
         assert_eq!(h.rate_for(0.0, -10.0, true), 1.0, "in front: as recorded");
-        assert!((h.rate_for(0.0, 10.0, true) - 0.944).abs() < 0.001, "behind: a semitone down");
+        assert!((h.rate_for(0.0, 10.0, true) - 0.794).abs() < 0.001, "behind: four semitones down");
+        let mut one = Spatial::new(Mode::Headphones, 2, 48_000);
+        one.set_behind_semitones(1.0);
+        assert!((one.rate_for(0.0, 10.0, true) - 0.944).abs() < 0.001, "adjustable: one semitone");
         let side = h.rate_for(10.0, 0.0, true);
         assert!(side < 1.0 && side > 0.944, "the sides are between: {side}");
         assert_eq!(h.rate_for(0.0, 10.0, false), 1.0, "an interface sound is never shifted");

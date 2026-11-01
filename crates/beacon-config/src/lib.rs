@@ -202,6 +202,9 @@ pub struct AudioSettings {
     /// screen reader as they are. Below 1 by default: at full volume the game drowned the
     /// screen reader out.
     pub game_volume: f32,
+    /// How many semitones lower a sound directly behind plays, on headphones and in stereo, so
+    /// front and back sound different; half that at the sides. 0 turns it off. Clamped 0-12.
+    pub behind_semitones: f32,
 }
 
 impl Default for AudioSettings {
@@ -212,6 +215,9 @@ impl Default for AudioSettings {
             buffer_ms: 50,
             spatial: "auto".to_string(),
             game_volume: 0.85,
+            // A major third: chosen by ear, in a listening test, over one semitone (too subtle)
+            // and seven (a different note rather than the same sound behind).
+            behind_semitones: 4.0,
         }
     }
 }
@@ -461,6 +467,7 @@ impl Settings {
             "audio.buffer_ms",
             "audio.spatial",
             "audio.game_volume",
+            "audio.behind_semitones",
             "sounds.dir",
             "sounds.volume",
         ]
@@ -490,6 +497,7 @@ impl Settings {
             "audio.buffer_ms" => self.audio.buffer_ms.to_string(),
             "audio.spatial" => self.audio.spatial.clone(),
             "audio.game_volume" => self.audio.game_volume.to_string(),
+            "audio.behind_semitones" => self.audio.behind_semitones.to_string(),
             "sounds.dir" => self.sounds.dir.clone(),
             "sounds.volume" => self.sounds.volume.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
@@ -544,6 +552,9 @@ impl Settings {
                 self.beacons.music_duck = parse::<f32>(key, value)?.clamp(0.0, 1.0)
             }
             "audio.buffer_ms" => self.audio.buffer_ms = parse::<u32>(key, value)?.clamp(20, 500),
+            "audio.behind_semitones" => {
+                self.audio.behind_semitones = parse::<f32>(key, value)?.clamp(0.0, 12.0)
+            }
             "audio.game_volume" => {
                 self.audio.game_volume = parse::<f32>(key, value)?.clamp(0.0, 1.0)
             }

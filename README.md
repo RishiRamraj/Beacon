@@ -244,8 +244,12 @@ depends on `audio.spatial`, which is also *Spatial sound* in Beacon's Settings m
 - **headphones**: a model of how a head hears, so that over ordinary headphones a sound can be
   in front, behind or to the side, not just left or right. Sounds behind are duller. It is a
   model, not measurements of real ears, so front and back are clearer on surround speakers.
-- **stereo**: left and right only. Front and back sound the same, which is why the waypoint
-  guide also says each leg out loud.
+- **stereo**: left and right only.
+
+On headphones and in stereo, a sound behind you also plays lower: four semitones lower
+directly behind, two at your sides, unchanged in front, so front and back are told apart by
+pitch as well as by ear. `audio.behind_semitones` changes the interval, or turns it off with 0.
+The waypoint guide also says each leg out loud.
 
 ### Streaming with OBS
 
@@ -392,6 +396,7 @@ music_duck = 0.5   # 0 to 1, how far game audio ducks under a beacon
 buffer_ms = 50     # 20 to 500, delay before game sound and tones are heard; raise if it crackles
 spatial = "auto"   # auto, stereo, surround or headphones: how sounds are placed around you
 game_volume = 0.85 # 0 to 1, the game's own sound and music; lower it if speech is drowned out
+behind_semitones = 4 # 0 to 12: how much lower a sound behind you plays, on headphones and stereo
 
 [sounds]
 dir = ""           # your Toby Accessibility Mod folder, for its sounds; empty = Beacon's own
