@@ -391,6 +391,7 @@ music_duck = 0.5   # 0 to 1, how far game audio ducks under a beacon
 [audio]
 buffer_ms = 50     # 20 to 500, delay before game sound and tones are heard; raise if it crackles
 spatial = "auto"   # auto, stereo, surround or headphones: how sounds are placed around you
+game_volume = 0.85 # 0 to 1, the game's own sound and music; lower it if speech is drowned out
 
 [sounds]
 dir = ""           # your Toby Accessibility Mod folder, for its sounds; empty = Beacon's own

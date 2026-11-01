@@ -164,6 +164,10 @@ impl Section {
     }
 }
 
+/// How much lower a sound directly behind is pitched, in stereo and on headphones: about a
+/// semitone (2^(-1/12) is 0.944).
+const BEHIND_DROP: f32 = 0.056;
+
 const HEAD_RADIUS: f32 = 0.0875; // metres
 const SPEED_OF_SOUND: f32 = 343.0; // metres per second
 const DELAY_LEN: usize = 64; // samples of history: more than the largest ear delay at 96 kHz
@@ -261,6 +265,22 @@ impl Spatial {
 
     pub fn mode(&self) -> &Mode {
         &self.mode
+    }
+
+    /// The playback-rate multiplier for a source at (`dx`, `dy`): lower behind, in stereo and on
+    /// headphones.
+    ///
+    /// Two ears can place a sound left or right, but in front or behind is the hard call — in
+    /// stereo there is nothing to tell them apart at all, and the head model's cues are subtle.
+    /// So a sound behind is also pitched a little lower, a learnable earcon: up to a semitone
+    /// directly behind, half that at the sides, nothing in front. Speakers behind the player
+    /// need no such help, so surround leaves the pitch alone.
+    pub fn rate_for(&self, dx: f32, dy: f32, positional: bool) -> f32 {
+        if matches!(self.mode, Mode::Surround(_)) || !positional || (dx == 0.0 && dy == 0.0) {
+            return 1.0;
+        }
+        let behind = (1.0 - azimuth(dx, dy).cos()) / 2.0; // 0 in front, 0.5 at the sides, 1 behind
+        1.0 - BEHIND_DROP * behind
     }
 
     pub fn channels(&self) -> usize {
@@ -433,6 +453,20 @@ mod tests {
         let ef = energy(&front, 2, 0) + energy(&front, 2, 1);
         let eb = energy(&back, 2, 0) + energy(&back, 2, 1);
         assert!(eb < 0.8 * ef, "behind is duller and quieter: back {eb} front {ef}");
+    }
+
+    #[test]
+    fn behind_is_a_semitone_lower_on_headphones_and_in_stereo_but_not_on_speakers() {
+        let h = Spatial::new(Mode::Headphones, 2, 48_000);
+        assert_eq!(h.rate_for(0.0, -10.0, true), 1.0, "in front: as recorded");
+        assert!((h.rate_for(0.0, 10.0, true) - 0.944).abs() < 0.001, "behind: a semitone down");
+        let side = h.rate_for(10.0, 0.0, true);
+        assert!(side < 1.0 && side > 0.944, "the sides are between: {side}");
+        assert_eq!(h.rate_for(0.0, 10.0, false), 1.0, "an interface sound is never shifted");
+        let st = Spatial::new(Mode::Stereo, 2, 48_000);
+        assert!(st.rate_for(0.0, 10.0, true) < 1.0, "stereo needs it most");
+        let sur = Spatial::new(Mode::Surround(layout(6).unwrap()), 6, 48_000);
+        assert_eq!(sur.rate_for(0.0, 10.0, true), 1.0, "speakers behind need no help");
     }
 
     #[test]

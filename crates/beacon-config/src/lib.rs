@@ -198,6 +198,10 @@ pub struct AudioSettings {
     /// stereo otherwise), `stereo`, `surround`, or `headphones` (a head model that puts sounds
     /// in front, behind and to the sides over ordinary headphones).
     pub spatial: String,
+    /// Loudness of the game's own sound and music, 0 to 1, leaving Beacon's sounds and the
+    /// screen reader as they are. Below 1 by default: at full volume the game drowned the
+    /// screen reader out.
+    pub game_volume: f32,
 }
 
 impl Default for AudioSettings {
@@ -207,6 +211,7 @@ impl Default for AudioSettings {
         AudioSettings {
             buffer_ms: 50,
             spatial: "auto".to_string(),
+            game_volume: 0.85,
         }
     }
 }
@@ -455,6 +460,7 @@ impl Settings {
             "beacons.music_duck",
             "audio.buffer_ms",
             "audio.spatial",
+            "audio.game_volume",
             "sounds.dir",
             "sounds.volume",
         ]
@@ -483,6 +489,7 @@ impl Settings {
             "beacons.music_duck" => self.beacons.music_duck.to_string(),
             "audio.buffer_ms" => self.audio.buffer_ms.to_string(),
             "audio.spatial" => self.audio.spatial.clone(),
+            "audio.game_volume" => self.audio.game_volume.to_string(),
             "sounds.dir" => self.sounds.dir.clone(),
             "sounds.volume" => self.sounds.volume.to_string(),
             other => return Err(Error::UnknownKey(other.to_string())),
@@ -537,6 +544,9 @@ impl Settings {
                 self.beacons.music_duck = parse::<f32>(key, value)?.clamp(0.0, 1.0)
             }
             "audio.buffer_ms" => self.audio.buffer_ms = parse::<u32>(key, value)?.clamp(20, 500),
+            "audio.game_volume" => {
+                self.audio.game_volume = parse::<f32>(key, value)?.clamp(0.0, 1.0)
+            }
             "audio.spatial" => {
                 let v = value.trim().to_ascii_lowercase();
                 if !["auto", "stereo", "surround", "headphones"].contains(&v.as_str()) {

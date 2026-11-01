@@ -307,6 +307,12 @@ impl Session {
             // all six of a 5.1 system — with the placed sounds added on top.
             let mut mix = std::mem::take(&mut self.mix_buf);
             self.spatial.place_game(&self.audio_scratch, &mut mix);
+            // The game a little under full, so the screen reader is not drowned out; Beacon's
+            // own sounds are added after, at their own levels.
+            let game_volume = self.settings.audio.game_volume;
+            if game_volume < 1.0 {
+                mix.iter_mut().for_each(|s| *s *= game_volume);
+            }
             if self.muted {
                 // Silence game and beacons alike, but keep the sample count so the
                 // audio queue still paces emulation at normal speed.

@@ -96,7 +96,8 @@ impl BeaconMixer {
         let mut mono = vec![0.0f32; frames];
         for b in beacons {
             let amp = vol_min + (vol_max - vol_min) * b.volume.clamp(0.0, 1.0);
-            let step = (BASE_FREQ * b.pitch) / self.sample_rate;
+            // The renderer's pitch cue: a little lower behind, on headphones and in stereo.
+            let step = (BASE_FREQ * b.pitch * spatial.rate_for(b.dx, b.dy, true)) / self.sample_rate;
             // Tremolo advances its own phase per sample; 0 Hz leaves the tone
             // steady. The LFO rides in [1 - depth, 1] so it only ever ducks the
             // amplitude, never boosts it past the volume level above.

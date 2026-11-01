@@ -160,14 +160,16 @@ impl VoiceMixer {
         let mut mono = std::mem::take(&mut self.mono);
 
         self.oneshots.retain_mut(|v| {
-            let more = render(v, &mut mono, frames, v.volume * master, v.volume * master, false);
+            let shift = spatial.rate_for(v.dx, v.dy, v.positional);
+            let more = render(v, &mut mono, frames, v.volume * master, v.volume * master, false, shift);
             spatial.add(&v.id, &mono, v.dx, v.dy, v.positional, out);
             more
         });
 
         self.loops.retain(|_, l| {
             let (from, to) = (l.voice.volume * master, l.target * master);
-            render(&mut l.voice, &mut mono, frames, from, to, true);
+            let shift = spatial.rate_for(l.voice.dx, l.voice.dy, true);
+            render(&mut l.voice, &mut mono, frames, from, to, true, shift);
             spatial.add(&l.voice.id, &mono, l.voice.dx, l.voice.dy, true, out);
             l.voice.volume = l.target;
             !(l.stopping && l.target == 0.0)
@@ -189,10 +191,18 @@ impl VoiceMixer {
     }
 }
 
-/// Renders `frames` of `v` into `mono`, its volume gliding from `from` to `to`, silence past
-/// its end. Returns whether the voice has more to play: a one-shot ends at its last sample; a
-/// loop wraps.
-fn render(v: &mut Voice, mono: &mut Vec<f32>, frames: usize, from: f32, to: f32, looping: bool) -> bool {
+/// Renders `frames` of `v` into `mono`, its volume gliding from `from` to `to`, its rate times
+/// `shift` (the renderer's pitch cue for where it is), silence past its end. Returns whether the
+/// voice has more to play: a one-shot ends at its last sample; a loop wraps.
+fn render(
+    v: &mut Voice,
+    mono: &mut Vec<f32>,
+    frames: usize,
+    from: f32,
+    to: f32,
+    looping: bool,
+    shift: f32,
+) -> bool {
     mono.clear();
     mono.resize(frames, 0.0);
     let len = v.clip.samples.len();
@@ -219,7 +229,7 @@ fn render(v: &mut Voice, mono: &mut Vec<f32>, frames: usize, from: f32, to: f32,
         };
         let t = i as f32 / frames as f32;
         *m = (a + (b - a) * frac) * (from + (to - from) * t);
-        v.pos += v.rate;
+        v.pos += v.rate * shift as f64;
     }
     looping || v.pos < len as f64
 }
