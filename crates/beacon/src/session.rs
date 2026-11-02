@@ -831,6 +831,7 @@ impl Session {
             beacons: self.settings.beacons.enabled,
             braille: self.settings.braille.enabled,
             video: self.settings.video.enabled,
+            fullscreen: self.settings.video.fullscreen,
             json_events: self.settings.speech.json_events,
             muted: self.muted,
             map_shown: self.show_map,

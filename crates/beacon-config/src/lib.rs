@@ -30,6 +30,9 @@ pub struct Settings {
     pub beacons: Beacons,
     pub audio: AudioSettings,
     pub sounds: Sounds,
+    /// A file without an `[input]` table predates numbered key layouts, so it reads as the
+    /// oldest one rather than the current.
+    #[serde(default = "InputSettings::unnumbered")]
     pub input: InputSettings,
     pub video: Video,
     /// Key bindings. Serialized as `[keys]`; the field is `keymap` to avoid
@@ -222,15 +225,78 @@ impl Default for AudioSettings {
     }
 }
 
-/// Controllers.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// Controllers, and which generation of the default keys the saved keymap was made under.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InputSettings {
     /// SDL game controller mapping lines, one per line, for a pad the built-in database does
     /// not know or maps wrongly — the format SDL's own tools and the community database use.
     /// Read at start-up. Empty, the default, uses the database alone.
     pub pad_mappings: String,
+    /// The default key layout the saved keymap dates from. Absent from a file written before
+    /// layouts were numbered, which reads as 0; a fresh install starts on the current one.
+    /// See [`Keymap::retire_old_defaults`].
+    #[serde(default)]
+    pub layout: u32,
 }
+
+impl InputSettings {
+    fn unnumbered() -> Self {
+        InputSettings {
+            layout: 0,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for InputSettings {
+    fn default() -> Self {
+        InputSettings {
+            pad_mappings: String::new(),
+            layout: KEY_LAYOUT,
+        }
+    }
+}
+
+/// The current generation of the default keys. Raise it whenever a default binding moves, and
+/// add the old pairs to [`RETIRED_DEFAULTS`].
+pub const KEY_LAYOUT: u32 = 1;
+
+/// Every default binding an earlier release had and this one does not, host and ALttP plugin
+/// alike: computed from the git history of the defaults and the plugin manifest.
+///
+/// The whole keymap is saved, defaults included, so without this a player who ran an older
+/// build keeps its keys for good, and a key whose meaning changed keeps the old one. F11 was
+/// Quit for a day before it was full screen; Escape was Quit in alpha.1 before it was the menu.
+/// A tester pressing either for its new meaning was dropped to the desktop.
+const RETIRED_DEFAULTS: &[(&str, &str)] = &[
+    ("Escape", "quit"),
+    ("F11", "quit"),
+    ("KeyB", "prev_slot"),
+    ("KeyC", "command:scan"),
+    ("KeyE", "command:where"),
+    ("KeyF", "frame_advance"),
+    ("KeyG", "load_state"),
+    ("KeyK", "bind"),
+    ("KeyM", "command:map_debug"),
+    ("KeyM", "toggle_map"),
+    ("KeyN", "next_slot"),
+    ("KeyO", "menu"),
+    ("KeyP", "pause"),
+    ("KeyQ", "command:compass"),
+    ("KeyR", "repeat_last"),
+    ("KeyS", "command:sweep"),
+    ("KeyT", "command:read_text"),
+    ("KeyT", "save_state"),
+    ("KeyU", "command:map_debug"),
+    ("KeyU", "command:sweep"),
+    ("KeyV", "cycle_verbosity"),
+    ("KeyX", "command:quickturn"),
+    ("KeyZ", "command:snap"),
+    ("Pad:Select+Left", "repeat_last"),
+    ("Pad:Select+Right", "command:where"),
+    ("Semicolon", "command:snap"),
+];
 
 /// Recorded navigation sounds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -288,6 +354,17 @@ impl Keymap {
     /// Removes any binding for a key.
     pub fn unbind(&mut self, key: &str) {
         self.bindings.remove(key);
+    }
+
+    /// Drops the bindings an older release made by default and this one does not, so the
+    /// current defaults can fill the gaps they leave. A binding the player made themselves is
+    /// left alone, unless it happens to be exactly an old default, which is indistinguishable.
+    /// Returns how many were dropped.
+    pub fn retire_old_defaults(&mut self) -> usize {
+        let before = self.bindings.len();
+        self.bindings
+            .retain(|k, a| !RETIRED_DEFAULTS.contains(&(k.as_str(), a.as_str())));
+        before - self.bindings.len()
     }
 
     /// The keys currently bound to an action, sorted. Several keys may map to
@@ -407,6 +484,23 @@ impl Settings {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
             Err(e) => Err(Error::Io(e)),
         }
+    }
+
+    /// Brings a keymap saved under an older default layout up to this one: once, so a binding
+    /// the player makes afterwards is never second-guessed. Returns whether anything changed.
+    pub fn migrate_keymap(&mut self) -> bool {
+        if self.input.layout >= KEY_LAYOUT {
+            return false;
+        }
+        self.input.layout = KEY_LAYOUT;
+        self.keymap.retire_old_defaults();
+        // And this release's defaults onto whatever keys are now free, even for an action that
+        // still has a key: Tab kept the menu, but Escape should open it too, as the controls
+        // describe. Taken keys stay the player's.
+        for (key, action) in Keymap::default().bindings {
+            self.keymap.bindings.entry(key).or_insert(action);
+        }
+        true
     }
 
     /// Writes settings, creating parent directories as needed.
@@ -686,6 +780,41 @@ mod tests {
             s.set("speech.rate", "quickly"),
             Err(Error::BadValue { .. })
         ));
+    }
+
+    #[test]
+    fn a_keymap_from_an_older_release_loses_its_retired_defaults_once() {
+        // What a tester's file looked like after running the build where F11 was Quit, with
+        // one binding of their own.
+        let mut s: Settings = toml::from_str(
+            "[keys]\nF11 = \"quit\"\nEscape = \"quit\"\nKeyY = \"mute\"\n",
+        )
+        .unwrap();
+        assert_eq!(s.input.layout, 0, "an unnumbered file is the oldest layout");
+        assert!(s.migrate_keymap());
+        assert_eq!(s.keymap.action_for("F11"), Some("toggle_fullscreen"));
+        assert_eq!(s.keymap.action_for("Escape"), Some("menu"));
+        assert_eq!(s.keymap.action_for("KeyY"), Some("mute"), "the player's own key stays");
+        assert_eq!(s.input.layout, KEY_LAYOUT);
+
+        // Once only: a player who now binds an old default on purpose keeps it.
+        s.keymap.bind("KeyP", "pause");
+        assert!(!s.migrate_keymap());
+        assert_eq!(s.keymap.action_for("KeyP"), Some("pause"));
+    }
+
+    #[test]
+    fn a_fresh_install_is_already_on_the_current_layout() {
+        let mut s = Settings::default();
+        assert!(!s.migrate_keymap());
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.input.layout, KEY_LAYOUT);
+    }
+
+    #[test]
+    fn no_current_default_is_retired() {
+        let mut k = Keymap::default();
+        assert_eq!(k.retire_old_defaults(), 0);
     }
 
     #[test]

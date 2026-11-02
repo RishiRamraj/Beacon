@@ -152,7 +152,7 @@ the bottom row, A and S above them.
 - J: mute.
 - F4: pause.
 - F12: change key bindings.
-- F11: full screen on or off.
+- F11: full screen on or off. Also in the menu, under Settings, Full screen.
 - Pause: quit.
 - F10: advance one frame, for debugging a plugin.
 
@@ -377,6 +377,12 @@ Everything is configurable, and nothing needs configuring to start. Settings
 live in `beacon/settings.toml` in your config directory and can also be changed
 while playing, because telling someone to edit a file to fix speech they cannot
 follow is circular.
+
+On Windows the config directory is `%APPDATA%\Beacon`. Keys saved by an older
+release are brought up to date the first time a new one starts: the old defaults
+are dropped and the current ones fill the free keys, while keys you bound yourself
+are kept. If Beacon ever crashes, it writes what happened to `crash.log` in the
+same directory. Send that file with the report.
 
 ```toml
 [speech]

@@ -47,6 +47,8 @@ pub struct Context {
     pub braille: bool,
     /// Whether the emulator draws a picture. Off saves a good part of a CPU core.
     pub video: bool,
+    /// Whether the window fills the screen.
+    pub fullscreen: bool,
     pub json_events: bool,
     pub muted: bool,
     pub map_shown: bool,
@@ -262,6 +264,8 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
             // Worth a menu entry rather than only a config file: drawing the picture is the
             // single largest cost in the program, and a player who cannot see it is paying it.
             toggle("Video", ctx.video, "video.enabled"),
+            // Beside F11, for a keyboard whose F11 is a media key or is caught before Beacon.
+            toggle("Full screen", ctx.fullscreen, "video.fullscreen"),
             Entry::act(state("Mute", ctx.muted), Act::ToggleMute),
         ],
 
@@ -908,7 +912,7 @@ mod tests {
         menu.navigate(4); // Settings
         menu.choose(&ctx);
 
-        assert_eq!(menu.navigate(1), "Speech: on, 2 of 8.");
+        assert_eq!(menu.navigate(1), "Speech: on, 2 of 9.");
         assert_eq!(
             menu.choose(&ctx),
             Chosen::Act(Act::SetSetting {
@@ -921,9 +925,9 @@ mod tests {
 
         assert_eq!(
             menu.navigate(1),
-            "Announce through screen reader: off, 3 of 8."
+            "Announce through screen reader: off, 3 of 9."
         );
-        assert_eq!(menu.navigate(1), "Spatial audio: off, 4 of 8.");
+        assert_eq!(menu.navigate(1), "Spatial audio: off, 4 of 9.");
         assert_eq!(
             menu.choose(&ctx),
             Chosen::Act(Act::SetSetting {
@@ -945,7 +949,7 @@ mod tests {
         menu.navigate(4); // Settings
         menu.choose(&ctx);
         // The Settings entry carries the level in force, so it can be read without entering.
-        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 8, submenu.");
+        assert_eq!(menu.announce(), "Verbosity: navigation, 1 of 9, submenu.");
         menu.choose(&ctx); // into Verbosity
 
         assert_eq!(menu.announce(), "critical only, 1 of 4.");

@@ -262,6 +262,26 @@ mod tests {
     }
 
     #[test]
+    fn a_keymap_saved_by_the_build_where_f11_quit_gets_full_screen_back() {
+        // The tester's case: the Oct 30 build bound F11 to Quit and saved it, and alpha.1 had
+        // Escape as Quit. Without migrating, F11 and Escape kept quitting in every later build.
+        let path = std::env::temp_dir().join(format!("beacon-f11-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[keys]\nF11 = \"quit\"\nEscape = \"quit\"\nTab = \"menu\"\nKeyC = \"command:scan\"\n",
+        )
+        .unwrap();
+        let mut s = beacon_config::Settings::load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        s.migrate_keymap();
+        apply_defaults(&mut s.keymap);
+        assert_eq!(s.keymap.action_for("F11"), Some("toggle_fullscreen"));
+        assert_eq!(s.keymap.action_for("Escape"), Some("menu"));
+        assert_eq!(s.keymap.action_for("Pause"), Some("quit"));
+        assert_eq!(s.keymap.action_for("KeyV"), Some("command:scan"));
+    }
+
+    #[test]
     fn a_players_own_bindings_are_never_touched() {
         // Modelled on a real saved keymap: heavily rebound, with the menu's default letter
         // taken by a plugin command and the menu itself unheard of.

@@ -265,7 +265,41 @@ fn run_headless(
     Ok(())
 }
 
+/// Writes any panic to `crash.log` beside the settings, as well as to the terminal.
+///
+/// On Windows Beacon is started from Explorer, and its console closes the moment it exits, so a
+/// panic's message vanished with it and a crash looked like nothing but a return to the
+/// desktop. The log is appended to, stamped with the version, so a tester can send it.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        let Some(dir) = Settings::config_dir() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let entry = format!(
+            "--- Beacon {} crashed (unix time {when})\n{info}\n{backtrace}\n",
+            env!("CARGO_PKG_VERSION"),
+        );
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("crash.log"))
+        {
+            let _ = f.write_all(entry.as_bytes());
+        }
+    }));
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    log_panics();
     let args = parse_args();
 
     // The stdio<->socket bridge needs nothing else — no ROM, emulator, or plugin.
@@ -281,13 +315,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let settings = match Settings::default_path() {
+    let mut settings = match Settings::default_path() {
         Some(path) => Settings::load(&path).unwrap_or_else(|e| {
             eprintln!("{e}; using defaults");
             Settings::default()
         }),
         None => Settings::default(),
     };
+    // A keymap saved by an older release keeps that release's keys, defaults included, until
+    // it is brought up to date; the defaults below then fill what it gave up.
+    if settings.migrate_keymap() {
+        if let Some(path) = Settings::default_path() {
+            if let Err(e) = settings.save(&path) {
+                eprintln!("could not save settings: {e}");
+            }
+        }
+    }
 
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
     let speech = build_speech(&settings, &args);
