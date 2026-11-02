@@ -48,6 +48,8 @@ Listed here so licence compatibility is checked before adoption, not after.
 | NVDA controller client | LGPL-2.1 | Yes | Windows screen reader output |
 | Tolk (with SAAPI64) | LGPL-3.0 | Yes | Windows screen reader output (NVDA, JAWS, others, SAPI). Loaded at run time if present beside the executable, not linked; shipped in the Windows package with its licence |
 | lewton | Apache-2.0/MIT | Yes | Decoding Ogg Vorbis sounds |
+| wgpu (with naga) | Apache-2.0/MIT | Yes | Drawing through the graphics card (DirectX 12, Vulkan, OpenGL), so capture tools see a game |
+| pollster | Apache-2.0/MIT | Yes | Waiting on wgpu's start-up calls |
 | MinGW-w64 GCC runtime (libstdc++, libgcc_s) | GPL-3.0 with the GCC Runtime Library Exception | Yes | C++ runtime for the Windows build, shipped beside `beacon.exe` |
 
 ## Permanently excluded

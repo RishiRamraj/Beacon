@@ -260,18 +260,26 @@ full screen. These steps follow OBS's own documentation on
 
 **The picture.**
 
-1. Start Beacon. Press F11 for full screen if you want it. Beacon remembers the choice. Full
-   screen is borderless, so OBS still sees an ordinary window, and the picture keeps its shape,
-   with black bars on a wide screen rather than a stretched game.
-2. In OBS, under Sources, add a **Window Capture** source and choose the window titled
-   `[beacon.exe]: Beacon`.
-3. On Windows, set **Capture Method** to **Windows 10 (1903 and up)**. Beacon draws its
-   picture with ordinary Windows drawing rather than DirectX, OpenGL or Vulkan, so use Window
-   Capture, not Game Capture. If the picture stays black or frozen, try the **BitBlt** method
-   instead.
+Beacon draws through the graphics card: DirectX 12 on Windows, with Vulkan and then
+OpenGL as fallbacks. So OBS sees it as a game, and either capture source works.
+
+1. Start Beacon. Press F11 for full screen if you want it, or choose Settings, then Full
+   screen, from the menu. Beacon remembers the choice. The picture keeps its shape, with
+   black bars on a wide screen rather than a stretched game.
+2. In OBS, under Sources, add a **Game Capture** source. Set **Mode** to **Capture specific
+   window** and choose `[beacon.exe]: Beacon`. That works in a window and full screen.
+   **Capture any fullscreen application** also finds it, but only while it is full screen.
+3. Or add a **Window Capture** source for the same window, with **Capture Method** set to
+   **Windows 10 (1903 and up)**. This is the one to use if Beacon is drawing on the CPU (see
+   below), since Game Capture cannot see that.
 4. Leave **Window Match Priority** on its default: the title, `Beacon`, does not change.
 5. To stream the game without the map beside it, press backtick to hide the map, or crop the
    source in OBS.
+
+If no graphics driver starts, Beacon draws on the CPU instead and says why in its console
+window (`video: ... unavailable`). Then only Window Capture or Display Capture sees it.
+`gpu = false` under `[video]` in the settings file forces the CPU path, which is worth trying
+if the picture misbehaves on a particular card.
 
 On Linux, use **Window Capture (PipeWire)**, or **Screen Capture (PipeWire)** on Wayland, and
 pick the Beacon window when the desktop asks. On X11, **Window Capture (Xcomposite)** works too.
@@ -414,6 +422,7 @@ pad_mappings = ""  # SDL controller mapping lines, for a pad Beacon does not rec
 [video]
 enabled = true     # draw the picture; off saves CPU for a player who cannot see it
 fullscreen = false # fill the screen (F11), borderless; remembered
+gpu = true         # draw through the graphics card (DirectX 12, Vulkan or OpenGL); off paints on the CPU
 ```
 
 ## Plugins

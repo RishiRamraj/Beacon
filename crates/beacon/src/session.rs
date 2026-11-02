@@ -718,6 +718,11 @@ impl Session {
         self.say_now(if self.settings.video.fullscreen { "Full screen." } else { "Windowed." });
     }
 
+    /// Whether to draw through the graphics card, as set when the window opens.
+    pub fn gpu_wanted(&self) -> bool {
+        self.settings.video.gpu
+    }
+
     /// Whether the window should fill the screen.
     pub fn fullscreen(&self) -> bool {
         self.settings.video.fullscreen

@@ -123,6 +123,10 @@ pub struct Video {
     /// Fill the screen with the window (borderless), remembered between runs. The picture
     /// keeps its shape, with black bars; OBS's Window Capture records it either way.
     pub fullscreen: bool,
+    /// Draw through the graphics card (DirectX 12, Vulkan or OpenGL), which is what OBS's Game
+    /// Capture hooks. On by default; off, or when no card driver starts, the picture is
+    /// painted on the CPU instead, which only Window and Display Capture see. Read at start-up.
+    pub gpu: bool,
 }
 
 impl Default for Video {
@@ -130,6 +134,7 @@ impl Default for Video {
         Video {
             enabled: true,
             fullscreen: false,
+            gpu: true,
         }
     }
 }
@@ -553,6 +558,7 @@ impl Settings {
             "braille.enabled",
             "video.enabled",
             "video.fullscreen",
+            "video.gpu",
             "braille.verbosity",
             "beacons.enabled",
             "beacons.volume_max",
@@ -583,6 +589,7 @@ impl Settings {
             "braille.enabled" => self.braille.enabled.to_string(),
             "video.enabled" => self.video.enabled.to_string(),
             "video.fullscreen" => self.video.fullscreen.to_string(),
+            "video.gpu" => self.video.gpu.to_string(),
             "braille.verbosity" => self.braille.verbosity.to_string(),
             "beacons.enabled" => self.beacons.enabled.to_string(),
             "beacons.volume_max" => self.beacons.volume_max.to_string(),
@@ -634,6 +641,7 @@ impl Settings {
             "braille.enabled" => self.braille.enabled = parse(key, value)?,
             "video.enabled" => self.video.enabled = parse(key, value)?,
             "video.fullscreen" => self.video.fullscreen = parse(key, value)?,
+            "video.gpu" => self.video.gpu = parse(key, value)?,
             "braille.verbosity" => self.braille.verbosity = parse::<u8>(key, value)?.min(3),
             "beacons.enabled" => self.beacons.enabled = parse(key, value)?,
             "beacons.volume_max" => {

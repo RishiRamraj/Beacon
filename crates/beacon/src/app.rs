@@ -6,7 +6,7 @@
 //! what lets the same session be driven headless by the MCP server instead.
 
 use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Receiver;
 
@@ -56,9 +56,14 @@ pub struct App {
     /// arrive here and are run against the session each event-loop wake.
     control_rx: Option<Receiver<mcp::Request>>,
 
-    window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
-    context: Option<softbuffer::Context<Rc<Window>>>,
+    window: Option<Arc<Window>>,
+    /// The swapchain the picture is drawn through, when the graphics card is in use.
+    gpu: Option<crate::gpu::Gpu>,
+    /// The frame as composed for the GPU, at the window's size; reused.
+    frame: Vec<u32>,
+    /// The CPU path: used when the card is off, or failed to start or later.
+    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    context: Option<softbuffer::Context<Arc<Window>>>,
     /// Show only the map, no game picture (`--map-only`).
     map_only: bool,
     /// Tracks the map's visibility so the window is resized when it toggles.
@@ -160,6 +165,61 @@ fn blit(
     }
 }
 
+/// Composes the whole picture into `buf`, `win_w` by `win_h`: the game, the map beside it
+/// when shown, black bars around both. Shared by the GPU and CPU paths, so they show the same.
+fn compose(buf: &mut [u32], win_w: usize, win_h: usize, session: &Session, map_only: bool) {
+        // The game picture. Empty when the emulator has been told not to draw one, so the
+        // panel stays black rather than showing whichever frame was last composed — and the
+        // scaling work is skipped too, which is the point of turning it off.
+        let info = session.frame_info();
+        // `pitch` is a byte stride; the framebuffer is 32-bit pixels.
+        let game_stride = (info.pitch as usize / 4).max(info.width as usize);
+        let (gw, gh) = (info.width as usize, info.height as usize);
+        let game: &[u32] = if session.video_enabled() {
+            session.framebuffer()
+        } else {
+            &[]
+        };
+
+        // The map, if shown, sits in a square panel to the right of the game.
+        let map = session.map_view();
+
+        buf.fill(0); // letterbox any area a panel does not cover
+
+        // Every panel keeps its shape: the game its own, the map square. Black bars fill the rest,
+        // which is what full screen on a wide display, and a stream of it, should look like.
+        let (aw, ah) = (GAME_W as usize, GAME_H as usize);
+        match (map_only, map) {
+            // Map only: it fills the window, square; no game picture.
+            (true, Some((mw, mh, mpix))) => {
+                let (mw, mh) = (mw as usize, mh as usize);
+                let (x, y, w, h) = fit(0, 0, win_w, win_h, 1, 1);
+                blit(buf, win_w, x, y, w, h, mpix, mw, mh, mw);
+            }
+            // Game with the map in a square panel to its right: the game as large as the
+            // height allows, the map in what is left (never less than a third of the width).
+            (false, Some((mw, mh, mpix))) => {
+                let game_full_w = win_h * aw / ah;
+                let map_side = win_h
+                    .min(win_w.saturating_sub(game_full_w).max(win_w / 3))
+                    .min(win_w);
+                let game_w = win_w - map_side;
+                let (x, y, w, h) = fit(0, 0, game_w, win_h, aw, ah);
+                blit(buf, win_w, x, y, w, h, game, gw, gh, game_stride);
+                let map_y = (win_h - map_side) / 2;
+                let (mw, mh) = (mw as usize, mh as usize);
+                blit(
+                    buf, win_w, game_w, map_y, map_side, map_side, mpix, mw, mh, mw,
+                );
+            }
+            // No map: the game fills the window, in its own shape.
+            (_, None) => {
+                let (x, y, w, h) = fit(0, 0, win_w, win_h, aw, ah);
+                blit(buf, win_w, x, y, w, h, game, gw, gh, game_stride);
+            }
+        }
+}
+
 impl App {
     pub fn new(
         session: Session,
@@ -187,6 +247,8 @@ impl App {
             input,
             control_rx,
             window: None,
+            gpu: None,
+            frame: Vec::new(),
             surface: None,
             context: None,
             map_only,
@@ -446,77 +508,59 @@ impl App {
     }
 
     fn present_inner(&mut self) {
-        let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
+        let Some(window) = self.window.as_ref() else {
             return;
         };
-
         let size = window.inner_size();
-        let (Some(win_w), Some(win_h)) =
+        let (Some(nz_w), Some(nz_h)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
             return;
         };
-
-        if surface.resize(win_w, win_h).is_err() {
-            return;
-        }
-
         let (win_w, win_h) = (size.width as usize, size.height as usize);
 
-        // The game picture. Empty when the emulator has been told not to draw one, so the
-        // panel stays black rather than showing whichever frame was last composed — and the
-        // scaling work is skipped too, which is the point of turning it off.
-        let info = self.session.frame_info();
-        // `pitch` is a byte stride; the framebuffer is 32-bit pixels.
-        let game_stride = (info.pitch as usize / 4).max(info.width as usize);
-        let (gw, gh) = (info.width as usize, info.height as usize);
-        let game: &[u32] = if self.session.video_enabled() {
-            self.session.framebuffer()
-        } else {
-            &[]
+        if let Some(gpu) = self.gpu.as_mut() {
+            self.frame.resize(win_w * win_h, 0);
+            compose(&mut self.frame, win_w, win_h, &self.session, self.map_only);
+            if gpu.present(&self.frame, size.width, size.height) {
+                return;
+            }
+            // The card stopped working mid-game (a driver reset, say): carry on on the CPU
+            // rather than leave a frozen picture.
+            eprintln!("video: the graphics card stopped presenting; drawing on the CPU");
+            self.gpu = None;
+            let window = Arc::clone(window);
+            self.start_cpu_surface(&window);
+        }
+
+        let Some(surface) = self.surface.as_mut() else {
+            return;
         };
-
-        // The map, if shown, sits in a square panel to the right of the game.
-        let map = self.session.map_view();
-
+        if surface.resize(nz_w, nz_h).is_err() {
+            return;
+        }
         let Ok(mut buf) = surface.buffer_mut() else {
             return;
         };
-        buf.fill(0); // letterbox any area a panel does not cover
+        compose(&mut buf, win_w, win_h, &self.session, self.map_only);
+        let _ = buf.present();
+    }
 
-        // Every panel keeps its shape: the game its own, the map square. Black bars fill the rest,
-        // which is what full screen on a wide display, and a stream of it, should look like.
-        let (aw, ah) = (GAME_W as usize, GAME_H as usize);
-        match (self.map_only, map) {
-            // Map only: it fills the window, square; no game picture.
-            (true, Some((mw, mh, mpix))) => {
-                let (mw, mh) = (mw as usize, mh as usize);
-                let (x, y, w, h) = fit(0, 0, win_w, win_h, 1, 1);
-                blit(&mut buf, win_w, x, y, w, h, mpix, mw, mh, mw);
+    /// Opens the CPU drawing surface. False if even that fails.
+    fn start_cpu_surface(&mut self, window: &Arc<Window>) -> bool {
+        match softbuffer::Context::new(Arc::clone(window))
+            .and_then(|ctx| softbuffer::Surface::new(&ctx, Arc::clone(window)).map(|s| (ctx, s)))
+        {
+            Ok((ctx, surface)) => {
+                self.context = Some(ctx);
+                self.surface = Some(surface);
+                true
             }
-            // Game with the map in a square panel to its right: the game as large as the
-            // height allows, the map in what is left (never less than a third of the width).
-            (false, Some((mw, mh, mpix))) => {
-                let game_full_w = win_h * aw / ah;
-                let map_side = win_h
-                    .min(win_w.saturating_sub(game_full_w).max(win_w / 3))
-                    .min(win_w);
-                let game_w = win_w - map_side;
-                let (x, y, w, h) = fit(0, 0, game_w, win_h, aw, ah);
-                blit(&mut buf, win_w, x, y, w, h, game, gw, gh, game_stride);
-                let map_y = (win_h - map_side) / 2;
-                let (mw, mh) = (mw as usize, mh as usize);
-                blit(
-                    &mut buf, win_w, game_w, map_y, map_side, map_side, mpix, mw, mh, mw,
-                );
-            }
-            // No map: the game fills the window, in its own shape.
-            (_, None) => {
-                let (x, y, w, h) = fit(0, 0, win_w, win_h, aw, ah);
-                blit(&mut buf, win_w, x, y, w, h, game, gw, gh, game_stride);
+            Err(e) => {
+                eprintln!("could not create drawing surface: {e}");
+                false
             }
         }
-        let _ = buf.present();
     }
 }
 
@@ -573,7 +617,7 @@ impl ApplicationHandler<AccessEvent> for App {
         };
 
         let window = match event_loop.create_window(attrs) {
-            Ok(w) => Rc::new(w),
+            Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("could not create window: {e}");
                 event_loop.exit();
@@ -589,18 +633,13 @@ impl ApplicationHandler<AccessEvent> for App {
             self.access_proxy.clone(),
         ));
 
-        match softbuffer::Context::new(Rc::clone(&window))
-            .and_then(|ctx| softbuffer::Surface::new(&ctx, Rc::clone(&window)).map(|s| (ctx, s)))
-        {
-            Ok((ctx, surface)) => {
-                self.context = Some(ctx);
-                self.surface = Some(surface);
-            }
-            Err(e) => {
-                eprintln!("could not create drawing surface: {e}");
-                event_loop.exit();
-                return;
-            }
+        // Through the graphics card if it will, so capture tools see a game; on the CPU if not.
+        if self.session.gpu_wanted() {
+            self.gpu = crate::gpu::Gpu::new(event_loop, &window);
+        }
+        if self.gpu.is_none() && !self.start_cpu_surface(&window) {
+            event_loop.exit();
+            return;
         }
 
         self.window = Some(window);

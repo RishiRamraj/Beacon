@@ -6,6 +6,7 @@ mod app;
 mod audio;
 mod beacons;
 mod config_modal;
+mod gpu;
 mod image;
 mod input;
 mod mcp;

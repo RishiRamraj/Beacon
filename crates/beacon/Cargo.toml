@@ -20,6 +20,8 @@ gilrs = "0.11"
 accesskit = "0.25.0"
 accesskit_winit = "0.34.0"
 lewton = "0.10"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "vulkan", "gles", "wgsl"] }
+pollster = "1.0.1"
 
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
