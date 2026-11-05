@@ -2235,6 +2235,22 @@ end
 
 -- Leads toward the route `path` at waypoint `wp`, in whichever style is chosen.
 function GUIDE.aim(s, path, wp, fx, fy, duck)
+  -- Held at a corner he is not yet clear of: nothing new is said and no chime, and the
+  -- beacon sounds from the way he has to shift, at least a tile off so its side is plain.
+  local h = GUIDE.hold
+  if h ~= nil and h.path == path and h.k == wp and GUIDE.target ~= nil then
+    local len = math.abs(h.dx) + math.abs(h.dy)
+    local scale = (len > 0) and math.max(1, 16 / len) or 1
+    local dx, dy = h.dx * scale, h.dy * scale
+    if GUIDE.mode == "carrot" then
+      CARROT.place(s, dx, dy, duck)
+    else
+      CARROT.place(s, dx, dy, duck, true)
+    end
+    return
+  end
+  local released = GUIDE.released
+  GUIDE.released = nil
   local w, i = GUIDE.pick(s, path, wp, fx, fy)
   if w == nil then return end
   local t = { x = w[1] * 8 + 4, y = w[2] * 8 + 4, tx = w[1], ty = w[2] }
@@ -2247,7 +2263,7 @@ function GUIDE.aim(s, path, wp, fx, fy, duck)
     return
   end
   if moved then
-    if was ~= nil and math.abs(was.x - fx) + math.abs(was.y - fy) <= CARROT.AT_CORNER then
+    if was ~= nil and (released or math.abs(was.x - fx) + math.abs(was.y - fy) <= CARROT.AT_CORNER) then
       -- Picked up: the chime, then where the next one is.
       sound.ui("pathfinder/nodereached")
       GUIDE.say_leg(s, t)
@@ -2382,8 +2398,13 @@ end
 -- corners than there used to be — so a corner already passed must not send him back for
 -- it. Searching from the end also means a route re-planned under his feet, or a warp,
 -- picks up from where he is rather than from where the old route thought he was.
-function route_advance(path, wp, x, y)
+--
+-- `s`, when given, holds a corner until Link's whole body can take the leg after it (see
+-- GUIDE.turn_shift): reached by his feet is not the same as clear of the wall beside him.
+function route_advance(path, wp, x, y, s)
   local tx, ty = x >> 3, y >> 3
+  local h = GUIDE.hold
+  if h ~= nil and h.path ~= path then h = nil end
   for k = #path, wp, -1 do
     local w = path[k]
     -- The tile he is standing on is not somewhere to be sent. It counts as reached whatever
@@ -2392,12 +2413,131 @@ function route_advance(path, wp, x, y)
     -- and send him a step down before a leg that runs west, which is what it did. Distance
     -- alone could not express that: the answer is not a wider radius, it is that his own
     -- tile is not a destination.
-    if w[1] == tx and w[2] == ty then return k + 1 end
-    if math.abs(w[1] * 8 + 4 - x) + math.abs(w[2] * 8 + 4 - y) <= WAYPOINT_REACHED then
+    local d = math.abs(w[1] * 8 + 4 - x) + math.abs(w[2] * 8 + 4 - y)
+    -- A corner being held stays reached while he makes the shift it asked for, which can take
+    -- him further from it than the usual radius; otherwise the guide would send him back.
+    local radius = WAYPOINT_REACHED + ((h ~= nil and h.k == k) and GUIDE.SHIFT_MAX or 0)
+    if (w[1] == tx and w[2] == ty) or d <= radius then
+      if s ~= nil and k < #path then
+        local sx, sy = GUIDE.turn_shift(s, path, k)
+        if sx ~= nil then
+          GUIDE.hold = { path = path, k = k, dx = sx, dy = sy }
+          return k
+        end
+      end
+      if GUIDE.hold ~= nil then GUIDE.released = (GUIDE.hold.path == path); GUIDE.hold = nil end
       return k + 1
     end
   end
+  GUIDE.hold = nil
   return wp
+end
+
+-- Link's body, as the game moves it (zelda3 TileDetect_Movement_X/Y): sixteen pixels square,
+-- from his stored x to x+15 and from y+8 to y+23. A step probes three points on the edge he
+-- moves toward, both corners and the middle. The middle blocked is a wall, and so are both
+-- corners. One corner alone the game nudges him round (Link_HandleCardinalCollision), but only
+-- when he is off the eight-pixel grid across the way he is going: standing square on it, half
+-- his body against a door frame, he bonks instead. Which is exactly where a route laid on
+-- eight-pixel tiles stands him.
+--
+-- Whether he could take a step in direction (ux, uy) with his stored position at (lx, ly).
+function GUIDE.can_step(s, lx, ly, ux, uy, level)
+  local a, m, b
+  local across = (ux ~= 0) and ly or lx
+  if ux ~= 0 then
+    local px = ((ux < 0) and (lx - 1) or (lx + 16)) >> 3
+    a = tile_passable(s, px, (ly + 8) >> 3, level)
+    m = tile_passable(s, px, (ly + 16) >> 3, level)
+    b = tile_passable(s, px, (ly + 23) >> 3, level)
+  else
+    local py = ((uy < 0) and (ly + 7) or (ly + 24)) >> 3
+    a = tile_passable(s, lx >> 3, py, level)
+    m = tile_passable(s, (lx + 8) >> 3, py, level)
+    b = tile_passable(s, (lx + 15) >> 3, py, level)
+  end
+  if not m then return false end
+  if a and b then return true end
+  return (a or b) and (across & 7) ~= 0
+end
+
+-- How far a shift has to go before the guide stops second-guessing the route: a tile and a
+-- half. A turn that needs more than that is not a misalignment, and the route is left to it.
+GUIDE.SHIFT_MAX = 16
+
+-- Where Link has to move, in pixels, before the leg after corner `k` can be walked: nil when
+-- he can walk it from here.
+--
+-- The route is planned for a point, his feet, on eight-pixel tiles; he is two tiles wide. So
+-- his feet reach a corner while half of him is still beside the wall he is about to turn
+-- past, and pressing the new way walks him into it. The fix is the one a sighted player
+-- makes without thinking: carry on along the corridor until he is clear, then turn. Searched
+-- both ways along the axis across the new leg, a pixel at a time and only over ground he can
+-- walk, nearest first, ahead of him first on a tie.
+function GUIDE.turn_shift(s, path, k)
+  local w, n = path[k], path[k + 1]
+  if w == nil or n == nil or s.x == nil then return nil end
+  local ux, uy = GUIDE.axis(n[1] - w[1], n[2] - w[2])
+  if ux == nil then return nil end
+  -- Ahead first: the way he was already walking into the corner.
+  local p = path[k - 1]
+  local ahead = 1
+  if p ~= nil and ((uy ~= 0 and w[1] < p[1]) or (ux ~= 0 and w[2] < p[2])) then ahead = -1 end
+  return GUIDE.shift_for(s, ux, uy, ahead)
+end
+
+-- The one direction of a leg, by its longer axis: (ux, uy), or nil for no leg at all.
+function GUIDE.axis(dx, dy)
+  if dx == 0 and dy == 0 then return nil end
+  if math.abs(dx) >= math.abs(dy) then return (dx > 0) and 1 or -1, 0 end
+  return 0, (dy > 0) and 1 or -1
+end
+
+-- The shift, across direction (ux, uy), that lets Link step that way: nil if he already can,
+-- or if nothing within SHIFT_MAX would help. `ahead` (1 or -1) is the side tried first.
+function GUIDE.shift_for(s, ux, uy, ahead)
+  local lv = (s.module == 0x07) and mem.u8(LOWER_LEVEL) or 0
+  if GUIDE.can_step(s, s.x, s.y, ux, uy, lv) then return nil end
+  local px, py = (uy ~= 0) and 1 or 0, (ux ~= 0) and 1 or 0
+  local best, bx, by = nil, nil, nil
+  for _, sg in ipairs({ ahead, -ahead }) do
+    local x, y = s.x, s.y
+    for d = 1, GUIDE.SHIFT_MAX do
+      if best ~= nil and d >= best then break end
+      if not GUIDE.can_step(s, x, y, px * sg, py * sg, lv) then break end
+      x, y = x + px * sg, y + py * sg
+      if GUIDE.can_step(s, x, y, ux, uy, lv) then
+        best, bx, by = d, x - s.x, y - s.y
+        break
+      end
+    end
+  end
+  return bx, by
+end
+
+-- The same misalignment on the way TO a waypoint, the last one above all: a door is two tiles
+-- wide and the route aims his feet at one of them, so he can arrive in line with the door and
+-- half a body to one side of it. When the way to the waypoint is blocked where he stands and a
+-- short shift across it would clear it, hold there too and point the beacon at the shift.
+-- A corner hold already set by route_advance is left alone.
+function GUIDE.check_leg(s, path, wp, fx, fy)
+  local h = GUIDE.hold
+  if h ~= nil and h.path == path and h.k == wp and not h.leg then return end
+  local w = path[wp]
+  if w == nil or s.x == nil then GUIDE.hold = nil; return end
+  local dx, dy = w[1] * 8 + 4 - fx, w[2] * 8 + 4 - fy
+  local ux, uy = GUIDE.axis(dx, dy)
+  local sx, sy = nil, nil
+  if ux ~= nil then
+    -- Toward the waypoint's own line first, since that is where the route expects him.
+    local across = (ux ~= 0) and dy or dx
+    sx, sy = GUIDE.shift_for(s, ux, uy, (across < 0) and -1 or 1)
+  end
+  if sx ~= nil then
+    GUIDE.hold = { path = path, k = wp, dx = sx, dy = sy, leg = true }
+  elseif h ~= nil and h.leg then
+    GUIDE.hold = nil
+  end
 end
 
 -- How close to a corner counts as being on it, for the purpose of aiming past it. Wider
@@ -2446,7 +2586,8 @@ local function pathfind_update(s)
 
   local path = pathfind_path
   local fx, fy = foot(s)
-  pathfind_wp = route_advance(path, pathfind_wp, fx, fy)
+  pathfind_wp = route_advance(path, pathfind_wp, fx, fy, s)
+  GUIDE.check_leg(s, path, pathfind_wp, fx, fy)
   GUIDE.node(path, pathfind_wp, fx, fy)
   if pathfind_wp > #path then
     -- On the spot. If the errand also needs him pointed a particular way, that is the
@@ -2965,7 +3106,8 @@ local function ow_route_update(s)
   end
   local path = ow_route_path
   if path == nil then CARROT.clear(); return end
-  ow_route_wp = route_advance(path, ow_route_wp, fx, fy)
+  ow_route_wp = route_advance(path, ow_route_wp, fx, fy, s)
+  GUIDE.check_leg(s, path, ow_route_wp, fx, fy)
   GUIDE.node(path, ow_route_wp, fx, fy)
   if ow_route_wp > #path then
     ow_route_stop(); CARROT.arrive(); return
@@ -6802,6 +6944,10 @@ function TRAVEL.update(s)
   if TRAVEL.still > TRAVEL.STUCK then TRAVEL.stop("Blocked."); return end
   local fx, fy = foot(s)
   local dx, dy = t.x - fx, t.y - fy
+  -- At a corner he is not yet clear of, walk the shift it asks for rather than milling about
+  -- on the corner: once his body can turn, the guide moves on and so does travel.
+  local h = GUIDE.hold
+  if h ~= nil then dx, dy = h.dx, h.dy end
   local held = {}
   local function along(d, neg, pos) if d < 0 then held[#held + 1] = neg elseif d > 0 then held[#held + 1] = pos end end
   if math.abs(dx) >= math.abs(dy) then

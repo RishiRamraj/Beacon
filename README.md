@@ -107,7 +107,10 @@ the bottom row, A and S above them.
   the guide leads you there one waypoint at a time: a beeping sound sits on the next corner,
   door or staircase along the way, and gets louder as you get close. Walk toward it. The beep
   changes when you are facing it. When you reach a waypoint you hear a chime, and Beacon says
-  the next one, for example: Door, north, 5 tiles.
+  the next one, for example: Door, north, 5 tiles. Link is two tiles wide, so a waypoint
+  only counts once all of him can take the next turn. Until then the beep moves a little
+  ahead of you or to one side, to line you up, and the next direction is not said yet. The
+  same happens when you are half a step off a doorway.
 - Period: say the next waypoint again: what it is, which way, and how far.
 - Comma: walk to the next waypoint for you. It stops at the waypoint, when you press an arrow
   key yourself, when an enemy gets close, or if the way is blocked.

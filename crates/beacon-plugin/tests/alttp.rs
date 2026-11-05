@@ -6748,6 +6748,119 @@ fn alttp_the_guide_skips_a_corner_link_has_already_passed() {
 }
 
 #[test]
+fn alttp_a_corner_is_held_until_links_whole_body_can_turn() {
+    // The tester's case: walking north up a corridor two tiles wide (columns 10 and 11), the
+    // route turns west where a side passage opens at rows 4 and 5. His feet reach the corner
+    // while his body is still beside the wall of column 9, and pressing west walks him into
+    // it. So the corner holds, with no new leg said, and the beacon pulls him on north until
+    // the game would let him turn. Then the leg changes.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut walls = Vec::new();
+    for ty in 6..16 {
+        walls.push((9, ty)); // the corridor's west wall, below the side passage
+    }
+    for tx in 3..10 {
+        walls.push((tx, 3)); // the side passage's north wall
+        walls.push((tx, 6)); // and its south wall
+    }
+    let ram = dungeon_frame((0, 0), (0, 0), &walls);
+
+    let probe = r#"
+        local path = { { 11, 12 }, { 11, 5 }, { 3, 5 } }
+        local function at(y)
+          local s = { module = 0x07, x = 80, y = y }
+          local fx, fy = foot(s)
+          local wp = route_advance(path, 2, fx, fy, s)
+          local h = GUIDE.hold
+          return wp .. (h and string.format("(%d,%d)", h.dx, h.dy) or "")
+        end
+        -- Feet in the corner's reach, body beside the wall: held, shift 9 px north.
+        local beside = at(40)
+        -- Partway: still held, the shift now smaller.
+        local closer = at(35)
+        -- Clear: middle and top probes are in the side passage. On to the next leg.
+        local clear = at(31)
+        local released = tostring(GUIDE.released)
+        -- Without the game state (an agent probing, the older tests), no hold at all.
+        GUIDE.hold = nil
+        local s = { module = 0x07, x = 80, y = 40 }
+        local fx, fy = foot(s)
+        local plain = route_advance(path, 2, fx, fy)
+        return table.concat({ beside, closer, clear, released, plain }, " ")
+    "#;
+    assert_eq!(
+        plugin.eval(probe, &ram).unwrap(),
+        "2(0,-9) 2(0,-4) 3 true 3",
+        "held at the corner with the shift to make, then released once his body can turn"
+    );
+
+    // A corner he can already turn at is not held: his body is level with the passage.
+    let open = r#"
+        GUIDE.hold = nil
+        local path = { { 11, 12 }, { 11, 5 }, { 3, 5 } }
+        local s = { module = 0x07, x = 80, y = 28 }
+        local fx, fy = foot(s)
+        return tostring(route_advance(path, 2, fx, fy, s)) .. tostring(GUIDE.hold)
+    "#;
+    assert_eq!(plugin.eval(open, &ram).unwrap(), "3nil");
+
+    // While held, the beacon sounds from the north, the way to shift, and the leg it would
+    // have announced is not said.
+    let aim = r#"
+        GUIDE.hold, GUIDE.target = nil, nil
+        local path = { { 11, 12 }, { 11, 5 }, { 3, 5 } }
+        local s = { module = 0x07, x = 80, y = 40, direction = 0 }
+        local fx, fy = foot(s)
+        local wp = route_advance(path, 2, fx, fy, s)
+        -- The first frame of a route says its leg; the hold steers from the next.
+        GUIDE.aim(s, path, wp, fx, fy, false)
+        GUIDE.aim(s, path, wp, fx, fy, false)
+        return string.format("%d %d", math.floor(carrot.x), math.floor(carrot.y))
+    "#;
+    assert_eq!(plugin.eval(aim, &ram).unwrap(), "0 -16", "the beacon is a tile north of him");
+    let said = plugin.on_frame(&ram, 0);
+    assert!(
+        !said.iter().any(|i| i.text.contains("west")),
+        "no west leg while held: {:?}",
+        said.iter().map(|i| &i.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn alttp_a_door_half_a_body_off_is_lined_up_before_the_guide_sends_him_through() {
+    // Seen in the castle: the door is two tiles wide (columns 20 and 21) and the route aims his
+    // feet at column 20, so he arrives square on the grid at x = 152 with his left half against
+    // the frame. The game nudges round a corner only when he is off the grid, so there it bonks
+    // him, and walking north got him nowhere. The leg holds, pointing a pixel east, which is
+    // all the game needs to slide him in.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut walls = Vec::new();
+    for ty in 0..5 {
+        walls.push((19, ty));
+        walls.push((22, ty));
+    }
+    let ram = dungeon_frame((0, 0), (20, 2), &walls);
+    let probe = r#"
+        GUIDE.hold = nil
+        local path = { { 20, 5 }, { 20, 2 } }
+        local function at(x)
+          local s = { module = 0x07, x = x, y = 32 }
+          local fx, fy = foot(s)
+          local wp = route_advance(path, 2, fx, fy, s)
+          GUIDE.check_leg(s, path, wp, fx, fy)
+          local h = GUIDE.hold
+          return h and string.format("(%d,%d)", h.dx, h.dy) or "-"
+        end
+        -- Square on the grid against the frame: shift east a pixel. Off it: the game's own
+        -- nudge does the rest. Lined up: nothing to do.
+        return table.concat({ at(152), at(153), at(160) }, " ")
+    "#;
+    assert_eq!(plugin.eval(probe, &ram).unwrap(), "(1,0) - -");
+}
+
+#[test]
 fn alttp_getting_out_of_bed_turns_on_navigation_and_asks_for_the_map() {
     // The first thing a new player does. Nothing has been pressed yet — no key, no menu —
     // so guidance has to start itself, and the host raises the map off the same signal.
