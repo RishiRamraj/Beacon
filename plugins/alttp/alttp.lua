@@ -428,7 +428,9 @@ end
 -- 1.0). Enemies carry a boost so a threat is heard over the quieter guide tone;
 -- the calmer classes sit at unity.
 local BEACON_KINDS = {
-  enemy = { pitch = 1.0, range = 224, tremolo = 2.0, gain = 1.6 }, -- 120 BPM: danger
+  -- An enemy's pulse quickens as it closes, like a parking sensor: 2 Hz at the edge of range,
+  -- 12 Hz when it is on top of him, so how near it is can be heard without a word.
+  enemy = { pitch = 1.0, range = 224, tremolo = 2.0, close_tremolo = 12.0, gain = 1.6 },
   npc   = { pitch = 1.5, range = 224, tremolo = 1.0, gain = 1.0 }, -- 60 BPM: safe to approach
   minor = { pitch = 0.5, range = 24,  tremolo = 0.0, gain = 1.0 }, -- steady, incidental
 }
@@ -3154,6 +3156,14 @@ end
 -- gain, pitch and tremolo: quadratic falloff, muffled behind a wall, cleared when
 -- out of reach or `hushed`. One body for every beacon source — the per-class sprite
 -- tones and the tile-sourced chest tone alike, so they cannot drift apart.
+-- The pulse rate for class `kind` at closeness `t` (0 at the edge of range, 1 on top of him).
+-- Most classes keep one rate; one with `close_tremolo` speeds up toward it, faster still over
+-- the last few tiles (t squared), which is where the difference matters.
+function beacon_pulse(kind, t)
+  if kind.close_tremolo == nil then return kind.tremolo end
+  return kind.tremolo + (kind.close_tremolo - kind.tremolo) * t * t
+end
+
 local function sound_beacon(now, id, dx, dy, dist, kind, hushed)
   if hushed or dist >= kind.range then beacon.clear(id); return end
   local t = 1 - dist / kind.range
@@ -3161,7 +3171,7 @@ local function sound_beacon(now, id, dx, dy, dist, kind, hushed)
   if sight_blocked(now, now.x, now.y, now.x + dx, now.y + dy) then
     vol = vol * BEACON_OCCLUDED_SCALE
   end
-  beacon.set(id, { x = dx, y = dy, pitch = kind.pitch, volume = vol, tremolo = kind.tremolo })
+  beacon.set(id, { x = dx, y = dy, pitch = kind.pitch, volume = vol, tremolo = beacon_pulse(kind, t) })
 end
 
 -- ── Enemy weapons ───────────────────────────────────────────────────────────

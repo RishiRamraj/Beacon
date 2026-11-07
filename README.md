@@ -236,7 +236,9 @@ round each corner. Facing it, the beep changes. Corners and arrival have their o
 The **world makes Toby's sounds**, from where things are: pickups and chests, your markers,
 exits and stairs, doors and locked doors, spike floors, a ticking edge ahead of a pit, a bump
 where you walk into a wall, and — off by default, on with `'` — Toby's "wind" in each
-direction, pitched by how far the wall is. **Enemies** each carry a tone; a lock tick says
+direction, pitched by how far the wall is. **Enemies** each carry a pulsing tone that pulses
+faster the closer the enemy is, from twice a second at the edge of the screen to twelve times a
+second right beside you; a lock tick says
 one is straight ahead of you; hits and kills have their own sounds; `g` turns you to face the
 nearest, and `v` counts everything in view by name, distance and direction.
 

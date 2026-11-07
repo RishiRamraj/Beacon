@@ -101,6 +101,26 @@ fn alttp_enemy_is_tracked_by_beacon_and_never_spoken() {
         "audible volume, got {}",
         enemy.volume
     );
+
+    // And it pulses faster the closer it gets, like a parking sensor.
+    let pulse_at = |plugin: &mut LuaPlugin, dx: u16, n: u64| {
+        plugin.on_frame(&frame(dx), n);
+        plugin.beacons().into_iter().find(|b| b.id == "enemy").expect("a beacon").tremolo
+    };
+    let far = pulse_at(&mut plugin, 160, 2);
+    let mid = pulse_at(&mut plugin, 60, 3);
+    plugin.on_frame(&frame(20), 4);
+    let near = plugin
+        .beacons()
+        .into_iter()
+        .find(|b| b.id == "enemy")
+        .expect("still a beacon")
+        .tremolo;
+    assert!(
+        far >= 2.0 && mid > far && near > mid && near > far * 2.0,
+        "pulse quickens: {far} Hz at 10 tiles, {mid} at 4, {near} at 1"
+    );
+    assert!(near <= 12.0, "and tops out at 12 Hz, got {near}");
 }
 
 #[test]
