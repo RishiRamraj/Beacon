@@ -6508,6 +6508,44 @@ function POI.scan(s)
   return out
 end
 
+-- The pots in this room, each as where to stand to lift it and the way to face.
+--
+-- Indoors a pot is a 2x2 of tile attribute 0x70-0x7F that SWEEP.is_pot tells from a block or
+-- a hammer peg by the room's replacement table. Lifting one rewrites its tiles, so a lifted
+-- pot drops out by itself. Only on the floor he is on, and only indoors: that is
+-- where the game's pots are. Not remembered with the room, since pots come back on re-entry
+-- and a list of other rooms' pots would bury what is here.
+--
+-- The pot is solid, so the destination is the ground beside it: below first (facing north,
+-- the way the game's own pot rooms are mostly laid out), then above, then either side.
+function POI.pots(s)
+  local out = {}
+  if s.module ~= 0x07 then return out end
+  local lv = mem.u8(LOWER_LEVEL)
+  local ox, oy = (s.x - s.x % 512) >> 3, (s.y - s.y % 512) >> 3
+  local seen = {}
+  for y = 0, 63 do
+    for x = 0, 63 do
+      local a = tile_attr_at(s, (ox + x) * 8, (oy + y) * 8, lv)
+      if a ~= nil and not seen[a] and SWEEP.is_pot(a) then
+        do
+          seen[a] = true -- its first tile in reading order is its top-left
+          local tx, ty = ox + x, oy + y
+          for _, st in ipairs({ { 0, 2, 0 }, { 1, 2, 0 }, { 0, -1, 2 }, { 1, -1, 2 },
+                                { -1, 0, 6 }, { -1, 1, 6 }, { 2, 0, 4 }, { 2, 1, 4 } }) do
+            if tile_passable(s, tx + st[1], ty + st[2], lv) then
+              out[#out + 1] = { cat = "room", name = "Pot", x = (tx + st[1]) * 8 + 4,
+                                y = (ty + st[2]) * 8 + 4, level = lv, face = st[3], distinct = true }
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
 -- Records the place Link is on: at once on arriving, then every PERIOD frames while he stays,
 -- so what is there stays as it now is. A locked door or an exit seen for the first time is
 -- Toby's automatic marker: "Point of interest added."
@@ -6648,6 +6686,10 @@ function POI.candidates(s)
       if d ~= nil and d > 0 then add({ cat = "room", name = name, x = x, y = y, dist = d, unit = "tiles", go = "here" }) end
     end
   end
+  for _, c in ipairs(POI.pots(s)) do
+    local d = POI.dist_to(fl, c.x, c.y, c.level)
+    if d ~= nil and d > 0 then c.dist, c.unit, c.go = d, "tiles", "here"; add(c) end
+  end
   -- Unexplored ground here: reached tiles Link has not been near, nearest first, spread out.
   local frontier = {}
   for k, d in pairs(fl.dist) do
@@ -6763,7 +6805,7 @@ function POI.list(s, cands, cat)
   for _, r in ipairs(rows) do
     local dup = false
     for _, k in ipairs(kept) do
-      if k.name == r.name and k.go == r.go and k.room == r.room
+      if not r.distinct and k.name == r.name and k.go == r.go and k.room == r.room
           and math.abs(k.x - r.x) + math.abs(k.y - r.y) < POI.DEDUPE * 8 then dup = true; break end
     end
     if not dup then

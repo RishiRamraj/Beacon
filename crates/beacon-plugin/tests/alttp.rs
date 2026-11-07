@@ -7716,6 +7716,55 @@ fn alttp_m_opens_tobys_points_of_interest_menu() {
 }
 
 #[test]
+fn alttp_this_room_lists_its_pots_to_walk_to() {
+    // Pots under This room, each its own entry even side by side, and a lifted one gone.
+    // Choosing one guides to the ground below it, facing north to lift it.
+    let r = Registry::builtin();
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let mut ram = dungeon_frame((32, 40), (10, 10), &[]);
+    {
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E005D, 0x00); // awake
+        // Three 2x2 pots in a row north of him, slots 0, 1 and 2; slot 2 already lifted.
+        for (slot, tx) in [(0u32, 30u32), (1, 32), (2, 34)] {
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                set(0x7F2000 + (30 + dy) * 64 + tx + dx, 0x70 | slot as u8);
+            }
+            let state: u16 = if slot == 2 { 0 } else { 0x1111 };
+            set(0x7E0500 + slot * 2, (state & 0xFF) as u8);
+            set(0x7E0501 + slot * 2, (state >> 8) as u8);
+        }
+    }
+    plugin.on_frame(&ram, 0);
+    plugin.on_frame(&ram, 1);
+    plugin.command("poi", &ram);
+    let menu = plugin.take_menu().expect("M opens the menu");
+    let room = menu
+        .items
+        .iter()
+        .find(|i| i.label == "Exploration")
+        .and_then(|e| e.items.iter().find(|i| i.label == "This room"))
+        .expect("This room");
+    let pots: Vec<&str> = room
+        .items
+        .iter()
+        .map(|i| i.label.as_str())
+        .filter(|l| l.starts_with("Pot - "))
+        .collect();
+    assert_eq!(pots.len(), 2, "two pots, the lifted one gone: {:?}", room.items);
+    assert!(pots.iter().all(|l| l.contains("North")), "{pots:?}");
+
+    let first = room.items.iter().find(|i| i.label.starts_with("Pot - ")).unwrap();
+    plugin.menu_chosen(first.id.as_deref().unwrap(), &ram);
+    plugin.on_frame(&ram, 2);
+    assert_eq!(
+        plugin.eval("return tostring(pathfind_face) .. ' ' .. pathfind_goal[2]", &ram).unwrap(),
+        "0 32",
+        "to the row below the pot, facing north"
+    );
+}
+
+#[test]
 fn alttp_the_menu_remembers_what_was_seen_in_other_rooms() {
     // Toby lists what the player has seen, not just what is in front of him: a chest passed in
     // the last room is still on the Unopened list after leaving it, rooms away, and the room

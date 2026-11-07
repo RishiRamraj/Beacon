@@ -110,7 +110,7 @@ the bottom row, A and S above them.
 
 - M: the navigation menu. It lists where you can go: your quest objective, your markers, and
   places you have found, such as unexplored areas, unopened chests, keys, pickups, exits and
-  stairs, and what is in this room. Each list starts with Stop navigation. Pick a place and
+  stairs, and what is in this room: people, enemies and pots. A pot leads you to the spot beside it, facing it, ready to lift. Each list starts with Stop navigation. Pick a place and
   the guide leads you there one waypoint at a time: a beeping sound sits on the next corner,
   door or staircase along the way, and gets louder as you get close. Walk toward it. The beep
   changes when you are facing it. When you reach a waypoint you hear a chime, and Beacon says
