@@ -6861,6 +6861,37 @@ fn alttp_a_door_half_a_body_off_is_lined_up_before_the_guide_sends_him_through()
 }
 
 #[test]
+fn alttp_every_change_of_direction_says_the_new_direction_and_tiles() {
+    // A tester: "Whenever nav changes direction, state the new direction and the number of
+    // tiles." Picking up a waypoint always did; a route re-planned under him, a corner merged
+    // away, or the carrot style changed direction in silence.
+    let r = Registry::builtin();
+    for mode in ["waypoints", "carrot"] {
+        let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+        let ram = dungeon_frame((0, 0), (0, 0), &[]);
+        let probe = format!(
+            r#"
+            GUIDE.mode = "{mode}"
+            GUIDE.target, GUIDE.said_dir, GUIDE.said_at = nil, nil, nil
+            local s = {{ module = 0x07, x = 200, y = 200, direction = 0 }}
+            local fx, fy = foot(s)
+            local function aim(path) GUIDE.aim(s, path, 1, fx, fy, false) end
+            for _ = 1, 40 do aim({{ {{ 26, 10 }} }}) end   -- north, 16 tiles of Link
+            for _ = 1, 40 do aim({{ {{ 26, 8 }} }}) end    -- re-planned, still north: quiet
+            for _ = 1, 40 do aim({{ {{ 40, 26 }} }}) end   -- re-planned east: said
+            return "ok"
+            "#
+        );
+        plugin.eval(&probe, &ram).unwrap();
+        let said: Vec<String> = plugin.on_frame(&ram, 0).into_iter().map(|i| i.text).collect();
+        let legs: Vec<&String> = said.iter().filter(|t| t.contains("tile")).collect();
+        assert_eq!(legs.len(), 2, "{mode}: the first leg and the turn, nothing else: {said:?}");
+        assert!(legs[0].contains("north"), "{mode}: {said:?}");
+        assert!(legs[1].contains("east") && legs[1].contains("7 tiles"), "{mode}: {said:?}");
+    }
+}
+
+#[test]
 fn alttp_getting_out_of_bed_turns_on_navigation_and_asks_for_the_map() {
     // The first thing a new player does. Nothing has been pressed yet — no key, no menu —
     // so guidance has to start itself, and the host raises the map off the same signal.

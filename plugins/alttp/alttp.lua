@@ -2224,8 +2224,22 @@ function GUIDE.say_leg(s, t)
   local fx, fy = foot(s)
   local dx, dy = t.x - fx, t.y - fy
   local tiles = math.max(1, (math.abs(dx) + math.abs(dy) + 8) // 16)
-  say(string.format("%s, %s, %d %s.", t.label, direction(dx, dy), tiles, tiles == 1 and "tile" or "tiles"),
+  GUIDE.said_dir, GUIDE.said_at = direction(dx, dy), GUIDE.tick
+  say(string.format("%s, %s, %d %s.", t.label, GUIDE.said_dir, tiles, tiles == 1 and "tile" or "tiles"),
     { priority = "navigation", category = "waypoint" })
+end
+
+-- Whenever the way to go changes, it is said: the new direction and how many tiles. Picking
+-- up a waypoint already says it; this catches every other way the target can move to a new
+-- direction without being reached, such as a re-plan, a corner merged away, a new screen, or
+-- the carrot style, which otherwise says nothing at all. A target that moves but still lies the
+-- same way is not news, and a burst of changes is said at most twice a second.
+GUIDE.tick = 0
+GUIDE.SAY_GAP = 30 -- frames
+function GUIDE.say_if_turned(s, t, fx, fy)
+  if direction(t.x - fx, t.y - fy) == GUIDE.said_dir then return end
+  if GUIDE.said_at ~= nil and GUIDE.tick - GUIDE.said_at < GUIDE.SAY_GAP then return end
+  GUIDE.say_leg(s, t)
 end
 
 -- Notes the follower's progress; the carrot counts its corners here, the waypoint guide in aim.
@@ -2249,6 +2263,7 @@ function GUIDE.aim(s, path, wp, fx, fy, duck)
     end
     return
   end
+  GUIDE.tick = GUIDE.tick + 1
   local released = GUIDE.released
   GUIDE.released = nil
   local w, i = GUIDE.pick(s, path, wp, fx, fy)
@@ -2259,6 +2274,7 @@ function GUIDE.aim(s, path, wp, fx, fy, duck)
   local moved = was == nil or was.tx ~= t.tx or was.ty ~= t.ty
   GUIDE.target = t
   if GUIDE.mode == "carrot" then
+    if moved then GUIDE.say_if_turned(s, t, fx, fy) end
     aim_path_beacon(s, route_aim(path, wp, fx, fy), duck)
     return
   end
@@ -2269,6 +2285,8 @@ function GUIDE.aim(s, path, wp, fx, fy, duck)
       GUIDE.say_leg(s, t)
     elseif was == nil then
       GUIDE.say_leg(s, t) -- the first leg of a route
+    else
+      GUIDE.say_if_turned(s, t, fx, fy)
     end
   end
   CARROT.place(s, t.x - fx, t.y - fy, duck, true)
