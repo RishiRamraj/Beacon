@@ -52,6 +52,8 @@ pub struct Session {
     audio: Audio,
     arbiter: Arbiter,
     speech: Fanout,
+    /// The player's screen reader, for menus only; empty where the reader reads the tree.
+    reader: Fanout,
     plugin: Box<dyn Plugin>,
     /// The spec the plugin was built from, kept so it can be reloaded. `None` for
     /// a session with no matching plugin.
@@ -133,7 +135,7 @@ pub struct Session {
     /// the startup priming burst and measures only sustained starvation.
     underrun_baseline: Option<u64>,
     /// The latest thing to announce through the screen reader, exactly as it should be
-    /// published. Only used while `speech.screen_reader` is on; see [`Session::announcement`].
+    /// published: menu lines while a reader is attached, and everything with `speech.screen_reader`.
     announcement: Option<String>,
     /// Whether assistive technology is actually attached to the accessibility tree.
     ///
@@ -181,6 +183,7 @@ impl Session {
         audio: Audio,
         arbiter: Arbiter,
         speech: Fanout,
+        reader: Fanout,
         plugin: Box<dyn Plugin>,
         reload_spec: Option<PluginSpec>,
         rom: std::rc::Rc<Vec<u8>>,
@@ -198,6 +201,7 @@ impl Session {
             audio,
             arbiter,
             speech,
+            reader,
             plugin,
             reload_spec,
             rom,
@@ -472,23 +476,42 @@ impl Session {
         if self.muted {
             return;
         }
-        // Through the screen reader, when the player has asked for that. The menu is the one
-        // exception: an open menu is already published as a real menu, and the reader speaks
-        // each entry from the focused node, so also putting Beacon's wording in the live
-        // region would have every menu item read twice.
-        if self.settings.speech.screen_reader && self.at_listening {
-            let in_tree = self
-                .menu
-                .as_ref()
-                .is_some_and(|menu| menu.duplicates(&utterance.text))
-                || self
-                    .config
+        // Menus are the screen reader's; everything else is Beacon's own voice.
+        //
+        // An open menu (or the key configuration) is published as real menu nodes, and the
+        // reader speaks each entry from the focused node, so a line it already reads from the
+        // tree is not said again. Other menu lines go to the reader directly where there is
+        // one (Tolk on Windows), or into the live region where a reader is attached. With no
+        // reader at all, the voice speaks them. `speech.screen_reader` sends everything to the
+        // reader instead, for a player who wants one voice for all of it.
+        let menu_line = self.menu.is_some() || self.config.is_some();
+        if menu_line || self.settings.speech.screen_reader {
+            let in_tree = self.at_listening
+                && (self
+                    .menu
                     .as_ref()
-                    .is_some_and(|c| c.duplicates(&utterance.text, &self.settings.keymap));
-            if !in_tree {
-                self.announcement = Some(distinct(self.announcement.as_deref(), &utterance.text));
+                    .is_some_and(|menu| menu.duplicates(&utterance.text))
+                    || self
+                        .config
+                        .as_ref()
+                        .is_some_and(|c| c.duplicates(&utterance.text, &self.settings.keymap)));
+            if in_tree {
+                return;
             }
-            return;
+            if !self.reader.is_empty() {
+                // The voice stops, so a menu is not read over the top of the game.
+                if utterance.interrupt {
+                    let _ = self.speech.cancel();
+                }
+                if let Err(e) = self.reader.speak(&utterance) {
+                    eprintln!("speech: {e}");
+                }
+                return;
+            }
+            if self.at_listening {
+                self.announcement = Some(distinct(self.announcement.as_deref(), &utterance.text));
+                return;
+            }
         }
         if let Err(e) = self.speech.speak(&utterance) {
             eprintln!("speech: {e}");

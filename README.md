@@ -67,12 +67,19 @@ Beacon ships no game data. **Bring your own ROM.**
 ./target/release/beacon "/path/to/your.sfc"
 ```
 
-On Linux, speech goes through speech-dispatcher, so you get the voice and rate
-you have already configured. If it is not running, Beacon says so and plays on.
+Speech comes from two places. Menus go to your screen reader, which reads them as real
+menus. Everything else the game says (narration, navigation, answers to keys) is spoken by
+Beacon's own voice, at its own rate (`rate` under `[speech]`), so it never waits behind or
+cuts off your screen reader. To have the screen reader speak the game too, turn on Settings,
+then Game speech through screen reader (`screen_reader = true`).
 
-On Windows, speech goes through your screen reader — NVDA, JAWS, or any other Tolk
-supports — falling back to SAPI. Keep `Tolk.dll`, `nvdaControllerClient64.dll` and
-`SAAPI64.dll` beside `beacon.exe`; the Windows download already has them.
+On Linux, Beacon's voice is speech-dispatcher, so you get the voice you have already
+configured. If it is not running, Beacon says so and plays on. Orca reads the menus.
+
+On Windows, Beacon's voice is SAPI, the speech engine built into Windows. Menus go to your
+screen reader, NVDA, JAWS, or any other that Tolk supports. Keep `Tolk.dll`,
+`nvdaControllerClient64.dll` and `SAAPI64.dll` beside `beacon.exe`; the Windows download
+already has them. If SAPI will not start, the screen reader speaks everything, as before.
 
 ### Controls
 
@@ -289,8 +296,9 @@ if the picture misbehaves on a particular card.
 On Linux, use **Window Capture (PipeWire)**, or **Screen Capture (PipeWire)** on Wayland, and
 pick the Beacon window when the desktop asks. On X11, **Window Capture (Xcomposite)** works too.
 
-**The sound.** Beacon's game audio and its navigation sounds come from Beacon itself. Speech
-comes from your screen reader, a separate program, unless Beacon is speaking through SAPI.
+**The sound.** Beacon's game audio, its navigation sounds and its game speech all come from
+Beacon itself (on Windows its voice is SAPI, which plays from `beacon.exe`). Menu speech
+comes from your screen reader, a separate program.
 
 - On Windows 10 version 2004 or later, with OBS 28 or later, add an **Application Audio
   Capture** source and choose the Beacon window. Set its match priority to the executable
@@ -399,7 +407,8 @@ same directory. Send that file with the report.
 
 ```toml
 [speech]
-rate = 60          # -100 slowest, 100 fastest
+rate = 60          # Beacon's voice, -100 slowest, 100 fastest
+screen_reader = false # true: the screen reader speaks the game too, not only menus
 
 [arbiter]
 verbosity = 2      # 0 critical only, 3 everything

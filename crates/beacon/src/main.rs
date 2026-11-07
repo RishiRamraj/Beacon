@@ -155,25 +155,34 @@ fn parse_args() -> Args {
 ///
 /// A missing screen reader must never prevent the emulator from starting. It
 /// degrades what Beacon can tell you; it does not stop you playing.
-fn build_speech(settings: &Settings, args: &Args) -> Fanout {
-    let mut fanout = Fanout::new();
+fn build_speech(settings: &Settings, args: &Args) -> (Fanout, Fanout) {
+    // Two outputs. The VOICE is Beacon's own, speaking everything the game says: narration,
+    // navigation, answers to keys. The READER is the player's screen reader, and speaks only
+    // the menus, which it reads from the accessibility tree anyway. Keeping them apart means
+    // game speech never queues behind, or cuts off, what the reader is saying, and plays at
+    // Beacon's own rate.
+    let mut voice = Fanout::new();
+    let mut reader = Fanout::new();
 
     // In MCP mode stdout carries the protocol, so the JSON event sink must stay
     // off it; the agent gets speech through the recent_speech tool instead.
     if !args.mcp && (args.json || settings.speech.json_events) {
-        fanout.push(Box::new(JsonSink::new(std::io::stdout())));
+        voice.push(Box::new(JsonSink::new(std::io::stdout())));
+        reader.push(Box::new(JsonSink::new(std::io::stdout())));
     }
 
     if args.quiet || !settings.speech.enabled {
-        return fanout;
+        return (voice, reader);
     }
+    let rate = args.rate.unwrap_or(settings.speech.rate);
 
+    // Linux: speech-dispatcher is the voice. The reader (Orca) reads the menus from the
+    // accessibility tree, so it needs no sink of its own here.
     #[cfg(unix)]
     {
         use beacon_output::sink::SpeechDispatcherSink;
         match SpeechDispatcherSink::connect() {
             Ok(mut sink) => {
-                let rate = args.rate.unwrap_or(settings.speech.rate);
                 if let Err(e) = sink.set_rate(rate) {
                     eprintln!("could not set speech rate: {e}");
                 }
@@ -182,35 +191,51 @@ fn build_speech(settings: &Settings, args: &Args) -> Fanout {
                         eprintln!("could not set speech module: {e}");
                     }
                 }
-                fanout.push(Box::new(sink));
+                voice.push(Box::new(sink));
             }
             Err(e) => eprintln!("speech unavailable: {e}\n  (is speech-dispatcher running?)"),
         }
     }
 
-    // Windows has no speech-dispatcher. The equivalent is the player's screen reader, which
-    // is where their voice, rate and punctuation settings live — so Beacon speaks through it
-    // rather than choosing a voice of its own, the same principle as inheriting Orca's.
+    // Windows: SAPI, built into Windows, is the voice; NVDA or JAWS, through Tolk, is the
+    // reader. If SAPI will not start, the reader speaks everything, as before.
     //
-    // Both libraries are DLLs that ship beside the executable, so a missing one is ordinary
-    // rather than an error: Beacon says so and carries on with the JSON stream, which is
-    // exactly what that stream is the insurance policy for.
+    // Both screen reader libraries are DLLs that ship beside the executable, so a missing one
+    // is ordinary rather than an error: Beacon says so and carries on.
     #[cfg(windows)]
     {
-        use beacon_output::sink::ScreenReaderSink;
+        use beacon_output::sink::{SapiSink, ScreenReaderSink};
+        let sapi = match SapiSink::connect() {
+            Ok(mut sink) => {
+                if let Err(e) = sink.set_rate(rate) {
+                    eprintln!("could not set speech rate: {e}");
+                }
+                eprintln!("speech: game voice SAPI");
+                voice.push(Box::new(sink));
+                true
+            }
+            Err(e) => {
+                eprintln!("speech: {e}; the screen reader will speak everything");
+                false
+            }
+        };
         match ScreenReaderSink::connect() {
             Ok(sink) => {
-                eprintln!("speech: {}", sink.name());
-                fanout.push(Box::new(sink));
+                eprintln!("speech: menus through {}", sink.name());
+                if sapi {
+                    reader.push(Box::new(sink));
+                } else {
+                    voice.push(Box::new(sink));
+                }
             }
             Err(e) => eprintln!(
-                "speech unavailable: {e}\n  (put Tolk.dll, or nvdaControllerClient64.dll, \
+                "screen reader unavailable: {e}\n  (put Tolk.dll, or nvdaControllerClient64.dll, \
                  beside beacon.exe)"
             ),
         }
     }
 
-    fanout
+    (voice, reader)
 }
 
 /// Runs without a window. Used for benchmarking and for replay testing, both of
@@ -334,7 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let arbiter = Arbiter::new(Config::from(&settings.arbiter));
-    let speech = build_speech(&settings, &args);
+    let (speech, reader) = build_speech(&settings, &args);
     let rom = match args.rom.as_ref() {
         Some(path) => rom::read(path),
         None => Rc::new(Vec::new()),
@@ -369,6 +394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio,
         arbiter,
         speech,
+        reader,
         plugin,
         reload_spec,
         rom.clone(),

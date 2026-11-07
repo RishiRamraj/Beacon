@@ -593,3 +593,73 @@ impl SpeechSink for ScreenReaderSink {
         self.name
     }
 }
+
+/// Beacon's own voice on Windows: SAPI, the speech engine built into Windows, spoken directly
+/// rather than through the player's screen reader.
+///
+/// Gameplay narration goes here, so the screen reader is left free for menus, and a line of
+/// game speech never queues behind, or cuts off, something the reader is saying. It has its
+/// own rate, from `speech.rate`, independent of the reader's.
+///
+/// Written on Linux and checked by cross-compiling; it has not spoken on real Windows yet.
+#[cfg(windows)]
+pub struct SapiSink {
+    voice: windows::Win32::Media::Speech::ISpVoice,
+}
+
+#[cfg(windows)]
+impl SapiSink {
+    pub fn connect() -> io::Result<Self> {
+        use windows::Win32::Media::Speech::{ISpVoice, SpVoice};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+        unsafe {
+            // Already initialised (Tolk does it) is fine, in either apartment: SAPI works in both.
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL)
+                .map_err(|e| io::Error::other(format!("SAPI unavailable: {e}")))?;
+            Ok(SapiSink { voice })
+        }
+    }
+
+    /// `rate` is Beacon's -100..100; SAPI's is -10..10.
+    pub fn set_rate(&mut self, rate: i8) -> io::Result<()> {
+        unsafe { self.voice.SetRate((rate as i32 / 10).clamp(-10, 10)) }
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+}
+
+#[cfg(windows)]
+impl SpeechSink for SapiSink {
+    fn speak(&mut self, utterance: &Utterance) -> io::Result<()> {
+        use windows::Win32::Media::Speech::{SPF_ASYNC, SPF_IS_NOT_XML, SPF_PURGEBEFORESPEAK};
+        let mut flags = SPF_ASYNC.0 | SPF_IS_NOT_XML.0;
+        if utterance.interrupt {
+            flags |= SPF_PURGEBEFORESPEAK.0;
+        }
+        let text = wide(&utterance.text);
+        unsafe {
+            self.voice
+                .Speak(windows::core::PCWSTR(text.as_ptr()), flags as u32, None)
+        }
+        .map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    fn cancel(&mut self) -> io::Result<()> {
+        use windows::Win32::Media::Speech::{SPF_ASYNC, SPF_PURGEBEFORESPEAK};
+        let empty = [0u16];
+        unsafe {
+            self.voice.Speak(
+                windows::core::PCWSTR(empty.as_ptr()),
+                (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0) as u32,
+                None,
+            )
+        }
+        .map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    fn name(&self) -> &'static str {
+        "SAPI"
+    }
+}

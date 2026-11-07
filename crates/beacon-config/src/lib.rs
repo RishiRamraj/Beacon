@@ -58,17 +58,16 @@ pub struct Speech {
     pub voice: String,
     /// Emit line delimited JSON events on stdout for external tooling.
     pub json_events: bool,
-    /// Announce through the screen reader instead of speaking directly.
+    /// Send game speech to the screen reader too, not only the menus.
     ///
-    /// Off by default, because speaking directly is what Beacon is built around: it decides
-    /// what interrupts what, and it works with no screen reader running at all. On, every
-    /// announcement is published into the accessibility tree as a live region and the screen
-    /// reader reads it — no Tolk.dll needed on Windows, and any reader on any platform will do.
+    /// Off by default. Menus always go to the screen reader, which reads them as real menus;
+    /// everything else (narration, navigation, answers to keys) is Beacon's own voice:
+    /// speech-dispatcher on Linux, SAPI on Windows. That voice keeps its own rate, and game
+    /// speech never queues behind, or cuts off, what the reader is saying.
     ///
-    /// The trade is real in both directions, which is why it is a setting rather than a
-    /// decision made here. Through the reader, Beacon loses fine control of interruption and
-    /// depends on how that reader handles live regions changing quickly, which is the case they
-    /// handle worst. With no reader running, it is silence.
+    /// On, the game's lines go to the reader as well, for a player who wants one voice for
+    /// everything. The cost is Beacon's control of interruption, and with no reader running,
+    /// silence.
     pub screen_reader: bool,
 }
 

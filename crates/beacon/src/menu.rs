@@ -254,7 +254,7 @@ fn entries(level: Level, ctx: &Context) -> Vec<Entry> {
             ),
             toggle("Speech", ctx.speech, "speech.enabled"),
             toggle(
-                "Announce through screen reader",
+                "Game speech through screen reader",
                 ctx.screen_reader,
                 "speech.screen_reader",
             ),
@@ -925,7 +925,7 @@ mod tests {
 
         assert_eq!(
             menu.navigate(1),
-            "Announce through screen reader: off, 3 of 9."
+            "Game speech through screen reader: off, 3 of 9."
         );
         assert_eq!(menu.navigate(1), "Spatial audio: off, 4 of 9.");
         assert_eq!(
