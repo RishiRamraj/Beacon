@@ -3323,71 +3323,109 @@ end
 -- ── Enemies, Toby's way ─────────────────────────────────────────────────────
 -- In Doom every monster is heard by its own sounds; ALttP's are mostly silent, so the few
 -- nearest each carry Beacon's enemy tone. On top of that, Toby's targeting:
---   lock     Toby's lock tick, every 7 tics (12 frames), while an enemy is straight ahead of
---            the way Link faces, within LOCK_RANGE and in sight; a new target is named
+--   in line  an enemy on Link's row or column, within LOCK_RANGE and in sight, is named with
+--            the way to turn ("Green Soldier, in line, east"); Toby's lock tick, every 7
+--            tics (12 frames), while he is also facing it
 --   hit      a sound where a blow lands (an enemy's health drops)
 --   kill     a sound where an enemy falls (its health reaches nothing)
 --   snap     a command: turn Link to face the nearest enemy in sight (Toby's snap-to-target)
 ENEMY = {
   VOICES = 4,        -- enemies that sound at once, nearest first
   LOCK_RANGE = 128,  -- px ahead: eight tiles, about an arrow's useful reach
-  LOCK_WIDTH = 12,   -- px either side of the line he faces
   LOCK_EVERY = 12,   -- frames between lock ticks
   lock_in = 0,
   target = nil,      -- slot of the enemy locked on
   hp = {},           -- slot -> { kind, hp } as last seen, for hits and kills
 }
 
+-- Every enemy is heard by its footsteps, Toby's step/default, from where it is: a step every
+-- STEP frames, louder the nearer it is (quadratic, from a faint floor at the edge of range to
+-- full beside him), muffled behind a wall. The nearest few each step on their own beat,
+-- offset by slot, so two are two sets of feet and not one. `ENEMY.heard` holds what each voice
+-- last sounded like, for an agent over MCP and for the tests.
+ENEMY.STEP = 20           -- frames between footsteps, three a second
+ENEMY.STEP_SOUND = "step/default"
+ENEMY.FLOOR = 0.12        -- loudness at the edge of range, so a far enemy is still heard
+ENEMY.heard = {}
+ENEMY.step_in = {}
+
 function ENEMY.voices(s, list)
-  local k = 1
+  local kind = BEACON_KINDS.enemy
+  local k, live = 1, {}
   for _, sp in ipairs(list) do
-    if category(sp) == "enemy" then
-      if k > 1 then
-        sound_beacon(s, "enemy" .. k, sp.dx, sp.dy, sp.dist, BEACON_KINDS.enemy, false)
+    if k > ENEMY.VOICES then break end
+    if category(sp) == "enemy" and sp.dist < kind.range then
+      local id = (k == 1) and "enemy" or ("enemy" .. k)
+      local t = 1 - sp.dist / kind.range
+      local vol = math.min(1, (ENEMY.FLOOR + (1 - ENEMY.FLOOR) * t * t) * (kind.gain or 1))
+      if sight_blocked(s, s.x, s.y, s.x + sp.dx, s.y + sp.dy) then vol = vol * BEACON_OCCLUDED_SCALE end
+      ENEMY.heard[id] = { dx = sp.dx, dy = sp.dy, volume = vol, slot = sp.slot }
+      live[sp.slot] = true
+      local due = ENEMY.step_in[sp.slot] or ((sp.slot * 5) % ENEMY.STEP)
+      if due <= 0 then
+        sound.play(ENEMY.STEP_SOUND, { x = sp.dx, y = sp.dy, volume = vol })
+        due = ENEMY.STEP
       end
+      ENEMY.step_in[sp.slot] = due - 1
       k = k + 1
-      if k > ENEMY.VOICES then break end
     end
   end
-  for i = math.max(2, k), ENEMY.VOICES do beacon.clear("enemy" .. i) end
+  for i = k, ENEMY.VOICES do ENEMY.heard[(i == 1) and "enemy" or ("enemy" .. i)] = nil end
+  for slot in pairs(ENEMY.step_in) do if not live[slot] then ENEMY.step_in[slot] = nil end end
+  for i = 1, ENEMY.VOICES do beacon.clear((i == 1) and "enemy" or ("enemy" .. i)) end
 end
 
 function ENEMY.silence()
-  for i = 2, ENEMY.VOICES do beacon.clear("enemy" .. i) end
+  for i = 1, ENEMY.VOICES do beacon.clear((i == 1) and "enemy" or ("enemy" .. i)) end
+  ENEMY.heard, ENEMY.step_in = {}, {}
   ENEMY.target, ENEMY.hp = nil, {}
 end
 
--- The enemy straight ahead of Link's facing, nearest first, or nil.
-function ENEMY.ahead(s, list)
-  local d = DIRS[s.direction]
-  if d == nil then return nil end
-  local best, best_along
+-- The nearest enemy in line with Link: on his row or his column, within ALIGN pixels, centre
+-- to centre, which is where a sword thrust or an arrow meets it. Any of the four ways, not just
+-- the one he faces, so "in line, east" tells him which way to turn. Within LOCK_RANGE and in
+-- sight. A diagonal, however close to his facing, is not in line and is not called.
+-- Centres: his is his feet (foot), a sprite's is eight pixels into its 16-pixel square.
+ENEMY.ALIGN = 6
+function ENEMY.aligned(s, list)
+  local fx, fy = foot(s)
+  local best, best_d, best_dir
   for _, sp in ipairs(list) do
     if is_enemy(sp) and (sp.hp or 0) > 0 then
-      local along = d.dx * sp.dx + d.dy * sp.dy
-      local across = math.abs(d.dx * sp.dy - d.dy * sp.dx)
-      if along > 0 and along <= ENEMY.LOCK_RANGE and across <= ENEMY.LOCK_WIDTH
-          and (best_along == nil or along < best_along)
+      local cx, cy = sp.x + 8 - fx, sp.y + 8 - fy
+      local dir, along
+      if math.abs(cy) <= ENEMY.ALIGN and cx ~= 0 then
+        dir, along = (cx > 0) and 6 or 4, math.abs(cx)
+      elseif math.abs(cx) <= ENEMY.ALIGN and cy ~= 0 then
+        dir, along = (cy > 0) and 2 or 0, math.abs(cy)
+      end
+      if dir ~= nil and along <= ENEMY.LOCK_RANGE and (best_d == nil or along < best_d)
           and not sight_blocked(s, s.x, s.y, s.x + sp.dx, s.y + sp.dy) then
-        best, best_along = sp, along
+        best, best_d, best_dir = sp, along, dir
       end
     end
   end
-  return best
+  return best, best_dir
 end
 
 function ENEMY.update(s, list)
-  -- Target lock.
-  local t = ENEMY.ahead(s, list)
+  -- In line: said once per enemy as it comes into line, with the way to turn; Toby's lock
+  -- tick while he is also facing it, which is when a swing will land.
+  local t, dir = ENEMY.aligned(s, list)
   if t then
-    ENEMY.lock_in = ENEMY.lock_in - 1
-    if ENEMY.lock_in <= 0 then
-      ENEMY.lock_in = ENEMY.LOCK_EVERY
-      sound.ui("weapons/lock")
+    if dir == s.direction then
+      ENEMY.lock_in = ENEMY.lock_in - 1
+      if ENEMY.lock_in <= 0 then
+        ENEMY.lock_in = ENEMY.LOCK_EVERY
+        sound.ui("weapons/lock")
+      end
+    else
+      ENEMY.lock_in = 0
     end
     if ENEMY.target ~= t.slot then
       ENEMY.target = t.slot
-      say(poi_cap_name(enemy_name(t)) .. ".", { priority = "interaction", category = "target", rate_limit = "1s" })
+      say(poi_cap_name(enemy_name(t)) .. ", in line, " .. DIRS[dir].word .. ".",
+          { priority = "interaction", category = "target", rate_limit = "1s" })
     end
   else
     ENEMY.target, ENEMY.lock_in = nil, 0
@@ -3786,6 +3824,8 @@ function on_frame(frame)
     -- enemy sounds (the rest hushed). Each class swells at its own rate and gain.
     for name, kind in pairs(BEACON_KINDS) do
       local sp = nearest[name]
+      -- Enemies are heard by their footsteps instead (ENEMY.voices), not a tone.
+      if name == "enemy" then sp = nil end
       if sp then
         sound_beacon(now, name, sp.dx, sp.dy, sp.dist, kind, combat_engaged and name ~= "enemy")
       else

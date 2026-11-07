@@ -88,39 +88,91 @@ fn alttp_enemy_is_tracked_by_beacon_and_never_spoken() {
         !soldier(&plugin.on_frame(&frame(60), 1)),
         "the enemy is not spoken as it enters the screen"
     );
-    // The nearest enemy still gets a spatial-audio beacon, panned toward it,
-    // louder the nearer it is.
-    let b = plugin.beacons();
-    let enemy = b
-        .iter()
-        .find(|b| b.id == "enemy")
-        .expect("a beacon on the enemy");
-    assert!(enemy.dx > 0.0, "panned east");
+    // The nearest enemy is heard by its footsteps, from its side, louder the nearer it is.
+    let (dx, _, volume) = enemy_heard(&mut plugin).expect("the enemy's footsteps");
+    assert!(dx > 0.0, "from the east");
+    assert!(volume > 0.0 && volume <= 1.0, "audible volume, got {volume}");
     assert!(
-        enemy.volume > 0.0 && enemy.volume <= 1.0,
-        "audible volume, got {}",
-        enemy.volume
+        !plugin.beacons().iter().any(|b| b.id == "enemy"),
+        "no tone any more: footsteps instead"
     );
 
-    // And it pulses faster the closer it gets, like a parking sensor.
-    let pulse_at = |plugin: &mut LuaPlugin, dx: u16, n: u64| {
-        plugin.on_frame(&frame(dx), n);
-        plugin.beacons().into_iter().find(|b| b.id == "enemy").expect("a beacon").tremolo
+    // Footsteps, on a beat, and louder as it approaches.
+    let loud_at = |plugin: &mut LuaPlugin, dx: u16, n: u64| {
+        let mut steps = 0;
+        for i in 0..40 {
+            plugin.on_frame(&frame(dx), n * 100 + i);
+            steps += played(plugin).iter().filter(|(name, _, _)| name == "step/default").count();
+        }
+        (enemy_heard(plugin).expect("heard").2, steps)
     };
-    let far = pulse_at(&mut plugin, 160, 2);
-    let mid = pulse_at(&mut plugin, 60, 3);
-    plugin.on_frame(&frame(20), 4);
-    let near = plugin
-        .beacons()
-        .into_iter()
-        .find(|b| b.id == "enemy")
-        .expect("still a beacon")
-        .tremolo;
+    let (far, far_steps) = loud_at(&mut plugin, 160, 2);
+    let (mid, _) = loud_at(&mut plugin, 60, 3);
+    let (near, _) = loud_at(&mut plugin, 20, 4);
+    assert!(far_steps >= 1, "footsteps play: {far_steps} in 40 frames");
+    assert!(far > 0.0 && mid > far && near > mid, "louder as it nears: {far}, {mid}, {near}");
+}
+
+#[test]
+fn alttp_an_enemy_is_called_in_line_only_on_links_row_or_column() {
+    // "Only say you are in line with the enemy when you are horizontally or vertically
+    // aligned." A soldier off on a diagonal, even close to the way he faces, is not called;
+    // one on his row is, with the way to turn, and the lock tick sounds only once he faces it.
+    let r = Registry::builtin();
+    let frame = |ex: u16, ey: u16, facing: u8| -> Vec<u8> {
+        let mut ram = vec![0u8; 128 * 1024];
+        let mut set = |addr: u32, v: u8| ram[wram_offset(addr).unwrap()] = v;
+        set(0x7E0010, 0x09);
+        set(0x7E0011, 0x00);
+        set(0x7EF36C, 24);
+        set(0x7EF36D, 24);
+        set(0x7E0022, 0x00);
+        set(0x7E0023, 0x01); // Link X = 0x0100
+        set(0x7E0020, 0x00);
+        set(0x7E0021, 0x01); // Link Y = 0x0100
+        set(0x7E002F, facing);
+        set(0x7E0DD0, 0x09);
+        set(0x7E0E20, 65); // Green Soldier
+        set(0x7E0E50, 4);
+        set(0x7E0D10, (ex & 0xFF) as u8);
+        set(0x7E0D30, (ex >> 8) as u8);
+        set(0x7E0D00, (ey & 0xFF) as u8);
+        set(0x7E0D20, (ey >> 8) as u8);
+        ram
+    };
+    let said = |plugin: &mut LuaPlugin, ram: &[u8], n: u64| -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 0..30 {
+            out.extend(plugin.on_frame(ram, n * 100 + i).into_iter().map(|x| x.text));
+        }
+        out
+    };
+    let ticks = |plugin: &mut LuaPlugin| -> usize {
+        plugin
+            .take_sounds()
+            .into_iter()
+            .filter(|c| matches!(c, SoundCmd::Play { name, .. } if name == "weapons/lock"))
+            .count()
+    };
+
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    // Facing east, the soldier 60 east and 20 north: a diagonal, so nothing.
+    let out = said(&mut plugin, &frame(0x0100 + 60, 0x0100 - 20, 6), 1);
+    assert!(!out.iter().any(|t| t.contains("in line")), "a diagonal is not in line: {out:?}");
+    assert_eq!(ticks(&mut plugin), 0, "and no lock tick");
+
+    // Facing north, the soldier on his row to the east: called, with the way to turn, no tick.
+    let mut plugin = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
+    let out = said(&mut plugin, &frame(0x0100 + 60, 0x0104, 0), 2);
     assert!(
-        far >= 2.0 && mid > far && near > mid && near > far * 2.0,
-        "pulse quickens: {far} Hz at 10 tiles, {mid} at 4, {near} at 1"
+        out.iter().any(|t| t == "Green Soldier, in line, east."),
+        "on his row: {out:?}"
     );
-    assert!(near <= 12.0, "and tops out at 12 Hz, got {near}");
+    assert_eq!(ticks(&mut plugin), 0, "not facing it: no lock tick");
+
+    // Turned east to face it: the lock tick.
+    said(&mut plugin, &frame(0x0100 + 60, 0x0104, 6), 3);
+    assert!(ticks(&mut plugin) > 0, "facing it: the lock tick");
 }
 
 #[test]
@@ -169,8 +221,8 @@ fn alttp_ball_and_chain_flail_sounds_a_weapon_beacon_while_swinging() {
         b.iter().map(|x| &x.id).collect::<Vec<_>>()
     );
     assert!(
-        b.iter().any(|x| x.id == "enemy"),
-        "the trooper body still sounds the enemy beacon"
+        enemy_heard(&mut plugin).is_some(),
+        "the trooper body still sounds its footsteps"
     );
 
     // Flail tucked in (ai_state 0): no weapon beacon, only the enemy body.
@@ -310,11 +362,7 @@ fn alttp_detects_a_damageable_sprite_the_type_table_does_not_name() {
     }
     plugin.on_frame(&ram, 0); // prime prev (enemy already present)
     plugin.on_frame(&ram, 1);
-    let b = plugin.beacons();
-    assert!(
-        b.iter().any(|b| b.id == "enemy"),
-        "a beacon is placed on it"
-    );
+    assert!(enemy_heard(&mut plugin).is_some(), "its footsteps are heard");
 }
 
 // A frame with a single sprite of `kind` (no health) `dx` pixels east of Link,
@@ -422,28 +470,17 @@ fn alttp_a_wall_muffles_an_enemys_beacon() {
     let mut open = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     open.on_frame(&frame(false), 0);
     open.on_frame(&frame(false), 1);
-    let open_vol = open
-        .beacons()
-        .iter()
-        .find(|b| b.id == "enemy")
-        .expect("a beacon with a clear line")
-        .volume;
+    let open_vol = enemy_heard(&mut open).expect("footsteps with a clear line").2;
 
     // Wall between: the beacon is muffled — present but much quieter — rather
     // than silenced.
     let mut walled = LuaPlugin::load(&r.specs()[0], std::rc::Rc::new(Vec::new())).unwrap();
     walled.on_frame(&frame(true), 0);
     walled.on_frame(&frame(true), 1);
-    let hidden = walled
-        .beacons()
-        .into_iter()
-        .find(|b| b.id == "enemy")
-        .expect("occluded beacon is muffled, not removed");
+    let hidden = enemy_heard(&mut walled).expect("occluded footsteps are muffled, not removed").2;
     assert!(
-        hidden.volume < open_vol * 0.5,
-        "occluded beacon is muffled: {} vs open {}",
-        hidden.volume,
-        open_vol
+        hidden < open_vol * 0.5,
+        "occluded footsteps are muffled: {hidden} vs open {open_vol}"
     );
 }
 
@@ -533,6 +570,24 @@ fn dungeon_frame(link: (u16, u16), door: (u16, u16), walls: &[(u16, u16)]) -> Ve
         }
     }
     ram
+}
+
+/// The nearest enemy's footsteps as last sounded: offset and loudness, or None when no enemy
+/// is heard. Enemies are footsteps now, not a beacon tone, so this is where they are read.
+fn enemy_heard(plugin: &mut LuaPlugin) -> Option<(f32, f32, f32)> {
+    let ram = vec![0u8; 128 * 1024];
+    let r = plugin
+        .eval(
+            "local h = ENEMY.heard.enemy if h == nil then return 'nil' end \
+             return string.format('%f,%f,%f', h.dx, h.dy, h.volume)",
+            &ram,
+        )
+        .unwrap();
+    if r == "nil" {
+        return None;
+    }
+    let f: Vec<f32> = r.split(',').map(|x| x.parse().unwrap()).collect();
+    Some((f[0], f[1], f[2]))
 }
 
 /// The route guide as a beacon-shaped reading: where Toby's carrot sounds from, how loud,
@@ -664,9 +719,10 @@ fn alttp_in_combat_the_guide_ducks_and_only_the_enemy_sounds() {
         !fight.iter().any(|(n, _, _)| n.starts_with("toby/universalbeacons/")),
         "the item hushes in combat: {fight:?}"
     );
+    let _ = ids;
     assert!(
-        ids.contains(&"enemy".to_string()),
-        "the enemy still sounds: {ids:?}"
+        fight.iter().any(|(n, _, _)| n == "step/default"),
+        "the enemy's footsteps still sound: {fight:?}"
     );
 }
 

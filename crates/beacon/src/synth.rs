@@ -98,6 +98,9 @@ pub fn render(name: &str, rate: u32) -> Option<Vec<f32>> {
         // --- Targeting.
         "weapons/lock" => s.square(1200.0, 0.025, 0.4),
 
+        // --- An enemy's footstep: a low thud with a little grit, Toby's step/default.
+        "step/default" => mix(&s.chirp(120.0, 60.0, 0.07, 0.6), &s.noise(0.05, 0.35, 900.0)),
+
         "misc/quickturn" => s.chirp(300.0, 900.0, 0.12, 0.5),
 
         // --- Hits and kills. Beacon's own: Toby's hit markers are commercial games' sounds,
@@ -324,6 +327,7 @@ mod tests {
         "door/deniedred",
         "toby/universalbeacons/key",
         "weapons/lock",
+        "step/default",
         "beacon/hit",
         "beacon/kill",
     ];
